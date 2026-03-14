@@ -41,6 +41,7 @@ use self::realtime::PendingSteerCompareKey;
 use crate::app_event::RealtimeAudioDeviceKind;
 #[cfg(not(target_os = "linux"))]
 use crate::audio_device::list_realtime_audio_device_names;
+use crate::bottom_pane::ActiveAgentStatusSummary;
 use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::StatusLinePreviewData;
 use crate::bottom_pane::StatusLineSetupView;
@@ -1234,6 +1235,11 @@ impl ChatWidget {
     /// user actually looking at?" and the footer stack remains a pure renderer of that decision.
     pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) {
         self.bottom_pane.set_active_agent_label(active_agent_label);
+    }
+
+    /// Forwards the active-agent/open-agent summary into the composer/footer status line.
+    pub(crate) fn set_active_agent_summary(&mut self, summary: Option<ActiveAgentStatusSummary>) {
+        self.bottom_pane.set_active_agent_summary(summary);
     }
 
     /// Recomputes footer status-line content from config and current runtime state.
