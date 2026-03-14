@@ -373,6 +373,7 @@ impl AgentControl {
         Ok(new_thread.thread_id)
     }
 
+    #[cfg(test)]
     pub(crate) async fn fork_agent(
         &self,
         config: Config,
