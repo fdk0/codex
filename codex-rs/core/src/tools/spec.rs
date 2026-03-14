@@ -1147,7 +1147,7 @@ fn create_spawn_agent_tool(config: &ToolsConfig) -> ToolSpec {
 - For code-edit subtasks, decompose work so each delegated task has a disjoint write set.
 
 ### After you delegate
-- Call wait very sparingly. Only call wait when you need the result immediately for the next critical-path step and you are blocked until it returns.
+- Call wait_agent very sparingly. Only call wait_agent when you need the result immediately for the next critical-path step and you are blocked until it returns.
 - Do not redo delegated subagent tasks yourself; focus on integrating results or tackling non-overlapping work.
 - While the subagent is running in the background, do meaningful non-overlapping work immediately.
 - Do not repeatedly wait by reflex.
@@ -1387,7 +1387,7 @@ fn create_resume_agent_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "resume_agent".to_string(),
         description:
-            "Resume a previously closed agent by id so it can receive send_input and wait calls."
+            "Resume a previously closed agent by id so it can receive send_input and wait_agent calls."
                 .to_string(),
         strict: false,
         defer_loading: None,
@@ -1486,14 +1486,14 @@ fn create_list_agents_tool(agent_watchdog: bool) -> ToolSpec {
 
 fn create_wait_tool(agent_watchdog: bool) -> ToolSpec {
     let ids_description = if agent_watchdog {
-        "Agent ids to wait on. Pass multiple ids to wait for whichever finishes first. Watchdog handle ids are status-only here: if all ids are watchdog handles, wait returns an immediate correction instead of blocking; if mixed with normal agent ids, wait still waits on normal agents and includes current watchdog statuses."
+        "Agent ids to wait on. Pass multiple ids to wait for whichever finishes first. Watchdog handle ids are status-only here: if all ids are watchdog handles, wait_agent returns an immediate correction instead of blocking; if mixed with normal agent ids, wait_agent still waits on normal agents and includes current watchdog statuses."
     } else {
         "Agent ids to wait on. Pass multiple ids to wait for whichever finishes first."
     };
     let description = if agent_watchdog {
         "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Watchdog handles cannot be waited on for new check-ins, and sleeping or polling cannot make a watchdog fire while the current turn is active."
     } else {
-        "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out."
+        "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status."
     };
     let mut properties = BTreeMap::new();
     properties.insert(
@@ -1513,7 +1513,7 @@ fn create_wait_tool(agent_watchdog: bool) -> ToolSpec {
     );
 
     ToolSpec::Function(ResponsesApiTool {
-        name: "wait".to_string(),
+        name: "wait_agent".to_string(),
         description: description.to_string(),
         strict: false,
         defer_loading: None,
@@ -3099,7 +3099,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
                 Arc::new(CompactParentContextHandler),
             );
         }
-        builder.register_handler("wait", Arc::new(WaitHandler));
+        builder.register_handler("wait_agent", Arc::new(WaitHandler));
         builder.register_handler("close_agent", Arc::new(CloseAgentHandler));
     }
 

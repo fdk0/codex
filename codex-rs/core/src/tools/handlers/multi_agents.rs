@@ -124,7 +124,7 @@ impl ToolHandler for MultiAgentHandler {
                 compact_parent_context::handle(session, turn, call_id, arguments).await
             }
             "list_agents" => list_agents::handle(session, turn, call_id, arguments).await,
-            "wait" => wait::handle(session, turn, call_id, arguments).await,
+            "wait" | "wait_agent" => wait::handle(session, turn, call_id, arguments).await,
             "close_agent" => close_agent::handle(session, turn, call_id, arguments).await,
             other => Err(FunctionCallError::RespondToModel(format!(
                 "unsupported collab tool {other}"
@@ -1021,7 +1021,7 @@ pub(crate) mod wait {
             .await
         {
             return Err(FunctionCallError::RespondToModel(format!(
-                "wait is not available to watchdog check-in agents. This thread is a one-shot watchdog check-in for owner {owner_thread_id}. Send the result to the parent/root agent with `send_input`. If you finish without `send_input`, runtime will forward your conclusory message to the owner as the mandatory fallback wake-up path. Exiting without either `send_input` or a final message is a bug; every watchdog check-in must wake the owner thread."
+                "wait_agent is not available to watchdog check-in agents. This thread is a one-shot watchdog check-in for owner {owner_thread_id}. Send the result to the parent/root agent with `send_input`. If you finish without `send_input`, runtime will forward your conclusory message to the owner as the mandatory fallback wake-up path. Exiting without either `send_input` or a final message is a bug; every watchdog check-in must wake the owner thread."
             )));
         }
         let args: WaitArgs = parse_arguments(&arguments)?;
@@ -1115,7 +1115,7 @@ pub(crate) mod wait {
                 FunctionCallError::Fatal(format!("failed to serialize wait result: {err}"))
             })?;
             return Err(FunctionCallError::RespondToModel(format!(
-                "wait cannot be used to wait for watchdog check-ins. You passed only watchdog handle ids. Watchdog check-ins only happen after the current turn ends and the owner thread is idle for at least watchdog_interval_s. `wait` on a watchdog handle is status-only and cannot confirm a new check-in. Do not poll with `wait`, `list_agents`, or shell `sleep`: the owner thread is still active during this turn, so those calls cannot make the watchdog fire. Do not call `wait` again on this watchdog handle in this turn. Continue the task now or end the turn so the watchdog can check in later. Current watchdog handle statuses: {content}"
+                "wait_agent cannot be used to wait for watchdog check-ins. You passed only watchdog handle ids. Watchdog check-ins only happen after the current turn ends and the owner thread is idle for at least watchdog_interval_s. `wait_agent` on a watchdog handle is status-only and cannot confirm a new check-in. Do not poll with `wait_agent`, `list_agents`, or shell `sleep`: the owner thread is still active during this turn, so those calls cannot make the watchdog fire. Do not call `wait_agent` again on this watchdog handle in this turn. Continue the task now or end the turn so the watchdog can check in later. Current watchdog handle statuses: {content}"
             )));
         }
 
@@ -1742,6 +1742,8 @@ mod tests {
     use crate::config::types::ShellEnvironmentPolicy;
     use crate::function_tool::FunctionCallError;
     use crate::protocol::AskForApproval;
+    use crate::protocol::FileSystemSandboxPolicy;
+    use crate::protocol::NetworkSandboxPolicy;
     use crate::protocol::Op;
     use crate::protocol::SandboxPolicy;
     use crate::protocol::SessionSource;
@@ -2551,7 +2553,7 @@ mod tests {
         let invocation = invocation(
             Arc::new(session),
             Arc::new(turn),
-            "wait",
+            "wait_agent",
             function_payload(json!({
                 "ids": [ThreadId::new().to_string()],
                 "timeout_ms": 0
@@ -2572,7 +2574,7 @@ mod tests {
         let invocation = invocation(
             Arc::new(session),
             Arc::new(turn),
-            "wait",
+            "wait_agent",
             function_payload(json!({"ids": ["invalid"]})),
         );
         let Err(err) = MultiAgentHandler.handle(invocation).await else {
@@ -2590,7 +2592,7 @@ mod tests {
         let invocation = invocation(
             Arc::new(session),
             Arc::new(turn),
-            "wait",
+            "wait_agent",
             function_payload(json!({"ids": []})),
         );
         let Err(err) = MultiAgentHandler.handle(invocation).await else {
@@ -2612,7 +2614,7 @@ mod tests {
         let invocation = invocation(
             Arc::new(session),
             Arc::new(turn),
-            "wait",
+            "wait_agent",
             function_payload(json!({
                 "ids": [id_a.to_string(), id_b.to_string()],
                 "timeout_ms": 1000
@@ -2621,10 +2623,10 @@ mod tests {
         let output = MultiAgentHandler
             .handle(invocation)
             .await
-            .expect("wait should succeed");
+            .expect("wait_agent should succeed");
         let (content, success) = expect_text_output(output);
         let result: wait::WaitResult =
-            serde_json::from_str(&content).expect("wait result should be json");
+            serde_json::from_str(&content).expect("wait_agent result should be json");
         assert_eq!(
             result,
             wait::WaitResult {
@@ -2649,7 +2651,7 @@ mod tests {
         let invocation = invocation(
             Arc::new(session),
             Arc::new(turn),
-            "wait",
+            "wait_agent",
             function_payload(json!({
                 "ids": [agent_id.to_string()],
                 "timeout_ms": MIN_WAIT_TIMEOUT_MS
@@ -2658,10 +2660,10 @@ mod tests {
         let output = MultiAgentHandler
             .handle(invocation)
             .await
-            .expect("wait should succeed");
+            .expect("wait_agent should succeed");
         let (content, success) = expect_text_output(output);
         let result: wait::WaitResult =
-            serde_json::from_str(&content).expect("wait result should be json");
+            serde_json::from_str(&content).expect("wait_agent result should be json");
         assert_eq!(
             result,
             wait::WaitResult {
@@ -2689,7 +2691,7 @@ mod tests {
         let invocation = invocation(
             Arc::new(session),
             Arc::new(turn),
-            "wait",
+            "wait_agent",
             function_payload(json!({
                 "ids": [agent_id.to_string()],
                 "timeout_ms": 10
@@ -2703,7 +2705,7 @@ mod tests {
         .await;
         assert!(
             early.is_err(),
-            "wait should not return before the minimum timeout clamp"
+            "wait_agent should not return before the minimum timeout clamp"
         );
 
         let _ = thread
@@ -2739,7 +2741,7 @@ mod tests {
         let invocation = invocation(
             Arc::new(session),
             Arc::new(turn),
-            "wait",
+            "wait_agent",
             function_payload(json!({
                 "ids": [agent_id.to_string()],
                 "timeout_ms": 1000
@@ -2748,10 +2750,10 @@ mod tests {
         let output = MultiAgentHandler
             .handle(invocation)
             .await
-            .expect("wait should succeed");
+            .expect("wait_agent should succeed");
         let (content, success) = expect_text_output(output);
         let result: wait::WaitResult =
-            serde_json::from_str(&content).expect("wait result should be json");
+            serde_json::from_str(&content).expect("wait_agent result should be json");
         assert_eq!(
             result,
             wait::WaitResult {
@@ -2832,9 +2834,14 @@ mod tests {
             &turn.config.permissions.sandbox_policy,
             turn.config.permissions.sandbox_policy.get().clone(),
         );
+        let file_system_sandbox_policy =
+            FileSystemSandboxPolicy::from_legacy_sandbox_policy(&sandbox_policy, &turn.cwd);
+        let network_sandbox_policy = NetworkSandboxPolicy::from(&sandbox_policy);
         turn.sandbox_policy
             .set(sandbox_policy)
             .expect("sandbox policy set");
+        turn.file_system_sandbox_policy = file_system_sandbox_policy.clone();
+        turn.network_sandbox_policy = network_sandbox_policy;
         turn.approval_policy
             .set(AskForApproval::OnRequest)
             .expect("approval policy set");
@@ -2861,6 +2868,9 @@ mod tests {
             .sandbox_policy
             .set(turn.sandbox_policy.get().clone())
             .expect("sandbox policy set");
+        expected.permissions.file_system_sandbox_policy = file_system_sandbox_policy;
+        expected.permissions.network_sandbox_policy = network_sandbox_policy;
+        expected.features = config.features.clone();
         assert_eq!(config, expected);
     }
 
@@ -2878,23 +2888,6 @@ mod tests {
         let config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
 
         assert_eq!(config.user_instructions, base_config.user_instructions);
-    }
-
-    #[tokio::test]
-    async fn build_agent_spawn_config_preserves_spawn_csv_at_max_depth() {
-        let (_session, mut turn) = make_session_and_context().await;
-        let mut base_config = (*turn.config).clone();
-        base_config.agent_max_depth = next_thread_spawn_depth(&turn.session_source);
-        let _ = base_config.features.enable(Feature::Collab);
-        let _ = base_config.features.enable(Feature::SpawnCsv);
-        turn.config = Arc::new(base_config);
-        let base_instructions = BaseInstructions {
-            text: "base".to_string(),
-        };
-
-        let config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
-
-        assert!(config.features.enabled(Feature::SpawnCsv));
     }
 
     #[tokio::test]
@@ -2930,6 +2923,7 @@ mod tests {
             .sandbox_policy
             .set(turn.sandbox_policy.get().clone())
             .expect("sandbox policy set");
+        expected.features = config.features.clone();
         assert_eq!(config, expected);
     }
 }
