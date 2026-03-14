@@ -53,6 +53,7 @@ use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::plan_tool::PlanItemArg;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::McpAuthStatus;
 use codex_protocol::protocol::McpInvocation;
@@ -1973,6 +1974,49 @@ pub(crate) fn new_info_event(message: String, hint: Option<String>) -> PlainHist
     PlainHistoryCell { lines }
 }
 
+const SUBAGENT_NOTIFICATION_OPEN_TAG: &str = "<subagent_notification>";
+const SUBAGENT_NOTIFICATION_CLOSE_TAG: &str = "</subagent_notification>";
+
+#[derive(serde::Deserialize)]
+struct SubagentNotificationPayload {
+    agent_id: String,
+    status: AgentStatus,
+}
+
+fn parse_subagent_notification_message(message: &str) -> Option<SubagentNotificationPayload> {
+    let trimmed = message.trim();
+    let body = trimmed
+        .strip_prefix(SUBAGENT_NOTIFICATION_OPEN_TAG)?
+        .strip_suffix(SUBAGENT_NOTIFICATION_CLOSE_TAG)?
+        .trim();
+    serde_json::from_str(body).ok()
+}
+
+pub(crate) fn format_subagent_notification_for_display(message: &str) -> Option<String> {
+    let notification = parse_subagent_notification_message(message)?;
+    let title = match &notification.status {
+        AgentStatus::PendingInit => "Subagent pending init",
+        AgentStatus::Running => "Subagent running",
+        AgentStatus::Completed(_) => "Subagent completed",
+        AgentStatus::Errored(_) => "Subagent errored",
+        AgentStatus::Shutdown => "Subagent shutdown",
+        AgentStatus::NotFound => "Subagent not found",
+    };
+    let detail = match notification.status {
+        AgentStatus::PendingInit
+        | AgentStatus::Running
+        | AgentStatus::Shutdown
+        | AgentStatus::NotFound => None,
+        AgentStatus::Completed(message) => message.filter(|text| !text.trim().is_empty()),
+        AgentStatus::Errored(message) => Some(message),
+    };
+
+    Some(match detail {
+        Some(detail) => format!("{title}\nAgent: {}\n\n{detail}", notification.agent_id),
+        None => format!("{title}\nAgent: {}", notification.agent_id),
+    })
+}
+
 pub(crate) fn new_error_event(message: String) -> PlainHistoryCell {
     // Use a hair space (U+200A) to create a subtle, near-invisible separation
     // before the text. VS16 is intentionally omitted to keep spacing tighter
@@ -2565,6 +2609,24 @@ mod tests {
     use rmcp::model::Content;
 
     const SMALL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn format_subagent_notification_for_display_formats_completed_message() {
+        let message = r#"<subagent_notification>{"agent_id":"child-1","status":{"completed":"done"}}</subagent_notification>"#;
+        assert_eq!(
+            format_subagent_notification_for_display(message),
+            Some("Subagent completed\nAgent: child-1\n\ndone".to_string())
+        );
+    }
+
+    #[test]
+    fn format_subagent_notification_for_display_returns_none_for_plain_text() {
+        assert_eq!(
+            format_subagent_notification_for_display("plain agent message"),
+            None
+        );
+    }
+
     async fn test_config() -> Config {
         let codex_home = std::env::temp_dir();
         ConfigBuilder::default()

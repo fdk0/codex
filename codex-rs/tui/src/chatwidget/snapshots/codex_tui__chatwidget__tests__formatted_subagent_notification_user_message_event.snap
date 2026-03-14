@@ -1,0 +1,10 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: rendered
+---
+• Subagent completed
+Agent: 00000000-0000-0000-0000-000000000141
+
+PR #141 finished monitoring.
+- Overall state: OPEN
+- Ready to merge: yes
