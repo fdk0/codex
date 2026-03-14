@@ -2740,8 +2740,12 @@ impl Config {
             model,
             service_tier,
             review_model,
-            model_context_window: cfg.model_context_window,
-            model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
+            model_context_window: config_profile
+                .model_context_window
+                .or(cfg.model_context_window),
+            model_auto_compact_token_limit: config_profile
+                .model_auto_compact_token_limit
+                .or(cfg.model_auto_compact_token_limit),
             model_provider_id,
             model_provider,
             cwd: resolved_cwd,
@@ -2791,7 +2795,9 @@ impl Config {
                     }
                 })
                 .collect(),
-            tool_output_token_limit: cfg.tool_output_token_limit,
+            tool_output_token_limit: config_profile
+                .tool_output_token_limit
+                .or(cfg.tool_output_token_limit),
             agent_max_threads,
             agent_max_depth,
             agent_roles,
