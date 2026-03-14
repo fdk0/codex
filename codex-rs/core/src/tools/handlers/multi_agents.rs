@@ -16,6 +16,10 @@ use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::default_spawn_mode_for_role;
 use crate::codex::Session;
 use crate::codex::TurnContext;
+use crate::config::Config;
+use crate::config::types::AgentWaitOnWakeEnabledBehavior;
+use crate::error::CodexErr;
+use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
@@ -324,7 +328,7 @@ mod spawn {
     }
 
     #[derive(Debug, Deserialize)]
-    struct SpawnAgentArgs {
+    pub(super) struct SpawnAgentArgs {
         message: Option<String>,
         items: Option<Vec<UserInput>>,
         agent_type: Option<String>,
@@ -332,6 +336,7 @@ mod spawn {
         reasoning_effort: Option<ReasoningEffort>,
         #[serde(default)]
         fork_context: bool,
+        pub(super) wake_parent_on_completion: Option<bool>,
         #[serde(default, alias = "mode")]
         spawn_mode: Option<SpawnMode>,
     }
@@ -364,6 +369,9 @@ mod spawn {
             .unwrap_or(default_spawn_mode);
         let input_items = parse_collab_input(args.message, args.items)?;
         let prompt = input_preview(&input_items);
+        let wake_parent_on_completion = args
+            .wake_parent_on_completion
+            .unwrap_or(turn.config.agent_wake_parent_on_completion_default);
         let session_source = turn.session_source.clone();
         let child_depth = next_thread_spawn_depth(&session_source);
         let max_depth = turn.config.agent_max_depth;
@@ -428,7 +436,15 @@ mod spawn {
                 session
                     .services
                     .agent_control
-                    .spawn_agent(config, input_items, Some(spawn_source))
+                    .spawn_agent_with_options(
+                        config,
+                        input_items,
+                        Some(spawn_source),
+                        SpawnAgentOptions {
+                            wake_parent_on_completion,
+                            ..Default::default()
+                        },
+                    )
                     .await
             }
             SpawnMode::Fork if args.fork_context => {
@@ -441,6 +457,7 @@ mod spawn {
                         Some(spawn_source),
                         SpawnAgentOptions {
                             fork_parent_spawn_call_id: Some(call_id.clone()),
+                            wake_parent_on_completion,
                         },
                     )
                     .await
@@ -449,12 +466,16 @@ mod spawn {
                 session
                     .services
                     .agent_control
-                    .fork_agent(
+                    .fork_agent_with_options(
                         config,
                         input_items,
                         session.conversation_id,
                         usize::MAX,
                         spawn_source,
+                        SpawnAgentOptions {
+                            wake_parent_on_completion,
+                            ..Default::default()
+                        },
                     )
                     .await
             }
@@ -1031,6 +1052,27 @@ pub(crate) mod wait {
             .iter()
             .map(|id| agent_id(id))
             .collect::<Result<Vec<_>, _>>()?;
+        let wake_enabled_children = session
+            .services
+            .agent_control
+            .wake_enabled_children_for_parent(session.conversation_id, &requested_thread_ids)
+            .await;
+        if !wake_enabled_children.is_empty()
+            && matches!(
+                turn.config.agent_wait_on_wake_enabled_behavior,
+                AgentWaitOnWakeEnabledBehavior::Reject
+            )
+        {
+            let ids = wake_enabled_children
+                .iter()
+                .map(ThreadId::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(FunctionCallError::RespondToModel(format!(
+                "wait is disabled for wake-enabled child agents by current configuration. These child threads already have wake_parent_on_completion enabled for parent {}: {ids}. End the current turn and rely on the automatic wake path instead, or set agents.wait_on_wake_enabled = \"allow\" / spawn the child with wake_parent_on_completion=false when you explicitly want polling.",
+                session.conversation_id
+            )));
+        }
         let event_receiver_thread_ids = requested_thread_ids.clone();
         let watchdog_target_ids = session
             .services
@@ -1883,6 +1925,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn spawn_agent_leaves_parent_wake_unspecified_when_flag_is_omitted() {
+        let args: spawn::SpawnAgentArgs =
+            parse_arguments(r#"{"message":"hello"}"#).expect("arguments should parse");
+        assert_eq!(args.wake_parent_on_completion, None);
+    }
+
+    #[test]
+    fn spawn_agent_allows_explicit_parent_wake_disable() {
+        let args: spawn::SpawnAgentArgs =
+            parse_arguments(r#"{"message":"hello","wake_parent_on_completion":false}"#)
+                .expect("arguments should parse");
+        assert_eq!(args.wake_parent_on_completion, Some(false));
+    }
+
     #[tokio::test]
     async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
         #[derive(Debug, Deserialize)]
@@ -2243,6 +2300,107 @@ mod tests {
             panic!("expected respond-to-model error");
         };
         assert!(msg.starts_with("invalid agent id not-a-uuid:"));
+    }
+
+    #[tokio::test]
+    async fn wait_rejects_wake_enabled_child_agents() {
+        #[derive(Debug, Deserialize)]
+        struct SpawnAgentResult {
+            agent_id: String,
+        }
+
+        let (mut session, mut turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let mut config = (*turn.config).clone();
+        config.agent_wait_on_wake_enabled_behavior = AgentWaitOnWakeEnabledBehavior::Reject;
+        turn.config = Arc::new(config);
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        let spawn_invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message":"hello child",
+                "wake_parent_on_completion": true
+            })),
+        );
+        let output = MultiAgentHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("spawn_agent should succeed");
+        let (content, _) = expect_text_output(output);
+        let spawn_result: SpawnAgentResult =
+            serde_json::from_str(&content).expect("spawn result should be json");
+
+        let wait_invocation = invocation(
+            session,
+            turn,
+            "wait",
+            function_payload(json!({"ids":[spawn_result.agent_id],"timeout_ms":10000})),
+        );
+        let Err(err) = MultiAgentHandler.handle(wait_invocation).await else {
+            panic!("wait should be rejected for wake-enabled child");
+        };
+        let FunctionCallError::RespondToModel(message) = err else {
+            panic!("expected respond-to-model error");
+        };
+        assert!(message.contains("wake_parent_on_completion"));
+        assert!(message.contains("disabled for wake-enabled child agents"));
+    }
+
+    #[tokio::test]
+    async fn wait_allows_wake_enabled_child_agents_when_configured() {
+        #[derive(Debug, Deserialize)]
+        struct SpawnAgentResult {
+            agent_id: String,
+        }
+
+        let (mut session, mut turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let mut config = (*turn.config).clone();
+        config.agent_wait_on_wake_enabled_behavior = AgentWaitOnWakeEnabledBehavior::Allow;
+        turn.config = Arc::new(config);
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        let spawn_invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message":"hello child",
+                "wake_parent_on_completion": true
+            })),
+        );
+        let output = MultiAgentHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("spawn_agent should succeed");
+        let (content, _) = expect_text_output(output);
+        let spawn_result: SpawnAgentResult =
+            serde_json::from_str(&content).expect("spawn result should be json");
+
+        let wait_invocation = invocation(
+            session,
+            turn,
+            "wait",
+            function_payload(json!({"ids":[spawn_result.agent_id],"timeout_ms":10})),
+        );
+        let output = MultiAgentHandler
+            .handle(wait_invocation)
+            .await
+            .expect("wait should be allowed when configured");
+        let (content, _) = expect_text_output(output);
+        let result: wait::WaitResult =
+            serde_json::from_str(&content).expect("wait result should be json");
+        assert!(
+            result.timed_out || !result.status.is_empty(),
+            "wait should either time out cleanly or return a final status for the wake-enabled child"
+        );
     }
 
     #[tokio::test]

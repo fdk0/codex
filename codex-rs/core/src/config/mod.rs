@@ -1,6 +1,8 @@
 use crate::auth::AuthCredentialsStoreMode;
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
+use crate::config::types::AgentWaitOnWakeEnabledBehavior;
+use crate::config::types::AgentWakeDescendantPolicy;
 use crate::config::types::AppsConfigToml;
 use crate::config::types::DEFAULT_OTEL_ENVIRONMENT;
 use crate::config::types::History;
@@ -451,6 +453,15 @@ pub struct Config {
     /// as a synthetic function_call/function_call_output pair instead of plain
     /// user input.
     pub agent_use_function_call_inbox: bool,
+
+    /// Default value used when `spawn_agent` omits `wake_parent_on_completion`.
+    pub agent_wake_parent_on_completion_default: bool,
+
+    /// Whether waiting on wake-enabled child agents is allowed or rejected.
+    pub agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior,
+
+    /// Whether a child may wake its parent before all descendants finish.
+    pub agent_wake_descendant_policy: AgentWakeDescendantPolicy,
 
     /// Watchdog polling interval in seconds.
     pub watchdog_interval_s: i64,
@@ -1610,6 +1621,14 @@ pub struct AgentsToml {
     /// function_call/function_call_output pair instead of plain user input.
     #[serde(default)]
     pub use_function_call_inbox: bool,
+    /// Default value used when `spawn_agent` omits `wake_parent_on_completion`.
+    pub wake_parent_on_completion_default: Option<bool>,
+    /// Whether `wait(...)` is allowed for child agents that already wake their parent.
+    #[serde(default)]
+    pub wait_on_wake_enabled: AgentWaitOnWakeEnabledBehavior,
+    /// Whether a child may wake its parent before all descendants finish.
+    #[serde(default)]
+    pub wake_descendant_policy: AgentWakeDescendantPolicy,
 
     /// User-defined role declarations keyed by role name.
     ///
@@ -2383,6 +2402,23 @@ impl Config {
             .and_then(|agents| agents.job_max_runtime_seconds)
             .or(DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS);
         let agent_use_function_call_inbox = features.enabled(Feature::AgentFunctionCallInbox);
+        let agent_wake_parent_on_completion_default = cfg
+            .agents
+            .as_ref()
+            .and_then(|agents| agents.wake_parent_on_completion_default)
+            .unwrap_or(false);
+        let agent_wait_on_wake_enabled_behavior = cfg
+            .agents
+            .as_ref()
+            .map_or_else(AgentWaitOnWakeEnabledBehavior::default, |agents| {
+                agents.wait_on_wake_enabled
+            });
+        let agent_wake_descendant_policy = cfg
+            .agents
+            .as_ref()
+            .map_or_else(AgentWakeDescendantPolicy::default, |agents| {
+                agents.wake_descendant_policy
+            });
         if agent_job_max_runtime_seconds == Some(0) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -2682,6 +2718,9 @@ impl Config {
             memories: cfg.memories.unwrap_or_default().into(),
             agent_job_max_runtime_seconds,
             agent_use_function_call_inbox,
+            agent_wake_parent_on_completion_default,
+            agent_wait_on_wake_enabled_behavior,
+            agent_wake_descendant_policy,
             watchdog_interval_s,
             codex_home,
             sqlite_home,

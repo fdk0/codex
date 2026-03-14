@@ -2,6 +2,7 @@ use super::watchdog::RemovedWatchdog;
 use super::watchdog::WatchdogManager;
 use super::watchdog::WatchdogRegistration;
 use crate::agent::AgentStatus;
+use crate::agent::agent_status_from_event;
 use crate::agent::guards::Guards;
 use crate::agent::registry::AgentMetadata;
 use crate::agent::role::DEFAULT_ROLE_NAME;
@@ -9,10 +10,12 @@ use crate::agent::role::resolve_role_config;
 use crate::agent::status::is_final;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::Config;
+use crate::config::types::AgentWakeDescendantPolicy;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
 use crate::find_archived_thread_path_by_id_str;
 use crate::find_thread_path_by_id_str;
+use crate::protocol::Event;
 use crate::rollout::RolloutRecorder;
 use crate::session_prefix::format_subagent_context_line;
 use crate::session_prefix::format_subagent_notification_message;
@@ -54,6 +57,18 @@ const FORKED_SPAWN_AGENT_OUTPUT_MESSAGE: &str = "You are the newly spawned agent
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_parent_spawn_call_id: Option<String>,
+    pub(crate) wake_parent_on_completion: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ParentWakeSubscription {
+    parent_thread_id: ThreadId,
+    last_wake_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ParentWakePreference {
+    wake_parent_on_completion: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +118,8 @@ pub(crate) struct AgentControl {
     guards: Arc<Guards>,
     watchdogs: Arc<WatchdogManager>,
     watchdog_compactions_in_progress: Arc<Mutex<HashSet<ThreadId>>>,
+    parent_wake_subscriptions: Arc<Mutex<HashMap<ThreadId, ParentWakeSubscription>>>,
+    parent_wake_preferences: Arc<Mutex<HashMap<ThreadId, ParentWakePreference>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +173,8 @@ impl AgentControl {
             guards,
             watchdogs,
             watchdog_compactions_in_progress: Arc::new(Mutex::new(HashSet::new())),
+            parent_wake_subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            parent_wake_preferences: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -315,19 +334,19 @@ impl AgentControl {
             notification_source.as_ref(),
         )
         .await;
-
-        self.send_input(new_thread.thread_id, items).await?;
-        let child_reference = agent_metadata
-            .agent_path
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| new_thread.thread_id.to_string());
-        self.maybe_start_completion_watcher(
+        self.register_parent_wake_subscription(
             new_thread.thread_id,
-            notification_source,
-            child_reference,
-            agent_metadata.agent_path.clone(),
-        );
+            notification_source.as_ref(),
+            options.wake_parent_on_completion,
+        )
+        .await;
+        if let Err(err) = self.send_input(new_thread.thread_id, items).await {
+            self.clear_parent_wake_state(new_thread.thread_id).await;
+            return Err(err);
+        }
+        if !options.wake_parent_on_completion {
+            self.maybe_start_completion_watcher(new_thread.thread_id, notification_source);
+        }
 
         Ok(LiveAgent {
             thread_id: new_thread.thread_id,
@@ -377,6 +396,26 @@ impl AgentControl {
         _nth_user_message: usize,
         session_source: SessionSource,
     ) -> CodexResult<ThreadId> {
+        self.fork_agent_with_options(
+            config,
+            items,
+            parent_thread_id,
+            _nth_user_message,
+            session_source,
+            SpawnAgentOptions::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn fork_agent_with_options(
+        &self,
+        config: Config,
+        items: Vec<UserInput>,
+        parent_thread_id: ThreadId,
+        _nth_user_message: usize,
+        session_source: SessionSource,
+        options: SpawnAgentOptions,
+    ) -> CodexResult<ThreadId> {
         let state = self.upgrade()?;
         let reservation = self
             .reserve_spawn_slot_with_reconcile(&state, config.agent_max_threads)
@@ -416,14 +455,26 @@ impl AgentControl {
                 config,
                 initial_history,
                 self.clone(),
-                session_source,
+                session_source.clone(),
                 false,
                 inherited_shell_snapshot,
             )
             .await?;
         reservation.commit(new_thread.thread_id);
         state.notify_thread_created(new_thread.thread_id);
-        self.send_input(new_thread.thread_id, items).await?;
+        self.register_parent_wake_subscription(
+            new_thread.thread_id,
+            Some(&session_source),
+            options.wake_parent_on_completion,
+        )
+        .await;
+        if let Err(err) = self.send_input(new_thread.thread_id, items).await {
+            self.clear_parent_wake_state(new_thread.thread_id).await;
+            return Err(err);
+        }
+        if !options.wake_parent_on_completion {
+            self.maybe_start_completion_watcher(new_thread.thread_id, Some(session_source));
+        }
         Ok(new_thread.thread_id)
     }
 
@@ -582,23 +633,32 @@ impl AgentControl {
         // Resumed threads are re-registered in-memory and need the same listener
         // attachment path as freshly spawned threads.
         state.notify_thread_created(resumed_thread.thread_id);
-        let child_reference = agent_metadata
-            .agent_path
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| resumed_thread.thread_id.to_string());
-        self.maybe_start_completion_watcher(
-            resumed_thread.thread_id,
-            Some(notification_source.clone()),
-            child_reference,
-            agent_metadata.agent_path.clone(),
-        );
         self.persist_thread_spawn_edge_for_source(
             resumed_thread.thread.as_ref(),
             resumed_thread.thread_id,
             Some(&notification_source),
         )
         .await;
+        let resumed_snapshot = resumed_thread.thread.config_snapshot().await;
+        let wake_parent_on_completion = self
+            .wake_parent_on_completion_for_thread(
+                resumed_thread.thread_id,
+                Some(&notification_source),
+                resumed_snapshot.agent_wake_parent_on_completion_default,
+            )
+            .await;
+        self.register_parent_wake_subscription(
+            resumed_thread.thread_id,
+            Some(&notification_source),
+            wake_parent_on_completion,
+        )
+        .await;
+        if !wake_parent_on_completion {
+            self.maybe_start_completion_watcher(
+                resumed_thread.thread_id,
+                Some(notification_source),
+            );
+        }
 
         Ok(resumed_thread.thread_id)
     }
@@ -785,10 +845,12 @@ impl AgentControl {
         if let Some(removed_watchdog) = self.watchdogs.unregister(agent_id).await
             && let Some(helper_id) = removed_watchdog.active_helper_id
         {
+            self.clear_parent_wake_state(helper_id).await;
             let _ = state.send_op(helper_id, Op::Shutdown {}).await;
             let _ = state.remove_thread(&helper_id).await;
             self.guards.release_spawned_thread(helper_id);
         }
+        self.clear_parent_wake_state(agent_id).await;
         let _ = state.remove_thread(&agent_id).await;
         self.guards.release_spawned_thread(agent_id);
         result
@@ -938,15 +1000,19 @@ impl AgentControl {
         &self,
         child_thread_id: ThreadId,
         session_source: Option<SessionSource>,
-        child_reference: String,
-        child_agent_path: Option<AgentPath>,
     ) {
         let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id, ..
+            parent_thread_id,
+            agent_path,
+            ..
         })) = session_source
         else {
             return;
         };
+        let child_reference = agent_path
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| child_thread_id.to_string());
         let control = self.clone();
         tokio::spawn(async move {
             let status = match control.subscribe_status(child_thread_id).await {
@@ -971,7 +1037,7 @@ impl AgentControl {
                 return;
             };
             let child_thread = state.get_thread(child_thread_id).await.ok();
-            if let Some(child_agent_path) = child_agent_path
+            if let Some(child_agent_path) = agent_path
                 && child_thread
                     .as_ref()
                     .map(|thread| thread.enabled(Feature::MultiAgentV2))
@@ -986,7 +1052,7 @@ impl AgentControl {
                 let Ok(parent_agent_path) = AgentPath::try_from(parent_path) else {
                     return;
                 };
-                let Some(parent_thread_id) = control.state.agent_id_for_path(&parent_agent_path)
+                let Some(parent_thread_id) = control.guards.agent_id_for_path(&parent_agent_path)
                 else {
                     return;
                 };
@@ -1052,6 +1118,147 @@ impl AgentControl {
             agent_role,
         };
         Ok((session_source, agent_metadata))
+    }
+
+    async fn register_parent_wake_subscription(
+        &self,
+        child_thread_id: ThreadId,
+        session_source: Option<&SessionSource>,
+        wake_parent_on_completion: bool,
+    ) {
+        let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id, ..
+        })) = session_source
+        else {
+            return;
+        };
+        self.parent_wake_preferences.lock().await.insert(
+            child_thread_id,
+            ParentWakePreference {
+                wake_parent_on_completion,
+            },
+        );
+        let mut subscriptions = self.parent_wake_subscriptions.lock().await;
+        if wake_parent_on_completion {
+            subscriptions.insert(
+                child_thread_id,
+                ParentWakeSubscription {
+                    parent_thread_id: *parent_thread_id,
+                    last_wake_key: None,
+                },
+            );
+        } else {
+            subscriptions.remove(&child_thread_id);
+        }
+    }
+
+    async fn wake_parent_on_completion_for_thread(
+        &self,
+        child_thread_id: ThreadId,
+        session_source: Option<&SessionSource>,
+        fallback_default: bool,
+    ) -> bool {
+        if let Some(preference) = self
+            .parent_wake_preferences
+            .lock()
+            .await
+            .get(&child_thread_id)
+        {
+            return preference.wake_parent_on_completion;
+        }
+        matches!(
+            session_source,
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }))
+        ) && fallback_default
+    }
+
+    async fn clear_parent_wake_state(&self, child_thread_id: ThreadId) {
+        self.parent_wake_subscriptions
+            .lock()
+            .await
+            .remove(&child_thread_id);
+        self.parent_wake_preferences
+            .lock()
+            .await
+            .remove(&child_thread_id);
+    }
+
+    pub(crate) async fn wake_enabled_children_for_parent(
+        &self,
+        parent_thread_id: ThreadId,
+        child_thread_ids: &[ThreadId],
+    ) -> Vec<ThreadId> {
+        let subscriptions = self.parent_wake_subscriptions.lock().await;
+        child_thread_ids
+            .iter()
+            .copied()
+            .filter(|child_thread_id| {
+                subscriptions
+                    .get(child_thread_id)
+                    .is_some_and(|subscription| subscription.parent_thread_id == parent_thread_id)
+            })
+            .collect()
+    }
+
+    pub(crate) async fn maybe_wake_parent_for_event(
+        &self,
+        child_thread_id: ThreadId,
+        event: &Event,
+    ) {
+        let Some(status) = agent_status_from_event(&event.msg) else {
+            return;
+        };
+        if !is_final(&status) {
+            return;
+        }
+        let wake_key = match &event.msg {
+            codex_protocol::protocol::EventMsg::TurnComplete(_) => {
+                Some(format!("turn_complete:{}", event.id))
+            }
+            codex_protocol::protocol::EventMsg::ShutdownComplete => {
+                Some(format!("shutdown_complete:{}", event.id))
+            }
+            codex_protocol::protocol::EventMsg::Error(_) => Some(format!("error:{}", event.id)),
+            _ => None,
+        };
+        let Some(wake_key) = wake_key else {
+            return;
+        };
+
+        let Ok(state) = self.upgrade() else {
+            return;
+        };
+        let Ok(child_thread) = state.get_thread(child_thread_id).await else {
+            return;
+        };
+        let child_snapshot = child_thread.config_snapshot().await;
+        if matches!(
+            child_snapshot.agent_wake_descendant_policy,
+            AgentWakeDescendantPolicy::LeafOnly
+        ) && self.has_active_descendants(&state, child_thread_id).await
+        {
+            return;
+        }
+
+        let parent_thread_id = {
+            let mut subscriptions = self.parent_wake_subscriptions.lock().await;
+            let Some(subscription) = subscriptions.get_mut(&child_thread_id) else {
+                return;
+            };
+            if subscription.last_wake_key.as_deref() == Some(wake_key.as_str()) {
+                return;
+            }
+            subscription.last_wake_key = Some(wake_key);
+            subscription.parent_thread_id
+        };
+        let Ok(_parent_thread) = state.get_thread(parent_thread_id).await else {
+            return;
+        };
+        let notification_message =
+            format_subagent_notification_message(&child_thread_id.to_string(), &status);
+        let _ = self
+            .send_watchdog_wakeup(parent_thread_id, child_thread_id, notification_message)
+            .await;
     }
 
     pub(crate) async fn watchdog_targets(&self, agent_ids: &[ThreadId]) -> HashSet<ThreadId> {
@@ -2209,6 +2416,7 @@ mod inbox_tests {
                 })),
                 SpawnAgentOptions {
                     fork_parent_spawn_call_id: Some(parent_spawn_call_id),
+                    ..Default::default()
                 },
             )
             .await
@@ -2292,6 +2500,7 @@ mod inbox_tests {
                 })),
                 SpawnAgentOptions {
                     fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
+                    ..Default::default()
                 },
             )
             .await
@@ -2362,6 +2571,7 @@ mod inbox_tests {
                 })),
                 SpawnAgentOptions {
                     fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
+                    ..Default::default()
                 },
             )
             .await

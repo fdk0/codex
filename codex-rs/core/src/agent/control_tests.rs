@@ -16,6 +16,7 @@ use codex_protocol::config_types::ModeKind;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ErrorEvent;
+use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::SessionSource;
@@ -205,6 +206,40 @@ async fn wait_for_live_thread_spawn_children(
     })
     .await
     .expect("expected persisted child tree");
+}
+
+fn thread_spawn_source(parent_thread_id: ThreadId) -> SessionSource {
+    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_nickname: None,
+        agent_role: Some("explorer".to_string()),
+    })
+}
+
+async fn wait_for_injected_wake_count(
+    harness: &AgentControlHarness,
+    parent_thread_id: ThreadId,
+    expected_count: usize,
+) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let count = harness
+                .manager
+                .captured_ops()
+                .into_iter()
+                .filter(|(thread_id, op)| {
+                    *thread_id == parent_thread_id && matches!(op, Op::InjectResponseItems { .. })
+                })
+                .count();
+            if count >= expected_count {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("expected injected wake ops");
 }
 
 #[tokio::test]
@@ -537,6 +572,7 @@ async fn spawn_agent_can_fork_parent_thread_history() {
             })),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id),
+                ..Default::default()
             },
         )
         .await
@@ -622,6 +658,7 @@ async fn spawn_agent_fork_injects_output_for_parent_spawn_call() {
             })),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
+                ..Default::default()
             },
         )
         .await
@@ -694,6 +731,7 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
             })),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
+                ..Default::default()
             },
         )
         .await
@@ -1188,6 +1226,159 @@ async fn completion_watcher_notifies_parent_when_child_is_missing() {
         history_contains_text(&history_items, "\"status\":\"not_found\""),
         true
     );
+}
+
+#[tokio::test]
+async fn wake_parent_on_completion_persists_across_reused_child_turns() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+    let (child_thread_id, child_thread) = harness.start_thread().await;
+
+    let child_control = child_thread.codex.session.services.agent_control.clone();
+    child_control
+        .register_parent_wake_subscription(
+            child_thread_id,
+            Some(&thread_spawn_source(parent_thread_id)),
+            true,
+        )
+        .await;
+
+    child_thread
+        .codex
+        .session
+        .send_event_raw(Event {
+            id: "turn-1-start".to_string(),
+            msg: EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-1".to_string(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }),
+        })
+        .await;
+    child_thread
+        .codex
+        .session
+        .send_event_raw(Event {
+            id: "turn-1-complete".to_string(),
+            msg: EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-1".to_string(),
+                last_agent_message: Some("first done".to_string()),
+            }),
+        })
+        .await;
+    wait_for_injected_wake_count(&harness, parent_thread_id, 1).await;
+
+    child_thread
+        .codex
+        .session
+        .send_event_raw(Event {
+            id: "turn-2-start".to_string(),
+            msg: EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-2".to_string(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }),
+        })
+        .await;
+    child_thread
+        .codex
+        .session
+        .send_event_raw(Event {
+            id: "turn-2-complete".to_string(),
+            msg: EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-2".to_string(),
+                last_agent_message: Some("second done".to_string()),
+            }),
+        })
+        .await;
+    wait_for_injected_wake_count(&harness, parent_thread_id, 2).await;
+}
+
+#[tokio::test]
+async fn resume_agent_from_rollout_preserves_parent_wake_subscription() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+
+    let child_thread_id = harness
+        .control
+        .spawn_agent_with_options(
+            harness.config.clone(),
+            text_input("hello child"),
+            Some(thread_spawn_source(parent_thread_id)),
+            SpawnAgentOptions {
+                wake_parent_on_completion: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("child spawn should succeed");
+
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist");
+    child_thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    child_thread.codex.session.flush_rollout().await;
+    let mut status_rx = harness
+        .control
+        .subscribe_status(child_thread_id)
+        .await
+        .expect("status subscription should succeed");
+    if matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                status_rx
+                    .changed()
+                    .await
+                    .expect("child status should advance past pending init");
+                if !matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("child should initialize before shutdown");
+    }
+    let _ = harness
+        .control
+        .shutdown_agent(child_thread_id)
+        .await
+        .expect("child shutdown should submit");
+
+    let resumed_thread_id = harness
+        .control
+        .resume_agent_from_rollout(
+            harness.config.clone(),
+            child_thread_id,
+            thread_spawn_source(parent_thread_id),
+        )
+        .await
+        .expect("resume should succeed");
+    assert_eq!(resumed_thread_id, child_thread_id);
+
+    let resumed_thread = harness
+        .manager
+        .get_thread(resumed_thread_id)
+        .await
+        .expect("resumed child thread should exist");
+    resumed_thread
+        .codex
+        .session
+        .send_event_raw(Event {
+            id: "resumed-turn-complete".to_string(),
+            msg: EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "resumed-turn".to_string(),
+                last_agent_message: Some("resumed done".to_string()),
+            }),
+        })
+        .await;
+
+    wait_for_injected_wake_count(&harness, parent_thread_id, 1).await;
 }
 
 #[tokio::test]

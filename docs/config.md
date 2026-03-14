@@ -44,6 +44,28 @@ non-user activity in the transcript.
 
 Messages sent to subagents continue to arrive as normal user input.
 
+## Agent Wake Policies
+
+Subagents can optionally wake their parent thread automatically when they reach a terminal status.
+These settings control the default wake behavior and whether polling remains allowed for wake-enabled
+children:
+
+```toml
+[agents]
+wake_parent_on_completion_default = true
+wait_on_wake_enabled = "reject"
+wake_descendant_policy = "leaf_only"
+```
+
+- `wake_parent_on_completion_default`: default value used when `spawn_agent` omits
+  `wake_parent_on_completion`.
+- `wait_on_wake_enabled`: set to `"reject"` to make `wait_agent` refuse wake-enabled children and
+  instruct the orchestrator to rely on the automatic wake path instead. Use `"allow"` to keep
+  polling available.
+- `wake_descendant_policy`: `"immediate"` lets a child wake its parent as soon as it finishes.
+  `"leaf_only"` suppresses that wake until all active descendants below that child have also
+  finished.
+
 ## Watchdog Interval
 
 Watchdog agents use the top-level `watchdog_interval_s` setting to decide how long the owner thread

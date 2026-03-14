@@ -1165,6 +1165,15 @@ fn create_spawn_agent_tool(config: &ToolsConfig) -> ToolSpec {
             },
         ),
         (
+            "wake_parent_on_completion".to_string(),
+            JsonSchema::Boolean {
+                description: Some(
+                    "When true, Codex wakes the spawning parent thread after this child reaches a terminal status so the parent can continue without polling wait_agent. When omitted, Codex uses the configured agents.wake_parent_on_completion_default policy."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
             "spawn_mode".to_string(),
             JsonSchema::String {
                 description: Some(spawn_mode_description.to_string()),
@@ -1209,6 +1218,7 @@ fn create_spawn_agent_tool(config: &ToolsConfig) -> ToolSpec {
 
 ### After you delegate
 - Call wait_agent very sparingly. Only call wait_agent when you need the result immediately for the next critical-path step and you are blocked until it returns.
+- If you spawn with `wake_parent_on_completion=true`, prefer ending the current turn and relying on the automatic wake path instead of polling.
 - Do not redo delegated subagent tasks yourself; focus on integrating results or tackling non-overlapping work.
 - While the subagent is running in the background, do meaningful non-overlapping work immediately.
 - Do not repeatedly wait by reflex.
@@ -1579,7 +1589,7 @@ fn create_wait_agent_tool_v1(agent_watchdog: bool) -> ToolSpec {
     let description = if agent_watchdog {
         "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status. Watchdog handles cannot be waited on for new check-ins, and sleeping or polling cannot make a watchdog fire while the current turn is active."
     } else {
-        "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status."
+        "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Depending on configuration, wake-enabled child agents may reject wait_agent and instruct you to rely on the automatic wake path instead."
     };
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
@@ -1595,7 +1605,7 @@ fn create_wait_agent_tool_v2(agent_watchdog: bool) -> ToolSpec {
     let description = if agent_watchdog {
         "Wait for agents to reach a final status. Returns a brief wait summary instead of the agent's final content. Returns a timeout summary when no agent reaches a final status before the deadline. Watchdog handles are status-only here and cannot be waited on for new check-ins."
     } else {
-        "Wait for agents to reach a final status. Returns a brief wait summary instead of the agent's final content. Returns a timeout summary when no agent reaches a final status before the deadline."
+        "Wait for agents to reach a final status. Returns a brief wait summary instead of the agent's final content. Returns a timeout summary when no agent reaches a final status before the deadline. Depending on configuration, wake-enabled child agents may reject wait_agent and instruct you to rely on the automatic wake path instead."
     };
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
