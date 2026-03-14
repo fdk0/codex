@@ -333,6 +333,7 @@ mod spawn {
         message: Option<String>,
         items: Option<Vec<UserInput>>,
         agent_type: Option<String>,
+        pub(super) env: Option<HashMap<String, String>>,
         model: Option<String>,
         reasoning_effort: Option<ReasoningEffort>,
         #[serde(default)]
@@ -354,9 +355,18 @@ mod spawn {
         call_id: String,
         arguments: String,
     ) -> Result<FunctionToolOutput, FunctionCallError> {
-        let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-        let role_name = args
-            .agent_type
+        let SpawnAgentArgs {
+            message,
+            items,
+            agent_type,
+            env,
+            model,
+            reasoning_effort,
+            fork_context,
+            wake_parent_on_completion,
+            spawn_mode,
+        } = parse_arguments(&arguments)?;
+        let role_name = agent_type
             .as_deref()
             .map(str::trim)
             .filter(|role| !role.is_empty());
@@ -364,14 +374,12 @@ mod spawn {
             crate::config::AgentRoleSpawnMode::Spawn => SpawnMode::Spawn,
             crate::config::AgentRoleSpawnMode::Fork => SpawnMode::Fork,
         };
-        let spawn_mode = args
-            .spawn_mode
-            .or_else(|| (args.fork_context && args.spawn_mode.is_none()).then_some(SpawnMode::Fork))
+        let spawn_mode = spawn_mode
+            .or_else(|| fork_context.then_some(SpawnMode::Fork))
             .unwrap_or(default_spawn_mode);
-        let input_items = parse_collab_input(args.message, args.items)?;
+        let input_items = parse_collab_input(message, items)?;
         let prompt = input_preview(&input_items);
-        let wake_parent_on_completion = args
-            .wake_parent_on_completion
+        let wake_parent_on_completion = wake_parent_on_completion
             .unwrap_or(turn.config.agent_wake_parent_on_completion_default);
         let session_source = turn.session_source.clone();
         let child_depth = next_thread_spawn_depth(&session_source);
@@ -402,8 +410,8 @@ mod spawn {
                     call_id: call_id.clone(),
                     sender_thread_id: session.conversation_id,
                     prompt: prompt.clone(),
-                    model: args.model.clone().unwrap_or_default(),
-                    reasoning_effort: args.reasoning_effort.unwrap_or_default(),
+                    model: model.clone().unwrap_or_default(),
+                    reasoning_effort: reasoning_effort.unwrap_or_default(),
                 }
                 .into(),
             )
@@ -422,14 +430,15 @@ mod spawn {
             &session,
             turn.as_ref(),
             &mut config,
-            args.model.as_deref(),
-            args.reasoning_effort,
+            model.as_deref(),
+            reasoning_effort,
         )
         .await?;
         apply_role_to_config(&mut config, role_name)
             .await
             .map_err(FunctionCallError::RespondToModel)?;
         apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+        apply_spawn_agent_env_overrides(&mut config, env);
         apply_spawn_agent_overrides(&mut config, child_depth);
         let spawn_source = thread_spawn_source(session.conversation_id, child_depth, role_name);
         let result = match spawn_mode {
@@ -448,7 +457,7 @@ mod spawn {
                     )
                     .await
             }
-            SpawnMode::Fork if args.fork_context => {
+            SpawnMode::Fork if fork_context => {
                 session
                     .services
                     .agent_control
@@ -459,6 +468,7 @@ mod spawn {
                         SpawnAgentOptions {
                             fork_parent_spawn_call_id: Some(call_id.clone()),
                             wake_parent_on_completion,
+                            ..Default::default()
                         },
                     )
                     .await
@@ -521,8 +531,8 @@ mod spawn {
                     new_agent_nickname,
                     new_agent_role,
                     prompt,
-                    model: args.model.clone().unwrap_or_default(),
-                    reasoning_effort: args.reasoning_effort.unwrap_or_default(),
+                    model: model.clone().unwrap_or_default(),
+                    reasoning_effort: reasoning_effort.unwrap_or_default(),
                     // Preserve the exact spawn mode. The TUI relies on this to render
                     // watchdog rows distinctly, mark them idle between check-ins, and
                     // prune superseded watchdog registrations. Defaulting this to
@@ -1663,6 +1673,16 @@ fn apply_spawn_agent_runtime_overrides(
     Ok(())
 }
 
+fn apply_spawn_agent_env_overrides(config: &mut Config, env: Option<HashMap<String, String>>) {
+    if let Some(env) = env {
+        config
+            .permissions
+            .shell_environment_policy
+            .r#set
+            .extend(env);
+    }
+}
+
 fn apply_spawn_agent_overrides(config: &mut Config, child_depth: i32) {
     if child_depth >= config.agent_max_depth {
         let _ = config.features.disable(Feature::Collab);
@@ -1940,6 +1960,34 @@ mod tests {
             parse_arguments(r#"{"message":"hello","wake_parent_on_completion":false}"#)
                 .expect("arguments should parse");
         assert_eq!(args.wake_parent_on_completion, Some(false));
+    }
+
+    #[test]
+    fn spawn_agent_parses_env_overrides() {
+        let args: spawn::SpawnAgentArgs = parse_arguments(
+            r#"{"message":"hello","env":{"RESOURCE_BACKEND":"remote","RESOURCE_ENFORCE":"true"}}"#,
+        )
+        .expect("arguments should parse");
+        assert_eq!(
+            args.env,
+            Some(HashMap::from([
+                ("RESOURCE_BACKEND".to_string(), "remote".to_string()),
+                ("RESOURCE_ENFORCE".to_string(), "true".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn spawn_agent_rejects_non_string_env_values() {
+        let err = parse_arguments::<spawn::SpawnAgentArgs>(
+            r#"{"message":"hello","env":{"RESOURCE_ENFORCE":true}}"#,
+        )
+        .expect_err("non-string env values should be rejected");
+        let FunctionCallError::RespondToModel(message) = err else {
+            panic!("expected parse failure");
+        };
+        assert!(message.contains("invalid type"));
+        assert!(message.contains("expected a string"));
     }
 
     #[tokio::test]
@@ -3027,6 +3075,44 @@ mod tests {
         expected.permissions.network_sandbox_policy = network_sandbox_policy;
         expected.features = config.features.clone();
         assert_eq!(config, expected);
+    }
+
+    #[tokio::test]
+    async fn build_agent_spawn_config_merges_child_env_overrides() {
+        let (_session, mut turn) = make_session_and_context().await;
+        let base_instructions = BaseInstructions {
+            text: "base".to_string(),
+        };
+        turn.shell_environment_policy = ShellEnvironmentPolicy {
+            use_profile: true,
+            r#set: HashMap::from([
+                ("RESOURCE_BACKEND".to_string(), "local".to_string()),
+                ("RESOURCE_ENFORCE".to_string(), "false".to_string()),
+            ]),
+            ..ShellEnvironmentPolicy::default()
+        };
+
+        let mut config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
+        apply_spawn_agent_env_overrides(
+            &mut config,
+            Some(HashMap::from([
+                ("RESOURCE_BACKEND".to_string(), "remote".to_string()),
+                ("RESOURCE_PROJECT_SLICE".to_string(), "docs".to_string()),
+            ])),
+        );
+
+        assert_eq!(
+            config.permissions.shell_environment_policy,
+            ShellEnvironmentPolicy {
+                use_profile: true,
+                r#set: HashMap::from([
+                    ("RESOURCE_BACKEND".to_string(), "remote".to_string()),
+                    ("RESOURCE_ENFORCE".to_string(), "false".to_string()),
+                    ("RESOURCE_PROJECT_SLICE".to_string(), "docs".to_string()),
+                ]),
+                ..ShellEnvironmentPolicy::default()
+            }
+        );
     }
 
     #[tokio::test]

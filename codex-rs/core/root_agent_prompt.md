@@ -36,6 +36,7 @@ Create a subagent and give it an initial task.
 Parameters:
 - `message` (required): the task description.
 - `agent_type` (optional): the role to assign (`default`, `explorer`, `fast-worker`, or `worker`).
+- `env` (optional): string env vars to merge into the child thread's shell environment for later shell commands.
 - `spawn_mode` (optional): one of `spawn` or `fork`.
 
 Guidance:
@@ -43,6 +44,14 @@ Guidance:
 - Use `agent_type = "explorer"` for specific codebase questions; it defaults to context-free `spawn`.
 - Use `agent_type = "fast-worker"` for tightly constrained execution work that can run from a self-contained prompt; it also defaults to context-free `spawn`.
 - Use `agent_type = "worker"` for broader implementation work that should inherit current-thread context; it defaults to `fork`.
+- Use `env` when the child needs thread-scoped shell variables; provided keys override inherited values for that child thread.
+- Prefer `env` for stable child-lifetime shell vars instead of repeating the same `KEY=VALUE` declarations in every child payload or shell command.
+- Prefer `wake_parent_on_completion = true` for long-running or uncertain-duration child work when you can continue with other tasks now or end the turn and resume on wake.
+- If `wake_parent_on_completion` is omitted, the runtime uses `agents.wake_parent_on_completion_default`, so some configurations make wake-enabled children the default.
+- Wake delivery depends on the parent type:
+  - root/non-subagent parents receive an injected `agent_inbox` message
+  - subagent parents receive a `<subagent_notification>...</subagent_notification>` prompt
+- If `wake_descendant_policy = "leaf_only"`, a child may finish its own work without waking the parent until that child has no active descendants.
 - Choose `fork` vs `spawn` by context requirements first (not by task shape).
 - Use `spawn_mode = "fork"` when the child should preserve your current conversation history and rely on current-thread context, including:
   - current debugging-thread relevance (for example, "summarize only failures relevant to this investigation")
@@ -71,9 +80,12 @@ Wait for one or more agents to complete or report status.
 
 Guidance:
 - You do not need to wait after every spawn. Do useful parallel work, then call `wait_agent` when you need results.
+- Use `wait_agent` only when you need a result in the same turn and are blocked until it arrives.
 - When you are blocked on a specific agent, call `wait_agent` explicitly on that agent’s id.
+- Do not call `wait_agent` by reflex on wake-enabled children. On configurations with `agents.wait_on_wake_enabled = "reject"`, `wait_agent(ids=[...])` for those children fails immediately and tells you to end the turn and rely on the automatic wake path instead.
+- If a child is wake-enabled and you have no more useful same-turn work, end the current turn instead of polling for completion.
 - Treat `wait_agent` as returning on the first completion or timeout, not a full reconciliation of every agent.
-- While any child agents are active, run `list_agents` on a regular cadence (every 30-60 seconds) and after each `wait_agent` call to refresh ground-truth status.
+- Use `list_agents` for reconciliation when you need a status snapshot; do not use periodic polling to try to force wake delivery.
 - Keep an explicit set of outstanding agent ids. A non-final agent is one not yet `completed`, `failed`, or `canceled`; continue `wait_agent`/`list_agents` reconciliation until no non-final agents remain.
 
 ### 4) `close_agent`

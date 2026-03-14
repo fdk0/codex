@@ -90,6 +90,49 @@ fn message_input_texts(item: &serde_json::Value) -> Vec<&str> {
         .collect()
 }
 
+#[expect(clippy::unwrap_used)]
+fn tool_names(body: &serde_json::Value) -> Vec<String> {
+    body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(|value| value.as_str()))
+        .map(str::to_string)
+        .collect()
+}
+
+#[expect(clippy::unwrap_used)]
+fn tool_description(body: &serde_json::Value, tool_name: &str) -> Option<String> {
+    body["tools"].as_array().unwrap().iter().find_map(|tool| {
+        if tool.get("name").and_then(|value| value.as_str()) == Some(tool_name) {
+            tool.get("description")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        } else {
+            None
+        }
+    })
+}
+
+#[expect(clippy::unwrap_used)]
+fn tool_param_description(
+    body: &serde_json::Value,
+    tool_name: &str,
+    param_name: &str,
+) -> Option<String> {
+    body["tools"].as_array().unwrap().iter().find_map(|tool| {
+        if tool.get("name").and_then(|value| value.as_str()) != Some(tool_name) {
+            return None;
+        }
+        tool.get("parameters")
+            .and_then(|value| value.get("properties"))
+            .and_then(|value| value.get(param_name))
+            .and_then(|value| value.get("description"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    })
+}
+
 /// Writes an `auth.json` into the provided `codex_home` with the specified parameters.
 /// Returns the fake JWT string written to `tokens.id_token`.
 #[expect(clippy::unwrap_used)]
@@ -1774,6 +1817,139 @@ async fn includes_developer_instructions_message_in_request() {
             .any(|text| text.starts_with("<environment_context>")
                 && text.ends_with("</environment_context>")),
         "expected environment context in contextual user message, got {user_context_texts:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collab_prompt_and_tool_specs_are_serialized_into_request() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+
+    let resp_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::from_api_key("Test API Key"))
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::AgentPromptInjection)
+                .expect("test config should allow feature update");
+        });
+    let codex = builder
+        .build(&server)
+        .await
+        .expect("create new conversation")
+        .codex;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await
+        .unwrap();
+
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let request = resp_mock.single_request();
+    let request_body = request.body_json();
+    let developer_messages: Vec<&serde_json::Value> = request_body["input"]
+        .as_array()
+        .expect("input array")
+        .iter()
+        .filter(|item| item.get("role").and_then(|role| role.as_str()) == Some("developer"))
+        .collect();
+    let developer_text = developer_messages
+        .iter()
+        .filter_map(|item| item.get("content").and_then(serde_json::Value::as_array))
+        .flat_map(|content| content.iter())
+        .filter(|span| span.get("type").and_then(serde_json::Value::as_str) == Some("input_text"))
+        .filter_map(|span| span.get("text").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        developer_text.contains(
+            "Prefer `wake_parent_on_completion = true` for long-running or uncertain-duration child work"
+        ),
+        "expected root-agent wake guidance in developer message, got {developer_text:?}"
+    );
+    assert!(
+        developer_text.contains("Do not call `wait_agent` by reflex on wake-enabled children"),
+        "expected wait-vs-wake guidance in developer message, got {developer_text:?}"
+    );
+
+    let request_tool_names = tool_names(&request_body);
+    assert!(
+        request_tool_names.iter().any(|name| name == "spawn_agent"),
+        "expected spawn_agent in tools, got {request_tool_names:?}"
+    );
+    assert!(
+        request_tool_names.iter().any(|name| name == "wait_agent"),
+        "expected wait_agent in tools, got {request_tool_names:?}"
+    );
+
+    let spawn_description =
+        tool_description(&request_body, "spawn_agent").expect("spawn_agent description");
+    assert!(
+        spawn_description.contains(
+            "Prefer wake_parent_on_completion=true for long-running or uncertain-duration children"
+        ),
+        "expected wake guidance in spawn_agent description, got {spawn_description:?}"
+    );
+    assert!(
+        spawn_description.contains("agents.wait_on_wake_enabled = \"reject\""),
+        "expected wait-on-wake wording in spawn_agent description, got {spawn_description:?}"
+    );
+    let wake_param_description =
+        tool_param_description(&request_body, "spawn_agent", "wake_parent_on_completion")
+            .expect("wake_parent_on_completion description");
+    assert!(
+        wake_param_description
+            .contains("Root/non-subagent parents receive an injected agent_inbox message"),
+        "expected wake delivery wording in wake_parent_on_completion parameter, got {wake_param_description:?}"
+    );
+    assert!(
+        wake_param_description
+            .contains("wait_agent(ids=[...]) against wake-enabled children may fail immediately"),
+        "expected wake wait-reject wording in wake_parent_on_completion parameter, got {wake_param_description:?}"
+    );
+
+    let env_param_description =
+        tool_param_description(&request_body, "spawn_agent", "env").expect("env description");
+    assert!(
+        env_param_description.contains("child thread's shell environment"),
+        "expected child env override wording in env parameter, got {env_param_description:?}"
+    );
+
+    let wait_description =
+        tool_description(&request_body, "wait_agent").expect("wait_agent description");
+    assert!(
+        wait_description.contains("Use wait_agent for short, same-turn-needed work only"),
+        "expected same-turn wait guidance in wait_agent description, got {wait_description:?}"
+    );
+    assert!(
+        wait_description.contains("Wake-enabled child agents may reject wait_agent"),
+        "expected wake rejection guidance in wait_agent description, got {wait_description:?}"
+    );
+    let wait_ids_description = tool_param_description(&request_body, "wait_agent", "ids")
+        .expect("wait_agent ids description");
+    assert!(
+        wait_ids_description.contains(
+            "wake-enabled child agent ids return an immediate correction instead of blocking"
+        ),
+        "expected wake-enabled child correction wording in wait_agent ids parameter, got {wait_ids_description:?}"
     );
 }
 
