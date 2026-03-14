@@ -1,4 +1,5 @@
 use super::control::AgentControl;
+use super::control::SpawnAgentOptions;
 use super::guards::Guards;
 use super::guards::exceeds_thread_spawn_depth_limit;
 use super::status::is_final;
@@ -165,8 +166,7 @@ impl WatchdogManager {
         let now = Instant::now();
 
         for (target_id, generation) in snapshots {
-            self.evaluate(&manager_state, target_id, generation, now)
-                .await;
+            Box::pin(self.evaluate(&manager_state, target_id, generation, now)).await;
         }
     }
 
@@ -192,7 +192,7 @@ impl WatchdogManager {
             Arc::clone(self),
         );
         if is_watchdog_terminated(&owner_status) {
-            match control_for_spawn.shutdown_agent(target_thread_id).await {
+            match Box::pin(control_for_spawn.shutdown_agent(target_thread_id)).await {
                 Ok(_) | Err(CodexErr::ThreadNotFound(_)) | Err(CodexErr::InternalAgentDied) => {}
                 Err(err) => {
                     warn!(
@@ -274,9 +274,12 @@ impl WatchdogManager {
                 };
 
                 if let Some(message) = fallback_message {
-                    if let Err(err) = control_for_spawn
-                        .send_watchdog_wakeup(snapshot.owner_thread_id, helper_id, message)
-                        .await
+                    if let Err(err) = Box::pin(control_for_spawn.send_watchdog_wakeup(
+                        snapshot.owner_thread_id,
+                        helper_id,
+                        message,
+                    ))
+                    .await
                     {
                         warn!(
                             helper_id = %helper_id,
@@ -292,13 +295,9 @@ impl WatchdogManager {
                     }
                 }
             }
-            if let Err(err) = control_for_spawn.shutdown_agent(helper_id).await {
-                warn!(
-                    helper_id = %helper_id,
-                    owner_thread_id = %snapshot.owner_thread_id,
-                    "watchdog helper cleanup failed: {err}"
-                );
-            }
+            control_for_spawn
+                .cleanup_finished_agent_thread(helper_id)
+                .await;
             self.update_after_spawn(target_thread_id, generation, now, None)
                 .await;
             return;
@@ -322,18 +321,21 @@ impl WatchdogManager {
         // Watchdog check-ins must fork a distinct helper thread. If this path ever resumes
         // the owner thread instead, the owner can self-wake and rapidly duplicate session
         // state in memory.
-        let spawn_result = control_for_spawn
-            .fork_agent(
-                helper_config,
-                vec![UserInput::Text {
-                    text: helper_prompt,
-                    text_elements: Vec::new(),
-                }],
-                snapshot.owner_thread_id,
-                usize::MAX,
-                session_source,
-            )
-            .await;
+        let spawn_result = control_for_spawn.fork_agent_with_options(
+            helper_config,
+            vec![UserInput::Text {
+                text: helper_prompt,
+                text_elements: Vec::new(),
+            }],
+            snapshot.owner_thread_id,
+            usize::MAX,
+            session_source,
+            SpawnAgentOptions {
+                notify_parent_on_completion: false,
+                ..SpawnAgentOptions::default()
+            },
+        );
+        let spawn_result = Box::pin(spawn_result).await;
 
         match spawn_result {
             Ok(helper_id) => {

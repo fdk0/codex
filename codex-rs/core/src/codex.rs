@@ -28,6 +28,7 @@ use crate::compact::should_use_remote_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::config::ManagedFeatures;
 use crate::connectors;
+use crate::contextual_user_message::SUBAGENT_NOTIFICATION_FRAGMENT;
 use crate::exec_policy::ExecPolicyManager;
 use crate::features::FEATURES;
 use crate::features::Feature;
@@ -97,6 +98,7 @@ use codex_protocol::models::format_allow_prefixes;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::protocol::AgentInboxPayload;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::HasLegacyEvent;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -872,11 +874,18 @@ pub(crate) struct Session {
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
+    wake_autoresume_state: Mutex<WakeAutoresumeState>,
     pub(crate) services: SessionServices,
     js_repl: Arc<JsReplHandle>,
     next_internal_sub_id: AtomicU64,
     turn_used_agent_send_input: AtomicBool,
     last_completed_turn_used_agent_send_input: AtomicBool,
+}
+
+#[derive(Default)]
+struct WakeAutoresumeState {
+    suppressed_after_interrupt: bool,
+    buffered_items: Vec<ResponseInputItem>,
 }
 
 #[derive(Clone, Debug)]
@@ -1966,6 +1975,7 @@ impl Session {
             conversation: Arc::new(RealtimeConversationManager::new()),
             active_turn: Mutex::new(None),
             guardian_review_session: GuardianReviewSessionManager::default(),
+            wake_autoresume_state: Mutex::new(WakeAutoresumeState::default()),
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),
@@ -4060,6 +4070,21 @@ impl Session {
         }
     }
 
+    pub async fn has_pending_agent_message(
+        &self,
+        sender_thread_id: ThreadId,
+        message: &str,
+    ) -> bool {
+        let active = self.active_turn.lock().await;
+        match active.as_ref() {
+            Some(at) => {
+                let ts = at.turn_state.lock().await;
+                ts.has_pending_agent_message(sender_thread_id, message)
+            }
+            None => false,
+        }
+    }
+
     pub async fn list_resources(
         &self,
         server: &str,
@@ -4139,6 +4164,7 @@ impl Session {
     pub async fn interrupt_task(self: &Arc<Self>) {
         info!("interrupt received: abort current task, if any");
         let has_active_turn = { self.active_turn.lock().await.is_some() };
+        self.suppress_wake_autoresume_after_interrupt().await;
         if has_active_turn {
             self.abort_all_tasks(TurnAbortReason::Interrupted).await;
         } else {
@@ -4165,6 +4191,31 @@ impl Session {
     pub(crate) async fn hook_transcript_path(&self) -> Option<PathBuf> {
         self.ensure_rollout_materialized().await;
         self.current_rollout_path().await
+    }
+
+    async fn suppress_wake_autoresume_after_interrupt(&self) {
+        let mut wake_state = self.wake_autoresume_state.lock().await;
+        wake_state.suppressed_after_interrupt = true;
+    }
+
+    async fn take_buffered_wake_items_after_explicit_input(&self) -> Vec<ResponseInputItem> {
+        let mut wake_state = self.wake_autoresume_state.lock().await;
+        wake_state.suppressed_after_interrupt = false;
+        std::mem::take(&mut wake_state.buffered_items)
+    }
+
+    async fn buffer_wake_items_if_suppressed(&self, items: &[ResponseInputItem]) -> bool {
+        let mut wake_state = self.wake_autoresume_state.lock().await;
+        if !wake_state.suppressed_after_interrupt || !response_items_are_agent_wake(items) {
+            return false;
+        }
+        wake_state.buffered_items.extend(items.iter().cloned());
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn buffered_wake_items_len(&self) -> usize {
+        self.wake_autoresume_state.lock().await.buffered_items.len()
     }
 
     pub(crate) async fn take_pending_session_start_source(
@@ -4382,7 +4433,12 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     false
                 }
                 Op::InjectResponseItems { items } => {
-                    handlers::inject_response_items(&sess, sub.id.clone(), items).await;
+                    Box::pin(handlers::inject_response_items(
+                        &sess,
+                        sub.id.clone(),
+                        items,
+                    ))
+                    .await;
                     false
                 }
                 Op::ExecApproval {
@@ -4540,6 +4596,40 @@ fn submission_dispatch_span(sub: &Submission) -> tracing::Span {
     dispatch_span
 }
 
+fn response_item_contains_subagent_notification(item: &ResponseInputItem) -> bool {
+    match item {
+        ResponseInputItem::Message { role, content } => {
+            role == "user"
+                && content.iter().any(|content_item| {
+                    matches!(
+                        content_item,
+                        codex_protocol::models::ContentItem::InputText { text }
+                            if SUBAGENT_NOTIFICATION_FRAGMENT.matches_text(text)
+                    )
+                })
+        }
+        _ => false,
+    }
+}
+
+fn response_item_contains_agent_inbox_payload(item: &ResponseInputItem) -> bool {
+    match item {
+        ResponseInputItem::FunctionCallOutput { output, .. } => output
+            .body
+            .to_text()
+            .and_then(|text| serde_json::from_str::<AgentInboxPayload>(&text).ok())
+            .is_some(),
+        _ => false,
+    }
+}
+
+fn response_items_are_agent_wake(items: &[ResponseInputItem]) -> bool {
+    items.iter().any(|item| {
+        response_item_contains_subagent_notification(item)
+            || response_item_contains_agent_inbox_payload(item)
+    })
+}
+
 /// Operation handlers
 mod handlers {
     use crate::codex::Session;
@@ -4623,6 +4713,7 @@ mod handlers {
     }
 
     pub async fn user_input_or_turn(sess: &Arc<Session>, sub_id: String, op: Op) {
+        let buffered_wake_items = sess.take_buffered_wake_items_after_explicit_input().await;
         let (items, updates) = match op {
             Op::UserTurn {
                 cwd,
@@ -4698,6 +4789,9 @@ mod handlers {
             )
             .await;
         }
+        if !buffered_wake_items.is_empty() {
+            let _ = sess.inject_response_items(buffered_wake_items).await;
+        }
     }
 
     pub async fn inject_response_items(
@@ -4715,6 +4809,10 @@ mod handlers {
                 Err(items_without_active_turn) => {
                     pending_items = items_without_active_turn;
                 }
+            }
+
+            if sess.buffer_wake_items_if_suppressed(&pending_items).await {
+                return;
             }
 
             if attempts >= MAX_TURN_RESTART_ATTEMPTS {
@@ -4739,15 +4837,18 @@ mod handlers {
             } else {
                 format!("{sub_id}-retry-{attempts}")
             };
-            let current_context = sess.new_default_turn_with_sub_id(turn_sub_id).await;
-            // Keep injected inbox wakeups visible to telemetry after the TurnContext field rename.
-            current_context.session_telemetry.user_prompt(&turn_input);
+            Box::pin(async {
+                let current_context = sess.new_default_turn_with_sub_id(turn_sub_id).await;
+                // Keep injected inbox wakeups visible to telemetry after the TurnContext field rename.
+                current_context.session_telemetry.user_prompt(&turn_input);
 
-            sess.refresh_mcp_servers_if_requested(&current_context)
-                .await;
-            let regular_task = sess.take_startup_regular_task().await.unwrap_or_default();
-            sess.spawn_task(Arc::clone(&current_context), turn_input, regular_task)
-                .await;
+                sess.refresh_mcp_servers_if_requested(&current_context)
+                    .await;
+                let regular_task = sess.take_startup_regular_task().await.unwrap_or_default();
+                sess.spawn_task(Arc::clone(&current_context), turn_input, regular_task)
+                    .await;
+            })
+            .await;
 
             if pending_items.is_empty() {
                 return;

@@ -87,6 +87,7 @@ impl ToolHandler for Handler {
                 )),
                 SpawnAgentOptions {
                     fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
+                    ..Default::default()
                 },
             )
             .await

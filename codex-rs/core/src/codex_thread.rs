@@ -155,10 +155,12 @@ impl CodexThread {
             .into_iter()
             .map(ResponseItem::from)
             .collect();
-        self.codex
-            .session
-            .record_conversation_items(turn_context.as_ref(), &items)
-            .await;
+        Box::pin(
+            self.codex
+                .session
+                .record_conversation_items(turn_context.as_ref(), &items),
+        )
+        .await;
     }
 
     pub fn rollout_path(&self) -> Option<PathBuf> {

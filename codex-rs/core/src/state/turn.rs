@@ -8,8 +8,11 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
+use codex_protocol::ThreadId;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseInputItem;
+use codex_protocol::protocol::AgentInboxPayload;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationResponse;
@@ -202,6 +205,34 @@ impl TurnState {
         !self.pending_input.is_empty()
     }
 
+    pub(crate) fn has_pending_agent_message(
+        &self,
+        sender_thread_id: ThreadId,
+        message: &str,
+    ) -> bool {
+        self.pending_input.iter().any(|item| {
+            match item {
+            ResponseInputItem::Message { role, content } => {
+                role == "user"
+                    && content.iter().any(|content_item| {
+                        matches!(content_item, ContentItem::InputText { text } if text == message)
+                    })
+            }
+            ResponseInputItem::FunctionCallOutput { output, .. } => output
+                .body
+                .to_text()
+                .and_then(|text| serde_json::from_str::<AgentInboxPayload>(&text).ok())
+                .is_some_and(|payload| {
+                    payload.sender_thread_id == sender_thread_id && payload.message == message
+                }),
+            ResponseInputItem::FunctionCall { .. }
+            | ResponseInputItem::McpToolCallOutput { .. }
+            | ResponseInputItem::CustomToolCallOutput { .. }
+            | ResponseInputItem::ToolSearchOutput { .. } => false,
+        }
+        })
+    }
+
     pub(crate) fn record_granted_permissions(&mut self, permissions: PermissionProfile) {
         self.granted_permissions =
             merge_permission_profiles(self.granted_permissions.as_ref(), Some(&permissions));
@@ -217,5 +248,52 @@ impl ActiveTurn {
     pub(crate) async fn clear_pending(&self) {
         let mut ts = self.turn_state.lock().await;
         ts.clear_pending();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn has_pending_agent_message_matches_user_message_text() {
+        let sender_thread_id = ThreadId::new();
+        let message = "<subagent_notification>{\"agent_id\":\"child\",\"status\":{\"completed\":\"done\"}}</subagent_notification>";
+        let mut turn_state = TurnState::default();
+        turn_state.push_pending_input(ResponseInputItem::Message {
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: message.to_string(),
+            }],
+        });
+
+        assert_eq!(
+            turn_state.has_pending_agent_message(sender_thread_id, message),
+            true
+        );
+    }
+
+    #[test]
+    fn has_pending_agent_message_matches_agent_inbox_payload() {
+        let sender_thread_id = ThreadId::new();
+        let message = "<subagent_notification>{\"agent_id\":\"child\",\"status\":{\"completed\":\"done\"}}</subagent_notification>";
+        let mut turn_state = TurnState::default();
+        turn_state.push_pending_input(ResponseInputItem::FunctionCallOutput {
+            call_id: "agent_inbox_test".to_string(),
+            output: FunctionCallOutputPayload::from_text(
+                serde_json::to_string(&AgentInboxPayload::new(
+                    sender_thread_id,
+                    message.to_string(),
+                ))
+                .expect("agent inbox payload should serialize"),
+            ),
+        });
+
+        assert_eq!(
+            turn_state.has_pending_agent_message(sender_thread_id, message),
+            true
+        );
     }
 }
