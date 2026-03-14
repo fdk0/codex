@@ -758,6 +758,8 @@ pub(crate) struct App {
     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
+    follow_latest_thread: bool,
+    pending_follow_thread_id: Option<ThreadId>,
     active_thread_id: Option<ThreadId>,
     active_thread_rx: Option<mpsc::Receiver<Event>>,
     primary_thread_id: Option<ThreadId>,
@@ -1408,6 +1410,75 @@ impl App {
         self.chat_widget.set_active_agent_label(label);
     }
 
+    fn sync_active_agent_footer_context(&mut self) {
+        self.sync_active_agent_status_summary();
+        self.sync_active_agent_label();
+    }
+
+    fn sync_follow_latest_thread_state(&mut self) {
+        self.chat_widget
+            .set_follow_latest_thread(self.follow_latest_thread);
+    }
+
+    fn explicit_follow_target_for_event(&self, event: &Event) -> Option<ThreadId> {
+        let target = match &event.msg {
+            EventMsg::CollabAgentSpawnEnd(ev)
+                if Self::availability_for_status(&ev.status) == AgentThreadAvailability::Live =>
+            {
+                ev.new_thread_id
+            }
+            EventMsg::CollabResumeEnd(ev)
+                if Self::availability_for_status(&ev.status) == AgentThreadAvailability::Live =>
+            {
+                Some(ev.receiver_thread_id)
+            }
+            EventMsg::CollabAgentInteractionEnd(ev)
+                if Self::availability_for_status(&ev.status) == AgentThreadAvailability::Live =>
+            {
+                Some(ev.receiver_thread_id)
+            }
+            _ => None,
+        }?;
+
+        let displayed_thread_id = self.current_displayed_thread_id();
+        (Some(target) != self.primary_thread_id && Some(target) != displayed_thread_id)
+            .then_some(target)
+    }
+
+    fn source_thread_follow_candidate(
+        &self,
+        thread_id: ThreadId,
+        event: &Event,
+    ) -> Option<ThreadId> {
+        let displayed_thread_id = self.current_displayed_thread_id();
+        (Some(thread_id) != self.primary_thread_id
+            && Some(thread_id) != displayed_thread_id
+            && !matches!(event.msg, EventMsg::ShutdownComplete))
+        .then_some(thread_id)
+    }
+
+    async fn maybe_follow_latest_thread(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        if !self.follow_latest_thread {
+            self.pending_follow_thread_id = None;
+            return Ok(());
+        }
+
+        let Some(thread_id) = self.pending_follow_thread_id.take() else {
+            return Ok(());
+        };
+
+        if Some(thread_id) == self.current_displayed_thread_id() {
+            return Ok(());
+        }
+
+        let can_follow_live_thread = self.server.get_thread(thread_id).await.is_ok()
+            || self.thread_event_channels.contains_key(&thread_id);
+        if can_follow_live_thread {
+            self.select_agent_thread(tui, thread_id).await?;
+        }
+
+        Ok(())
+    }
     async fn thread_cwd(&self, thread_id: ThreadId) -> Option<PathBuf> {
         let channel = self.thread_event_channels.get(&thread_id)?;
         let store = channel.store.lock().await;
@@ -1540,6 +1611,12 @@ impl App {
     }
 
     async fn enqueue_thread_event(&mut self, thread_id: ThreadId, event: Event) -> Result<()> {
+        self.update_agent_tracking_for_event(thread_id, &event);
+        if self.follow_latest_thread {
+            let explicit_target = self.explicit_follow_target_for_event(&event);
+            let source_target = self.source_thread_follow_candidate(thread_id, &event);
+            self.pending_follow_thread_id = explicit_target.or(source_target);
+        }
         let refresh_pending_thread_approvals =
             ThreadEventStore::event_can_change_pending_thread_approvals(&event);
         let inactive_interactive_request = if self.active_thread_id != Some(thread_id) {
@@ -1784,7 +1861,8 @@ impl App {
             tx
         };
         self.chat_widget = ChatWidget::new_with_op_sender(init, codex_op_tx);
-        self.sync_active_agent_label();
+        self.sync_follow_latest_thread_state();
+        self.sync_active_agent_footer_context();
 
         self.reset_for_thread_switch(tui)?;
         self.replay_thread_snapshot(snapshot, !is_replay_only);
@@ -1816,6 +1894,7 @@ impl App {
         self.abort_all_thread_event_listeners();
         self.thread_event_channels.clear();
         self.agent_navigation.clear();
+        self.pending_follow_thread_id = None;
         self.active_thread_id = None;
         self.active_thread_rx = None;
         self.primary_thread_id = None;
@@ -1866,6 +1945,7 @@ impl App {
             session_telemetry: self.session_telemetry.clone(),
         };
         self.chat_widget = ChatWidget::new(init, self.server.clone());
+        self.sync_follow_latest_thread_state();
         self.reset_thread_event_state();
         if let Some(summary) = summary {
             let mut lines: Vec<Line<'static>> = vec![summary.usage_line.clone().into()];
@@ -2228,6 +2308,8 @@ impl App {
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
+            follow_latest_thread: false,
+            pending_follow_thread_id: None,
             active_thread_id: None,
             active_thread_rx: None,
             primary_thread_id: None,
@@ -2519,6 +2601,7 @@ impl App {
                                     resumed.thread,
                                     resumed.session_configured,
                                 );
+                                self.sync_follow_latest_thread_state();
                                 self.reset_thread_event_state();
                                 if let Some(summary) = summary {
                                     let mut lines: Vec<Line<'static>> =
@@ -2590,6 +2673,7 @@ impl App {
                                     forked.thread,
                                     forked.session_configured,
                                 );
+                                self.sync_follow_latest_thread_state();
                                 self.reset_thread_event_state();
                                 if let Some(summary) = summary {
                                     let mut lines: Vec<Line<'static>> =
@@ -2681,9 +2765,18 @@ impl App {
             }
             AppEvent::CodexEvent(event) => {
                 self.enqueue_primary_event(event).await?;
+                self.maybe_follow_latest_thread(tui).await?;
             }
             AppEvent::ThreadEvent { thread_id, event } => {
                 self.handle_routed_thread_event(thread_id, event).await?;
+                self.maybe_follow_latest_thread(tui).await?;
+            }
+            AppEvent::SetFollowLatestThread(enabled) => {
+                self.follow_latest_thread = enabled;
+                if !enabled {
+                    self.pending_follow_thread_id = None;
+                }
+                self.sync_follow_latest_thread_state();
             }
             AppEvent::Exit(mode) => {
                 return Ok(self.handle_exit_mode(mode));
@@ -4251,6 +4344,12 @@ mod tests {
     use codex_protocol::openai_models::ModelAvailabilityNux;
     use codex_protocol::protocol::AgentMessageDeltaEvent;
     use codex_protocol::protocol::AskForApproval;
+    use codex_protocol::protocol::CollabAgentInteractionEndEvent;
+    use codex_protocol::protocol::CollabAgentSpawnEndEvent;
+    use codex_protocol::protocol::CollabAgentStatusEntry;
+    use codex_protocol::protocol::CollabCloseEndEvent;
+    use codex_protocol::protocol::CollabResumeEndEvent;
+    use codex_protocol::protocol::CollabWaitingEndEvent;
     use codex_protocol::protocol::Event;
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::SandboxPolicy;
@@ -6093,6 +6192,607 @@ guardian_approval = true
     }
 
     #[tokio::test]
+    async fn active_agent_status_summary_tracks_active_thread_label() {
+        let mut app = make_test_app().await;
+        let main_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000001").expect("valid thread");
+        let agent_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000002").expect("valid thread");
+
+        app.primary_thread_id = Some(main_thread_id);
+        app.active_thread_id = Some(main_thread_id);
+        app.thread_event_channels
+            .insert(agent_thread_id, ThreadEventChannel::new(1));
+        app.upsert_agent_picker_thread(
+            agent_thread_id,
+            Some("Robie".to_string()),
+            Some("explorer".to_string()),
+            AgentThreadAvailability::Live,
+            None,
+        );
+        app.sync_active_agent_status_summary();
+
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 1 open agent".to_string())
+        );
+
+        app.active_thread_id = Some(agent_thread_id);
+        app.sync_active_agent_status_summary();
+
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Robie [explorer] • 1 open agent".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_active_agent_status_hides_footer_summary() {
+        let mut app = make_test_app().await;
+        let main_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000010").expect("valid thread");
+        let agent_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000020").expect("valid thread");
+
+        app.config.tui_show_active_agent_status = false;
+        app.primary_thread_id = Some(main_thread_id);
+        app.active_thread_id = Some(main_thread_id);
+        app.thread_event_channels
+            .insert(agent_thread_id, ThreadEventChannel::new(1));
+        app.upsert_agent_picker_thread(
+            agent_thread_id,
+            Some("Robie".to_string()),
+            Some("explorer".to_string()),
+            AgentThreadAvailability::Live,
+            None,
+        );
+
+        app.sync_active_agent_footer_context();
+
+        assert_eq!(app.chat_widget.status_line_text(), None);
+    }
+
+    #[tokio::test]
+    async fn agent_start_and_stop_refresh_active_agent_count_in_status_summary() {
+        let mut app = make_test_app().await;
+        let main_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000011").expect("valid thread");
+        let first_agent_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000022").expect("valid thread");
+        let second_agent_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000033").expect("valid thread");
+
+        app.primary_thread_id = Some(main_thread_id);
+        app.active_thread_id = Some(main_thread_id);
+        app.sync_active_agent_status_summary();
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 0 open agents".to_string())
+        );
+
+        app.upsert_agent_picker_thread(
+            first_agent_id,
+            Some("Robie".to_string()),
+            Some("explorer".to_string()),
+            AgentThreadAvailability::Live,
+            None,
+        );
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 1 open agent".to_string())
+        );
+
+        app.upsert_agent_picker_thread(
+            second_agent_id,
+            None,
+            Some("worker".to_string()),
+            AgentThreadAvailability::Live,
+            None,
+        );
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 2 open agents".to_string())
+        );
+
+        app.mark_agent_picker_thread_closed(first_agent_id);
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 1 open agent".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn background_shutdown_immediately_reduces_open_agent_count() -> Result<()> {
+        let mut app = make_test_app().await;
+        let main_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000111").expect("valid thread");
+        let agent_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000222").expect("valid thread");
+
+        app.primary_thread_id = Some(main_thread_id);
+        app.active_thread_id = Some(main_thread_id);
+        app.upsert_agent_picker_thread(
+            agent_thread_id,
+            Some("Robie".to_string()),
+            Some("explorer".to_string()),
+            AgentThreadAvailability::Live,
+            Some(AgentStatus::Running),
+        );
+
+        app.handle_routed_thread_event(
+            agent_thread_id,
+            Event {
+                id: "ev-shutdown".to_string(),
+                msg: EventMsg::ShutdownComplete,
+            },
+        )
+        .await?;
+
+        assert_eq!(
+            app.agent_navigation.get(&agent_thread_id),
+            Some(&AgentPickerThreadEntry {
+                agent_nickname: Some("Robie".to_string()),
+                agent_role: Some("explorer".to_string()),
+                availability: AgentThreadAvailability::ReplayOnly,
+                last_status: Some(AgentStatus::Shutdown),
+            })
+        );
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 0 open agents".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn collab_close_end_marks_agent_replay_only_immediately() -> Result<()> {
+        let mut app = make_test_app().await;
+        let main_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000333").expect("valid thread");
+        let agent_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000444").expect("valid thread");
+
+        app.primary_thread_id = Some(main_thread_id);
+        app.active_thread_id = Some(main_thread_id);
+        app.upsert_agent_picker_thread(
+            agent_thread_id,
+            Some("Robie".to_string()),
+            Some("explorer".to_string()),
+            AgentThreadAvailability::Live,
+            Some(AgentStatus::Completed(Some("done".to_string()))),
+        );
+
+        app.enqueue_thread_event(
+            main_thread_id,
+            Event {
+                id: "ev-close".to_string(),
+                msg: EventMsg::CollabCloseEnd(CollabCloseEndEvent {
+                    call_id: "close-1".to_string(),
+                    sender_thread_id: main_thread_id,
+                    receiver_thread_id: agent_thread_id,
+                    receiver_agent_nickname: Some("Robie".to_string()),
+                    receiver_agent_role: Some("explorer".to_string()),
+                    status: AgentStatus::Completed(Some("done".to_string())),
+                }),
+            },
+        )
+        .await?;
+
+        assert_eq!(
+            app.agent_navigation.get(&agent_thread_id),
+            Some(&AgentPickerThreadEntry {
+                agent_nickname: Some("Robie".to_string()),
+                agent_role: Some("explorer".to_string()),
+                availability: AgentThreadAvailability::ReplayOnly,
+                last_status: Some(AgentStatus::Completed(Some("done".to_string()))),
+            })
+        );
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 0 open agents".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn collab_resume_end_revives_replay_only_agent_and_preserves_metadata() -> Result<()> {
+        let mut app = make_test_app().await;
+        let main_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000555").expect("valid thread");
+        let agent_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000666").expect("valid thread");
+
+        app.primary_thread_id = Some(main_thread_id);
+        app.active_thread_id = Some(main_thread_id);
+        app.upsert_agent_picker_thread(
+            agent_thread_id,
+            Some("Robie".to_string()),
+            Some("explorer".to_string()),
+            AgentThreadAvailability::ReplayOnly,
+            Some(AgentStatus::Shutdown),
+        );
+
+        app.enqueue_thread_event(
+            main_thread_id,
+            Event {
+                id: "ev-resume".to_string(),
+                msg: EventMsg::CollabResumeEnd(CollabResumeEndEvent {
+                    call_id: "resume-1".to_string(),
+                    sender_thread_id: main_thread_id,
+                    receiver_thread_id: agent_thread_id,
+                    receiver_agent_nickname: None,
+                    receiver_agent_role: None,
+                    status: AgentStatus::Running,
+                }),
+            },
+        )
+        .await?;
+
+        assert_eq!(
+            app.agent_navigation.get(&agent_thread_id),
+            Some(&AgentPickerThreadEntry {
+                agent_nickname: Some("Robie".to_string()),
+                agent_role: Some("explorer".to_string()),
+                availability: AgentThreadAvailability::Live,
+                last_status: Some(AgentStatus::Running),
+            })
+        );
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 1 open agent".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn collab_spawn_end_immediately_tracks_new_live_agent() -> Result<()> {
+        let mut app = make_test_app().await;
+        let main_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000777").expect("valid thread");
+        let agent_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000888").expect("valid thread");
+
+        app.primary_thread_id = Some(main_thread_id);
+        app.active_thread_id = Some(main_thread_id);
+
+        app.enqueue_thread_event(
+            main_thread_id,
+            Event {
+                id: "ev-spawn".to_string(),
+                msg: EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+                    call_id: "spawn-1".to_string(),
+                    sender_thread_id: main_thread_id,
+                    new_thread_id: Some(agent_thread_id),
+                    new_agent_nickname: Some("Darwin".to_string()),
+                    new_agent_role: Some("worker".to_string()),
+                    prompt: "run tests".to_string(),
+                    spawn_mode: AgentSpawnMode::Spawn,
+                    status: AgentStatus::Running,
+                }),
+            },
+        )
+        .await?;
+
+        assert_eq!(
+            app.agent_navigation.get(&agent_thread_id),
+            Some(&AgentPickerThreadEntry {
+                agent_nickname: Some("Darwin".to_string()),
+                agent_role: Some("worker".to_string()),
+                availability: AgentThreadAvailability::Live,
+                last_status: Some(AgentStatus::Running),
+            })
+        );
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 1 open agent".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn collab_waiting_end_updates_multiple_agent_statuses_immediately() -> Result<()> {
+        let mut app = make_test_app().await;
+        let main_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000889").expect("valid thread");
+        let live_agent_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000890").expect("valid thread");
+        let replay_agent_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000891").expect("valid thread");
+
+        app.primary_thread_id = Some(main_thread_id);
+        app.active_thread_id = Some(main_thread_id);
+        app.upsert_agent_picker_thread(
+            live_agent_id,
+            Some("Darwin".to_string()),
+            Some("worker".to_string()),
+            AgentThreadAvailability::Live,
+            Some(AgentStatus::Running),
+        );
+        app.upsert_agent_picker_thread(
+            replay_agent_id,
+            Some("Robie".to_string()),
+            Some("explorer".to_string()),
+            AgentThreadAvailability::Live,
+            Some(AgentStatus::Running),
+        );
+
+        app.enqueue_thread_event(
+            main_thread_id,
+            Event {
+                id: "ev-wait".to_string(),
+                msg: EventMsg::CollabWaitingEnd(CollabWaitingEndEvent {
+                    sender_thread_id: main_thread_id,
+                    call_id: "wait-1".to_string(),
+                    agent_statuses: vec![
+                        CollabAgentStatusEntry {
+                            thread_id: live_agent_id,
+                            agent_nickname: Some("Darwin".to_string()),
+                            agent_role: Some("worker".to_string()),
+                            status: AgentStatus::Completed(Some("done".to_string())),
+                        },
+                        CollabAgentStatusEntry {
+                            thread_id: replay_agent_id,
+                            agent_nickname: Some("Robie".to_string()),
+                            agent_role: Some("explorer".to_string()),
+                            status: AgentStatus::Shutdown,
+                        },
+                    ],
+                    statuses: HashMap::from([
+                        (
+                            live_agent_id,
+                            AgentStatus::Completed(Some("done".to_string())),
+                        ),
+                        (replay_agent_id, AgentStatus::Shutdown),
+                    ]),
+                }),
+            },
+        )
+        .await?;
+
+        assert_eq!(
+            app.agent_navigation.get(&live_agent_id),
+            Some(&AgentPickerThreadEntry {
+                agent_nickname: Some("Darwin".to_string()),
+                agent_role: Some("worker".to_string()),
+                availability: AgentThreadAvailability::Live,
+                last_status: Some(AgentStatus::Completed(Some("done".to_string()))),
+            })
+        );
+        assert_eq!(
+            app.agent_navigation.get(&replay_agent_id),
+            Some(&AgentPickerThreadEntry {
+                agent_nickname: Some("Robie".to_string()),
+                agent_role: Some("explorer".to_string()),
+                availability: AgentThreadAvailability::ReplayOnly,
+                last_status: Some(AgentStatus::Shutdown),
+            })
+        );
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 1 open agent".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn routed_event_for_replay_only_tracked_agent_updates_without_live_channel() -> Result<()>
+    {
+        let mut app = make_test_app().await;
+        let main_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000892").expect("valid thread");
+        let agent_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000893").expect("valid thread");
+
+        app.primary_thread_id = Some(main_thread_id);
+        app.active_thread_id = Some(main_thread_id);
+        app.upsert_agent_picker_thread(
+            agent_thread_id,
+            Some("Robie".to_string()),
+            Some("explorer".to_string()),
+            AgentThreadAvailability::ReplayOnly,
+            Some(AgentStatus::Shutdown),
+        );
+
+        app.handle_routed_thread_event(
+            agent_thread_id,
+            Event {
+                id: "ev-resume-running".to_string(),
+                msg: EventMsg::CollabResumeEnd(CollabResumeEndEvent {
+                    call_id: "resume-2".to_string(),
+                    sender_thread_id: main_thread_id,
+                    receiver_thread_id: agent_thread_id,
+                    receiver_agent_nickname: None,
+                    receiver_agent_role: None,
+                    status: AgentStatus::Running,
+                }),
+            },
+        )
+        .await?;
+
+        assert_eq!(
+            app.agent_navigation.get(&agent_thread_id),
+            Some(&AgentPickerThreadEntry {
+                agent_nickname: Some("Robie".to_string()),
+                agent_role: Some("explorer".to_string()),
+                availability: AgentThreadAvailability::Live,
+                last_status: Some(AgentStatus::Running),
+            })
+        );
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 1 open agent".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn follow_latest_thread_switches_to_spawned_live_agent() -> Result<()> {
+        let mut app = make_test_app().await;
+        let mut tui = make_test_tui();
+        let main_thread = app.server.start_thread(app.config.clone()).await?;
+        let agent_thread = app.server.start_thread(app.config.clone()).await?;
+
+        app.primary_thread_id = Some(main_thread.thread_id);
+        app.active_thread_id = Some(main_thread.thread_id);
+        app.thread_event_channels
+            .insert(main_thread.thread_id, ThreadEventChannel::new(1));
+        app.follow_latest_thread = true;
+        app.sync_follow_latest_thread_state();
+
+        app.enqueue_thread_event(
+            main_thread.thread_id,
+            Event {
+                id: "ev-follow-spawn".to_string(),
+                msg: EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+                    call_id: "spawn-follow".to_string(),
+                    sender_thread_id: main_thread.thread_id,
+                    new_thread_id: Some(agent_thread.thread_id),
+                    new_agent_nickname: Some("Darwin".to_string()),
+                    new_agent_role: Some("worker".to_string()),
+                    prompt: "run tests".to_string(),
+                    spawn_mode: AgentSpawnMode::Spawn,
+                    status: AgentStatus::Running,
+                }),
+            },
+        )
+        .await?;
+        app.maybe_follow_latest_thread(&mut tui).await?;
+
+        assert_eq!(
+            app.current_displayed_thread_id(),
+            Some(agent_thread.thread_id)
+        );
+        assert_eq!(app.chat_widget.thread_id(), Some(agent_thread.thread_id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn routed_live_agent_event_only_switches_when_follow_enabled() -> Result<()> {
+        let mut app = make_test_app().await;
+        let mut tui = make_test_tui();
+        let main_thread = app.server.start_thread(app.config.clone()).await?;
+        let agent_thread = app.server.start_thread(app.config.clone()).await?;
+
+        app.primary_thread_id = Some(main_thread.thread_id);
+        app.active_thread_id = Some(main_thread.thread_id);
+        app.thread_event_channels
+            .insert(main_thread.thread_id, ThreadEventChannel::new(1));
+
+        app.handle_routed_thread_event(
+            agent_thread.thread_id,
+            Event {
+                id: "ev-agent-activity-off".to_string(),
+                msg: EventMsg::TurnStarted(TurnStartedEvent {
+                    turn_id: "turn-1".to_string(),
+                    model_context_window: None,
+                    collaboration_mode_kind: ModeKind::Default,
+                }),
+            },
+        )
+        .await?;
+        app.maybe_follow_latest_thread(&mut tui).await?;
+        assert_eq!(
+            app.current_displayed_thread_id(),
+            Some(main_thread.thread_id)
+        );
+
+        app.follow_latest_thread = true;
+        app.sync_follow_latest_thread_state();
+
+        app.handle_routed_thread_event(
+            agent_thread.thread_id,
+            Event {
+                id: "ev-agent-activity-on".to_string(),
+                msg: EventMsg::CollabAgentInteractionEnd(CollabAgentInteractionEndEvent {
+                    call_id: "interaction-1".to_string(),
+                    sender_thread_id: main_thread.thread_id,
+                    receiver_thread_id: agent_thread.thread_id,
+                    receiver_agent_nickname: Some("Darwin".to_string()),
+                    receiver_agent_role: Some("worker".to_string()),
+                    prompt: "continue".to_string(),
+                    status: AgentStatus::Running,
+                }),
+            },
+        )
+        .await?;
+        app.maybe_follow_latest_thread(&mut tui).await?;
+
+        assert_eq!(
+            app.current_displayed_thread_id(),
+            Some(agent_thread.thread_id)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lagged_thread_created_resync_restores_live_agent_threads() -> Result<()> {
+        let mut app = make_test_app().await;
+        let main_thread = app.server.start_thread(app.config.clone()).await?;
+        let agent_thread = app.server.start_thread(app.config.clone()).await?;
+
+        app.primary_thread_id = Some(main_thread.thread_id);
+        app.active_thread_id = Some(main_thread.thread_id);
+        app.thread_event_channels
+            .insert(main_thread.thread_id, ThreadEventChannel::new(1));
+
+        app.resync_agent_thread_cache_from_manager().await?;
+
+        assert_eq!(
+            app.agent_navigation.get(&agent_thread.thread_id),
+            Some(&AgentPickerThreadEntry {
+                agent_nickname: None,
+                agent_role: None,
+                availability: AgentThreadAvailability::Live,
+                last_status: None,
+            })
+        );
+        assert!(
+            app.thread_event_channels
+                .contains_key(&agent_thread.thread_id)
+        );
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 1 open agent".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resync_marks_agent_navigation_only_threads_replay_only() -> Result<()> {
+        let mut app = make_test_app().await;
+        let main_thread = app.server.start_thread(app.config.clone()).await?;
+        let stale_agent_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000894").expect("valid thread");
+
+        app.primary_thread_id = Some(main_thread.thread_id);
+        app.active_thread_id = Some(main_thread.thread_id);
+        app.upsert_agent_picker_thread(
+            stale_agent_id,
+            Some("Robie".to_string()),
+            Some("explorer".to_string()),
+            AgentThreadAvailability::Live,
+            Some(AgentStatus::Running),
+        );
+
+        app.resync_agent_thread_cache_from_manager().await?;
+
+        assert_eq!(
+            app.agent_navigation.get(&stale_agent_id),
+            Some(&AgentPickerThreadEntry {
+                agent_nickname: Some("Robie".to_string()),
+                agent_role: Some("explorer".to_string()),
+                availability: AgentThreadAvailability::ReplayOnly,
+                last_status: Some(AgentStatus::Running),
+            })
+        );
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 0 open agents".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn inactive_thread_approval_bubbles_into_active_view() -> Result<()> {
         let mut app = make_test_app().await;
         let main_thread_id =
@@ -6483,6 +7183,8 @@ guardian_approval = true
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
+            follow_latest_thread: false,
+            pending_follow_thread_id: None,
             active_thread_id: None,
             active_thread_rx: None,
             primary_thread_id: None,
@@ -6543,6 +7245,8 @@ guardian_approval = true
                 thread_event_channels: HashMap::new(),
                 thread_event_listener_tasks: HashMap::new(),
                 agent_navigation: AgentNavigationState::default(),
+                follow_latest_thread: false,
+                pending_follow_thread_id: None,
                 active_thread_id: None,
                 active_thread_rx: None,
                 primary_thread_id: None,
@@ -6552,6 +7256,13 @@ guardian_approval = true
             rx,
             op_rx,
         )
+    }
+
+    fn make_test_tui() -> crate::tui::Tui {
+        let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
+        let terminal =
+            crate::custom_terminal::Terminal::with_options(backend).expect("create test terminal");
+        crate::tui::Tui::new(terminal)
     }
 
     fn next_user_turn_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) -> Op {

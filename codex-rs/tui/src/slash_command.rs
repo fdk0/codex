@@ -54,6 +54,7 @@ pub enum SlashCommand {
     Personality,
     Realtime,
     Settings,
+    FollowThread,
     TestApproval,
     #[strum(serialize = "subagents")]
     MultiAgents,
@@ -96,6 +97,7 @@ impl SlashCommand {
             SlashCommand::Personality => "choose a communication style for Codex",
             SlashCommand::Realtime => "toggle realtime voice mode (experimental)",
             SlashCommand::Settings => "configure realtime microphone/speaker",
+            SlashCommand::FollowThread => "follow the latest live agent thread in this session",
             SlashCommand::Plan => "switch to Plan mode",
             SlashCommand::Collab => "change collaboration mode (experimental)",
             SlashCommand::Agent | SlashCommand::MultiAgents => "switch the active agent thread",
@@ -128,6 +130,7 @@ impl SlashCommand {
                 | SlashCommand::Rename
                 | SlashCommand::Plan
                 | SlashCommand::Fast
+                | SlashCommand::FollowThread
                 | SlashCommand::SandboxReadRoot
         )
     }
@@ -164,6 +167,7 @@ impl SlashCommand {
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
             | SlashCommand::Stop
+            | SlashCommand::FollowThread
             | SlashCommand::Mcp
             | SlashCommand::Apps
             | SlashCommand::Feedback
