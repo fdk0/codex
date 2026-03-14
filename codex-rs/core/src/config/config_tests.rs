@@ -1,6 +1,8 @@
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
 use crate::config::edit::apply_blocking;
+use crate::config::types::AgentWaitOnWakeEnabledBehavior;
+use crate::config::types::AgentWakeDescendantPolicy;
 use crate::config::types::ApprovalsReviewer;
 use crate::config::types::BundledSkillsConfig;
 use crate::config::types::FeedbackConfigToml;
@@ -1699,6 +1701,42 @@ fn feature_table_enables_agent_function_call_inbox() -> std::io::Result<()> {
 }
 
 #[test]
+fn load_config_applies_agent_wake_policies() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        agents: Some(AgentsToml {
+            max_threads: None,
+            max_depth: None,
+            job_max_runtime_seconds: None,
+            use_function_call_inbox: false,
+            wake_parent_on_completion_default: Some(true),
+            wait_on_wake_enabled: AgentWaitOnWakeEnabledBehavior::Reject,
+            wake_descendant_policy: AgentWakeDescendantPolicy::LeafOnly,
+            roles: BTreeMap::new(),
+        }),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.path().to_path_buf(),
+    )?;
+
+    assert_eq!(config.agent_wake_parent_on_completion_default, true);
+    assert_eq!(
+        config.agent_wait_on_wake_enabled_behavior,
+        AgentWaitOnWakeEnabledBehavior::Reject
+    );
+    assert_eq!(
+        config.agent_wake_descendant_policy,
+        AgentWakeDescendantPolicy::LeafOnly
+    );
+
+    Ok(())
+}
+
+#[test]
 fn legacy_toggles_map_to_features() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
@@ -3087,6 +3125,9 @@ fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result<()> {
             max_depth: None,
             job_max_runtime_seconds: None,
             use_function_call_inbox: false,
+            wake_parent_on_completion_default: None,
+            wait_on_wake_enabled: AgentWaitOnWakeEnabledBehavior::default(),
+            wake_descendant_policy: AgentWakeDescendantPolicy::default(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -3955,6 +3996,9 @@ fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Result<()
             max_depth: None,
             job_max_runtime_seconds: None,
             use_function_call_inbox: false,
+            wake_parent_on_completion_default: None,
+            wait_on_wake_enabled: AgentWaitOnWakeEnabledBehavior::default(),
+            wake_descendant_policy: AgentWakeDescendantPolicy::default(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -3999,6 +4043,9 @@ fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::Result
             max_depth: None,
             job_max_runtime_seconds: None,
             use_function_call_inbox: false,
+            wake_parent_on_completion_default: None,
+            wait_on_wake_enabled: AgentWaitOnWakeEnabledBehavior::default(),
+            wake_descendant_policy: AgentWakeDescendantPolicy::default(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -4037,6 +4084,9 @@ fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::io::Re
             max_depth: None,
             job_max_runtime_seconds: None,
             use_function_call_inbox: false,
+            wake_parent_on_completion_default: None,
+            wait_on_wake_enabled: AgentWaitOnWakeEnabledBehavior::default(),
+            wake_descendant_policy: AgentWakeDescendantPolicy::default(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -4075,6 +4125,9 @@ fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io::Resul
             max_depth: None,
             job_max_runtime_seconds: None,
             use_function_call_inbox: false,
+            wake_parent_on_completion_default: None,
+            wait_on_wake_enabled: AgentWaitOnWakeEnabledBehavior::default(),
+            wake_descendant_policy: AgentWakeDescendantPolicy::default(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -4325,6 +4378,9 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             memories: MemoriesConfig::default(),
             agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
             agent_use_function_call_inbox: false,
+            agent_wake_parent_on_completion_default: false,
+            agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Allow,
+            agent_wake_descendant_policy: AgentWakeDescendantPolicy::Immediate,
             watchdog_interval_s: DEFAULT_WATCHDOG_INTERVAL_S,
             codex_home: fixture.codex_home(),
             sqlite_home: fixture.codex_home(),
@@ -4469,6 +4525,9 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
         agent_use_function_call_inbox: false,
+        agent_wake_parent_on_completion_default: false,
+        agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Allow,
+        agent_wake_descendant_policy: AgentWakeDescendantPolicy::Immediate,
         watchdog_interval_s: DEFAULT_WATCHDOG_INTERVAL_S,
         codex_home: fixture.codex_home(),
         sqlite_home: fixture.codex_home(),
@@ -4611,6 +4670,9 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
         agent_use_function_call_inbox: false,
+        agent_wake_parent_on_completion_default: false,
+        agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Allow,
+        agent_wake_descendant_policy: AgentWakeDescendantPolicy::Immediate,
         watchdog_interval_s: DEFAULT_WATCHDOG_INTERVAL_S,
         codex_home: fixture.codex_home(),
         sqlite_home: fixture.codex_home(),
@@ -4739,6 +4801,9 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
         agent_use_function_call_inbox: false,
+        agent_wake_parent_on_completion_default: false,
+        agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Allow,
+        agent_wake_descendant_policy: AgentWakeDescendantPolicy::Immediate,
         watchdog_interval_s: DEFAULT_WATCHDOG_INTERVAL_S,
         codex_home: fixture.codex_home(),
         sqlite_home: fixture.codex_home(),

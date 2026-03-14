@@ -2,6 +2,7 @@ use crate::agent::AgentStatus;
 use crate::codex::Codex;
 use crate::codex::SteerInputError;
 use crate::config::ConstraintResult;
+use crate::config::types::AgentWakeDescendantPolicy;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
 use crate::features::Feature;
@@ -39,6 +40,8 @@ pub struct ThreadConfigSnapshot {
     pub cwd: PathBuf,
     pub ephemeral: bool,
     pub agent_use_function_call_inbox: bool,
+    pub agent_wake_parent_on_completion_default: bool,
+    pub agent_wake_descendant_policy: AgentWakeDescendantPolicy,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub personality: Option<Personality>,
     pub session_source: SessionSource,

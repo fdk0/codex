@@ -1185,6 +1185,12 @@ impl SessionConfiguration {
             agent_use_function_call_inbox: self
                 .original_config_do_not_use
                 .agent_use_function_call_inbox,
+            agent_wake_parent_on_completion_default: self
+                .original_config_do_not_use
+                .agent_wake_parent_on_completion_default,
+            agent_wake_descendant_policy: self
+                .original_config_do_not_use
+                .agent_wake_descendant_policy,
             reasoning_effort: self.collaboration_mode.reasoning_effort(),
             personality: self.personality,
             session_source: self.session_source.clone(),
@@ -2762,6 +2768,10 @@ impl Session {
         if let Some(status) = agent_status_from_event(&event.msg) {
             self.agent_status.send_replace(status);
         }
+        self.services
+            .agent_control
+            .maybe_wake_parent_for_event(self.conversation_id, &event)
+            .await;
         if let Err(e) = self.tx_event.send(event).await {
             debug!("dropping event because channel is closed: {e}");
         }
