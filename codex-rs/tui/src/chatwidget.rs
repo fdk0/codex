@@ -386,6 +386,11 @@ fn agent_inbox_message_from_item(item: &ResponseItem) -> Option<(String, String)
     Some((payload.sender_thread_id.to_string(), payload.message))
 }
 
+fn format_agent_inbox_message(message: &str) -> String {
+    history_cell::format_subagent_notification_for_display(message)
+        .unwrap_or_else(|| format!("Agent message: {message}"))
+}
+
 fn is_standard_tool_call(parsed_cmd: &[ParsedCommand]) -> bool {
     !parsed_cmd.is_empty()
         && parsed_cmd
@@ -2915,7 +2920,7 @@ impl ChatWidget {
     fn on_raw_response_item(&mut self, event: RawResponseItemEvent) {
         if let Some((sender, message)) = agent_inbox_message_from_item(&event.item) {
             self.add_to_history(history_cell::new_info_event(
-                format!("Agent message: {message}"),
+                format_agent_inbox_message(&message),
                 Some(format!("from {sender}")),
             ));
             self.request_redraw();
@@ -5657,7 +5662,11 @@ impl ChatWidget {
         self.last_rendered_user_message_event =
             Some(Self::rendered_user_message_event_from_event(&event));
         let remote_image_urls = event.images.unwrap_or_default();
-        if !event.message.trim().is_empty()
+        if let Some(message) =
+            history_cell::format_subagent_notification_for_display(&event.message)
+        {
+            self.add_to_history(history_cell::new_info_event(message, None));
+        } else if !event.message.trim().is_empty()
             || !event.text_elements.is_empty()
             || !remote_image_urls.is_empty()
         {
