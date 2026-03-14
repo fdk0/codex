@@ -647,11 +647,21 @@ pub(crate) fn passive_footer_status_line(props: &FooterProps) -> Option<Line<'st
     };
 
     if let Some(active_agent_label) = props.active_agent_label.as_ref() {
-        if let Some(existing) = line.as_mut() {
-            existing.spans.push(" · ".into());
-            existing.spans.push(active_agent_label.clone().into());
-        } else {
-            line = Some(Line::from(active_agent_label.clone()));
+        let status_line_already_starts_with_active_agent = line.as_ref().is_some_and(|existing| {
+            existing
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .starts_with(active_agent_label)
+        });
+        if !status_line_already_starts_with_active_agent {
+            if let Some(existing) = line.as_mut() {
+                existing.spans.push(" · ".into());
+                existing.spans.push(active_agent_label.clone().into());
+            } else {
+                line = Some(Line::from(active_agent_label.clone()));
+            }
         }
     }
 
@@ -1664,6 +1674,32 @@ mod tests {
         };
 
         snapshot_footer("footer_status_line_with_active_agent_label", props);
+    }
+
+    #[test]
+    fn footer_does_not_duplicate_active_agent_when_status_line_already_has_summary() {
+        let props = FooterProps {
+            mode: FooterMode::ComposerEmpty,
+            esc_backtrack_hint: false,
+            use_shift_enter_hint: false,
+            is_task_running: false,
+            collaboration_modes_enabled: false,
+            is_wsl: false,
+            quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
+            context_window_percent: None,
+            context_window_used_tokens: None,
+            status_line_value: Some(Line::from("Robie [explorer] • 2 open agents".to_string())),
+            status_line_enabled: true,
+            active_agent_label: Some("Robie [explorer]".to_string()),
+        };
+
+        let line = passive_footer_status_line(&props).expect("footer line should render");
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(rendered, "Robie [explorer] • 2 open agents");
     }
 
     #[test]

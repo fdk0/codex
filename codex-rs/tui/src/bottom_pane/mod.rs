@@ -175,6 +175,7 @@ pub(crate) struct BottomPane {
     is_task_running: bool,
     esc_backtrack_hint: bool,
     animations_enabled: bool,
+    active_agent_summary: Option<ActiveAgentStatusSummary>,
 
     /// Inline status indicator shown above the composer while a task is running.
     status: Option<StatusIndicatorWidget>,
@@ -189,6 +190,8 @@ pub(crate) struct BottomPane {
     pending_thread_approvals: PendingThreadApprovals,
     context_window_percent: Option<i64>,
     context_window_used_tokens: Option<i64>,
+    base_status_line: Option<Line<'static>>,
+    base_status_line_enabled: bool,
 }
 
 pub(crate) struct BottomPaneParams {
@@ -200,6 +203,28 @@ pub(crate) struct BottomPaneParams {
     pub(crate) disable_paste_burst: bool,
     pub(crate) animations_enabled: bool,
     pub(crate) skills: Option<Vec<SkillMetadata>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActiveAgentStatusSummary {
+    pub(crate) label: String,
+    pub(crate) active_agents: usize,
+}
+
+impl ActiveAgentStatusSummary {
+    fn inline_message(&self) -> Option<String> {
+        let label = self.label.trim();
+        if label.is_empty() {
+            return None;
+        }
+
+        let noun = if self.active_agents == 1 {
+            "open agent"
+        } else {
+            "open agents"
+        };
+        Some(format!("{label} • {} {noun}", self.active_agents))
+    }
 }
 
 impl BottomPane {
@@ -232,6 +257,7 @@ impl BottomPane {
             enhanced_keys_supported,
             disable_paste_burst,
             is_task_running: false,
+            active_agent_summary: None,
             status: None,
             unified_exec_footer: UnifiedExecFooter::new(),
             pending_input_preview: PendingInputPreview::new(),
@@ -240,6 +266,8 @@ impl BottomPane {
             animations_enabled,
             context_window_percent: None,
             context_window_used_tokens: None,
+            base_status_line: None,
+            base_status_line_enabled: false,
         }
     }
 
@@ -845,6 +873,18 @@ impl BottomPane {
         self.pending_thread_approvals.threads()
     }
 
+    /// Update the current active-agent summary shown in the composer/footer status line.
+    pub(crate) fn set_active_agent_summary(&mut self, summary: Option<ActiveAgentStatusSummary>) {
+        if self.active_agent_summary == summary {
+            return;
+        }
+
+        self.active_agent_summary = summary;
+        self.sync_status_inline_message();
+        self.sync_composer_status_line();
+        self.request_redraw();
+    }
+
     /// Update the unified-exec process set and refresh whichever summary surface is active.
     ///
     /// The summary may be displayed inline in the status row or as a dedicated
@@ -856,14 +896,51 @@ impl BottomPane {
         }
     }
 
-    /// Copy unified-exec summary text into the active status row, if any.
-    ///
-    /// This keeps status-line inline text synchronized without forcing the
-    /// standalone unified-exec footer row to be visible.
-    fn sync_status_inline_message(&mut self) {
-        if let Some(status) = self.status.as_mut() {
-            status.update_inline_message(self.unified_exec_footer.summary_text());
+    fn compose_status_inline_message(&self) -> Option<String> {
+        self.unified_exec_footer.summary_text()
+    }
+
+    fn compose_composer_status_line(&self) -> Option<Line<'static>> {
+        let mut spans = Vec::new();
+        if let Some(summary) = self
+            .active_agent_summary
+            .as_ref()
+            .and_then(ActiveAgentStatusSummary::inline_message)
+        {
+            spans.push(summary.into());
         }
+        if let Some(base_status_line) = self.base_status_line.clone() {
+            if !spans.is_empty() {
+                spans.push(" · ".into());
+            }
+            spans.extend(base_status_line.spans);
+        }
+
+        if spans.is_empty() {
+            None
+        } else {
+            Some(Line::from(spans))
+        }
+    }
+
+    /// Copy the inline working-row summary text into the active status row, if any.
+    fn sync_status_inline_message(&mut self) {
+        let inline_message = self.compose_status_inline_message();
+        if let Some(status) = self.status.as_mut() {
+            status.update_inline_message(inline_message);
+        }
+    }
+
+    fn sync_composer_status_line(&mut self) {
+        let enabled = self.base_status_line_enabled || self.active_agent_summary.is_some();
+        self.composer.set_status_line_enabled(enabled);
+        self.composer
+            .set_status_line(self.compose_composer_status_line());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status_inline_message(&self) -> Option<String> {
+        self.compose_status_inline_message()
     }
 
     /// Update custom prompts available for the slash popup.
@@ -1185,15 +1262,15 @@ impl BottomPane {
     }
 
     pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
-        if self.composer.set_status_line(status_line) {
-            self.request_redraw();
-        }
+        self.base_status_line = status_line;
+        self.sync_composer_status_line();
+        self.request_redraw();
     }
 
     pub(crate) fn set_status_line_enabled(&mut self, enabled: bool) {
-        if self.composer.set_status_line_enabled(enabled) {
-            self.request_redraw();
-        }
+        self.base_status_line_enabled = enabled;
+        self.sync_composer_status_line();
+        self.request_redraw();
     }
 
     /// Updates the contextual footer label and requests a redraw only when it changed.
@@ -1880,6 +1957,43 @@ mod tests {
             matches!(rx.try_recv(), Ok(AppEvent::CodexOp(Op::Interrupt))),
             "expected Esc to send Op::Interrupt while a task is running"
         );
+    }
+
+    #[test]
+    fn active_agent_summary_stays_in_composer_footer_not_inline_status_row() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut pane = BottomPane::new(BottomPaneParams {
+            app_event_tx: tx,
+            frame_requester: FrameRequester::test_dummy(),
+            has_input_focus: true,
+            enhanced_keys_supported: false,
+            placeholder_text: "Ask Codex to do anything".to_string(),
+            disable_paste_burst: false,
+            animations_enabled: true,
+            skills: Some(Vec::new()),
+        });
+
+        pane.set_active_agent_summary(Some(ActiveAgentStatusSummary {
+            label: "Robie [explorer]".to_string(),
+            active_agents: 2,
+        }));
+
+        assert_eq!(
+            pane.status_line_text(),
+            Some("Robie [explorer] • 2 open agents".to_string())
+        );
+        let width = 56;
+        let height = pane.desired_height(width);
+        let area = Rect::new(0, 0, width, height);
+        assert_snapshot!(
+            "status_with_active_agent_summary",
+            render_snapshot(&pane, area)
+        );
+
+        pane.set_task_running(true);
+
+        assert_eq!(pane.status_inline_message(), None);
     }
 
     #[test]
