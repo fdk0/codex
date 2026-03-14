@@ -75,6 +75,8 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::AGENT_INBOX_KIND;
+use codex_protocol::protocol::AgentInboxPayload;
 use codex_protocol::protocol::ConversationAudioParams;
 use codex_protocol::protocol::RealtimeAudioFrame;
 use codex_protocol::protocol::Submission;
@@ -2684,6 +2686,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         active_turn: Mutex::new(None),
         idle_pending_input: Mutex::new(Vec::new()),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        wake_autoresume_state: Mutex::new(WakeAutoresumeState::default()),
         services,
         js_repl,
         turn_used_agent_send_input: std::sync::atomic::AtomicBool::new(false),
@@ -3521,6 +3524,7 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
         active_turn: Mutex::new(None),
         idle_pending_input: Mutex::new(Vec::new()),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        wake_autoresume_state: Mutex::new(WakeAutoresumeState::default()),
         services,
         js_repl,
         turn_used_agent_send_input: std::sync::atomic::AtomicBool::new(false),
@@ -4494,6 +4498,111 @@ async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input()
             last_agent_message: None,
         }) if turn_id == tc.sub_id
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_parent_buffers_child_wakes_until_explicit_user_input() {
+    let (sess, tc, rx) = make_session_and_context_with_rx().await;
+    let input = vec![UserInput::Text {
+        text: "hello".to_string(),
+        text_elements: Vec::new(),
+    }];
+    sess.spawn_task(
+        Arc::clone(&tc),
+        input,
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: false,
+        },
+    )
+    .await;
+
+    while rx.try_recv().is_ok() {}
+
+    sess.interrupt_task().await;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut saw_turn_aborted = false;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, rx.recv())
+            .await
+            .expect("timeout waiting for abort event")
+            .expect("channel open");
+        if matches!(event.msg, EventMsg::TurnAborted(_)) {
+            saw_turn_aborted = true;
+            break;
+        }
+    }
+    assert!(saw_turn_aborted, "expected TurnAborted after interrupt");
+    assert!(!sess.has_active_turn().await);
+
+    let child_thread_id = ThreadId::new();
+    let message = crate::session_prefix::format_subagent_notification_message(
+        &child_thread_id.to_string(),
+        &crate::agent::AgentStatus::Completed(Some("done".to_string())),
+    );
+    let output = serde_json::to_string(&AgentInboxPayload::new(child_thread_id, message))
+        .expect("agent inbox payload should serialize");
+    let items = vec![
+        ResponseInputItem::FunctionCall {
+            name: AGENT_INBOX_KIND.to_string(),
+            arguments: "{}".to_string(),
+            call_id: "call-buffered".to_string(),
+        },
+        ResponseInputItem::FunctionCallOutput {
+            call_id: "call-buffered".to_string(),
+            output: FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::Text(output),
+                ..Default::default()
+            },
+        },
+    ];
+
+    handlers::inject_response_items(&sess, "wake-test".to_string(), items.clone()).await;
+
+    sleep(Duration::from_millis(100)).await;
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .is_err(),
+        "interrupted parent should not auto-resume from buffered child wake"
+    );
+    assert!(!sess.has_active_turn().await);
+    assert_eq!(sess.buffered_wake_items_len().await, items.len());
+
+    handlers::user_input_or_turn(
+        &sess,
+        "resume-test".to_string(),
+        Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "resume manually".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        },
+    )
+    .await;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut saw_task_started = false;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, rx.recv())
+            .await
+            .expect("timeout waiting for restarted turn")
+            .expect("channel open");
+        if matches!(event.msg, EventMsg::TurnStarted(_)) {
+            saw_task_started = true;
+            break;
+        }
+    }
+    assert!(
+        saw_task_started,
+        "expected explicit user input to restart the parent turn"
+    );
+    assert_eq!(sess.buffered_wake_items_len().await, 0);
 }
 
 #[tokio::test]

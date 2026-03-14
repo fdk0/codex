@@ -8,12 +8,15 @@ use crate::config::Config;
 use crate::config::ConfigBuilder;
 use crate::config_loader::LoaderOverrides;
 use crate::contextual_user_message::SUBAGENT_NOTIFICATION_OPEN_TAG;
+use crate::session_prefix::format_subagent_notification_message;
+use crate::state::ActiveTurn;
 use assert_matches::assert_matches;
 use chrono::Utc;
 use codex_features::Feature;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::Event;
@@ -113,6 +116,31 @@ fn has_subagent_notification(history_items: &[ResponseItem]) -> bool {
             ContentItem::InputImage { .. } => false,
         })
     })
+}
+
+fn count_subagent_notifications_for_agent(history_items: &[ResponseItem], agent_id: &str) -> usize {
+    history_items
+        .iter()
+        .filter_map(|item| {
+            let ResponseItem::Message { role, content, .. } = item else {
+                return None;
+            };
+            if role != "user" {
+                return None;
+            }
+            Some(
+                content
+                    .iter()
+                    .filter(|content_item| match content_item {
+                        ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                            text.contains(SUBAGENT_NOTIFICATION_OPEN_TAG) && text.contains(agent_id)
+                        }
+                        ContentItem::InputImage { .. } => false,
+                    })
+                    .count(),
+            )
+        })
+        .sum()
 }
 
 /// Returns true when any message item contains `needle` in a text span.
@@ -1295,6 +1323,62 @@ async fn wake_parent_on_completion_persists_across_reused_child_turns() {
 }
 
 #[tokio::test]
+async fn child_completion_without_wake_injects_notification_into_parent_history() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let (child_thread_id, child_thread) = harness.start_thread().await;
+
+    child_thread
+        .codex
+        .session
+        .services
+        .agent_control
+        .register_parent_wake_subscription(
+            child_thread_id,
+            Some(&thread_spawn_source(parent_thread_id)),
+            false,
+        )
+        .await;
+
+    child_thread
+        .codex
+        .session
+        .send_event_raw(Event {
+            id: "child-turn-complete".to_string(),
+            msg: EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "child-turn".to_string(),
+                last_agent_message: Some("done".to_string()),
+            }),
+        })
+        .await;
+
+    assert!(wait_for_subagent_notification(&parent_thread).await);
+
+    let parent_history = parent_thread
+        .codex
+        .session
+        .clone_history()
+        .await
+        .raw_items()
+        .to_vec();
+    assert_eq!(
+        count_subagent_notifications_for_agent(&parent_history, &child_thread_id.to_string()),
+        1
+    );
+    assert_eq!(
+        harness
+            .manager
+            .captured_ops()
+            .into_iter()
+            .filter(|(thread_id, op)| {
+                *thread_id == parent_thread_id && matches!(op, Op::InjectResponseItems { .. })
+            })
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn resume_agent_from_rollout_preserves_parent_wake_subscription() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, _parent_thread) = harness.start_thread().await;
@@ -1379,6 +1463,122 @@ async fn resume_agent_from_rollout_preserves_parent_wake_subscription() {
         .await;
 
     wait_for_injected_wake_count(&harness, parent_thread_id, 1).await;
+}
+
+#[tokio::test]
+async fn send_watchdog_wakeup_coalesces_duplicate_pending_root_message() {
+    let harness = AgentControlHarness::new().await;
+    let (receiver_thread_id, receiver_thread) = harness.start_thread().await;
+    let sender_thread_id = ThreadId::new();
+    let message = "watchdog update".to_string();
+
+    {
+        let mut active = receiver_thread.codex.session.active_turn.lock().await;
+        *active = Some(ActiveTurn::default());
+    }
+    {
+        let active = receiver_thread.codex.session.active_turn.lock().await;
+        let turn = active.as_ref().expect("active turn should exist");
+        let mut turn_state = turn.turn_state.lock().await;
+        for item in build_agent_inbox_items(sender_thread_id, message.clone(), false)
+            .expect("agent inbox items should build")
+        {
+            turn_state.push_pending_input(item);
+        }
+    }
+
+    let submission_id = harness
+        .control
+        .send_watchdog_wakeup(receiver_thread_id, sender_thread_id, message)
+        .await
+        .expect("send_watchdog_wakeup should succeed");
+    assert_eq!(
+        submission_id,
+        format!("coalesced_wake:{receiver_thread_id}")
+    );
+    assert_eq!(
+        harness
+            .manager
+            .captured_ops()
+            .into_iter()
+            .filter(|(thread_id, op)| {
+                *thread_id == receiver_thread_id
+                    && matches!(op, Op::InjectResponseItems { .. } | Op::UserInput { .. })
+            })
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn send_watchdog_wakeup_coalesces_duplicate_pending_subagent_message() {
+    let harness = AgentControlHarness::new().await;
+    let (root_thread_id, _root_thread) = harness.start_thread().await;
+    let receiver_thread_id = harness
+        .control
+        .spawn_agent_with_options(
+            harness.config.clone(),
+            text_input("hello dispatcher"),
+            Some(thread_spawn_source(root_thread_id)),
+            SpawnAgentOptions::default(),
+        )
+        .await
+        .expect("dispatcher spawn should succeed");
+    let receiver_thread = harness
+        .manager
+        .get_thread(receiver_thread_id)
+        .await
+        .expect("receiver thread should exist");
+    let sender_thread_id = ThreadId::new();
+    let message = format_subagent_notification_message(
+        &sender_thread_id.to_string(),
+        &AgentStatus::Completed(Some("worker done".to_string())),
+    );
+
+    {
+        let mut active = receiver_thread.codex.session.active_turn.lock().await;
+        *active = Some(ActiveTurn::default());
+    }
+    {
+        let active = receiver_thread.codex.session.active_turn.lock().await;
+        let turn = active.as_ref().expect("active turn should exist");
+        let mut turn_state = turn.turn_state.lock().await;
+        turn_state.push_pending_input(ResponseInputItem::from(vec![UserInput::Text {
+            text: message.clone(),
+            text_elements: Vec::new(),
+        }]));
+    }
+    let baseline_count = harness
+        .manager
+        .captured_ops()
+        .into_iter()
+        .filter(|(thread_id, op)| {
+            *thread_id == receiver_thread_id
+                && matches!(op, Op::InjectResponseItems { .. } | Op::UserInput { .. })
+        })
+        .count();
+
+    let submission_id = harness
+        .control
+        .send_watchdog_wakeup(receiver_thread_id, sender_thread_id, message)
+        .await
+        .expect("send_watchdog_wakeup should succeed");
+    assert_eq!(
+        submission_id,
+        format!("coalesced_wake:{receiver_thread_id}")
+    );
+    assert_eq!(
+        harness
+            .manager
+            .captured_ops()
+            .into_iter()
+            .filter(|(thread_id, op)| {
+                *thread_id == receiver_thread_id
+                    && matches!(op, Op::InjectResponseItems { .. } | Op::UserInput { .. })
+            })
+            .count(),
+        baseline_count
+    );
 }
 
 #[tokio::test]

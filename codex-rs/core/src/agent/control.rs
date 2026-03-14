@@ -54,15 +54,27 @@ use uuid::Uuid;
 const AGENT_NAMES: &str = include_str!("agent_names.txt");
 const FORKED_SPAWN_AGENT_OUTPUT_MESSAGE: &str = "You are the newly spawned agent. The prior conversation history was forked from your parent agent. Treat the next user message as your new task, and use the forked history only as background context.";
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_parent_spawn_call_id: Option<String>,
     pub(crate) wake_parent_on_completion: bool,
+    pub(crate) notify_parent_on_completion: bool,
+}
+
+impl Default for SpawnAgentOptions {
+    fn default() -> Self {
+        Self {
+            fork_parent_spawn_call_id: None,
+            wake_parent_on_completion: false,
+            notify_parent_on_completion: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 struct ParentWakeSubscription {
     parent_thread_id: ThreadId,
+    wake_parent_on_completion: bool,
     last_wake_key: Option<String>,
 }
 
@@ -334,17 +346,19 @@ impl AgentControl {
             notification_source.as_ref(),
         )
         .await;
-        self.register_parent_wake_subscription(
-            new_thread.thread_id,
-            notification_source.as_ref(),
-            options.wake_parent_on_completion,
-        )
-        .await;
+        if options.notify_parent_on_completion {
+            self.register_parent_wake_subscription(
+                new_thread.thread_id,
+                notification_source.as_ref(),
+                options.wake_parent_on_completion,
+            )
+            .await;
+        }
         if let Err(err) = self.send_input(new_thread.thread_id, items).await {
             self.clear_parent_wake_state(new_thread.thread_id).await;
             return Err(err);
         }
-        if !options.wake_parent_on_completion {
+        if options.notify_parent_on_completion && !options.wake_parent_on_completion {
             self.maybe_start_completion_watcher(new_thread.thread_id, notification_source);
         }
 
@@ -462,17 +476,19 @@ impl AgentControl {
             .await?;
         reservation.commit(new_thread.thread_id);
         state.notify_thread_created(new_thread.thread_id);
-        self.register_parent_wake_subscription(
-            new_thread.thread_id,
-            Some(&session_source),
-            options.wake_parent_on_completion,
-        )
-        .await;
+        if options.notify_parent_on_completion {
+            self.register_parent_wake_subscription(
+                new_thread.thread_id,
+                Some(&session_source),
+                options.wake_parent_on_completion,
+            )
+            .await;
+        }
         if let Err(err) = self.send_input(new_thread.thread_id, items).await {
             self.clear_parent_wake_state(new_thread.thread_id).await;
             return Err(err);
         }
-        if !options.wake_parent_on_completion {
+        if options.notify_parent_on_completion && !options.wake_parent_on_completion {
             self.maybe_start_completion_watcher(new_thread.thread_id, Some(session_source));
         }
         Ok(new_thread.thread_id)
@@ -776,6 +792,14 @@ impl AgentControl {
     ) -> CodexResult<String> {
         let state = self.upgrade()?;
         let thread = state.get_thread(agent_id).await?;
+        if thread
+            .codex
+            .session
+            .has_pending_agent_message(sender_thread_id, &message)
+            .await
+        {
+            return Ok(format!("coalesced_wake:{agent_id}"));
+        }
         let snapshot = thread.config_snapshot().await;
         let result = if matches!(snapshot.session_source, SessionSource::SubAgent(_)) {
             self.send_prompt(agent_id, message).await
@@ -882,6 +906,22 @@ impl AgentControl {
             }
         }
         result
+    }
+
+    pub(crate) async fn cleanup_finished_agent_thread(&self, agent_id: ThreadId) {
+        let Ok(state) = self.upgrade() else {
+            return;
+        };
+        self.clear_parent_wake_state(agent_id).await;
+        if let Some(removed_watchdog) = self.watchdogs.unregister(agent_id).await
+            && let Some(helper_id) = removed_watchdog.active_helper_id
+        {
+            self.clear_parent_wake_state(helper_id).await;
+            let _ = state.remove_thread(&helper_id).await;
+            self.guards.release_spawned_thread(helper_id);
+        }
+        let _ = state.remove_thread(&agent_id).await;
+        self.guards.release_spawned_thread(agent_id);
     }
 
     /// Fetch the last known status for `agent_id`, returning `NotFound` when unavailable.
@@ -1139,17 +1179,14 @@ impl AgentControl {
             },
         );
         let mut subscriptions = self.parent_wake_subscriptions.lock().await;
-        if wake_parent_on_completion {
-            subscriptions.insert(
-                child_thread_id,
-                ParentWakeSubscription {
-                    parent_thread_id: *parent_thread_id,
-                    last_wake_key: None,
-                },
-            );
-        } else {
-            subscriptions.remove(&child_thread_id);
-        }
+        subscriptions.insert(
+            child_thread_id,
+            ParentWakeSubscription {
+                parent_thread_id: *parent_thread_id,
+                wake_parent_on_completion,
+                last_wake_key: None,
+            },
+        );
     }
 
     async fn wake_parent_on_completion_for_thread(
@@ -1195,7 +1232,10 @@ impl AgentControl {
             .filter(|child_thread_id| {
                 subscriptions
                     .get(child_thread_id)
-                    .is_some_and(|subscription| subscription.parent_thread_id == parent_thread_id)
+                    .is_some_and(|subscription| {
+                        subscription.parent_thread_id == parent_thread_id
+                            && subscription.wake_parent_on_completion
+                    })
             })
             .collect()
     }
@@ -1240,7 +1280,7 @@ impl AgentControl {
             return;
         }
 
-        let parent_thread_id = {
+        let (parent_thread_id, wake_parent_on_completion) = {
             let mut subscriptions = self.parent_wake_subscriptions.lock().await;
             let Some(subscription) = subscriptions.get_mut(&child_thread_id) else {
                 return;
@@ -1249,16 +1289,25 @@ impl AgentControl {
                 return;
             }
             subscription.last_wake_key = Some(wake_key);
-            subscription.parent_thread_id
+            (
+                subscription.parent_thread_id,
+                subscription.wake_parent_on_completion,
+            )
         };
-        let Ok(_parent_thread) = state.get_thread(parent_thread_id).await else {
+        let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
             return;
         };
         let notification_message =
             format_subagent_notification_message(&child_thread_id.to_string(), &status);
-        let _ = self
-            .send_watchdog_wakeup(parent_thread_id, child_thread_id, notification_message)
-            .await;
+        if wake_parent_on_completion {
+            let _ = self
+                .send_watchdog_wakeup(parent_thread_id, child_thread_id, notification_message)
+                .await;
+        } else {
+            parent_thread
+                .inject_user_message_without_turn(notification_message)
+                .await;
+        }
     }
 
     pub(crate) async fn watchdog_targets(&self, agent_ids: &[ThreadId]) -> HashSet<ThreadId> {
@@ -3328,7 +3377,7 @@ mod inbox_tests {
             .expect("replacement thread shutdown should submit");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_watchdogs_once_wakes_owner_when_helper_exits_without_send_input() {
         let harness = AgentControlHarness::new().await;
         let (owner_thread_id, owner_thread) = harness.start_thread().await;
