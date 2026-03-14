@@ -534,6 +534,42 @@ fn test_build_specs_collab_tools_enabled() {
 }
 
 #[test]
+fn spawn_agent_tool_includes_child_env_schema() {
+    let model_info = model_info_from_models_json("gpt-5-codex");
+    let available_models = Vec::new();
+    let features = Features::with_defaults();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) =
+        super::create_spawn_agent_tool(&tools_config)
+    else {
+        panic!("expected function tool");
+    };
+    let JsonSchema::Object { properties, .. } = parameters else {
+        panic!("expected object parameters");
+    };
+    let Some(JsonSchema::Object {
+        properties: env_properties,
+        required,
+        additional_properties: Some(AdditionalProperties::Schema(value_schema)),
+    }) = properties.get("env")
+    else {
+        panic!("expected env schema");
+    };
+
+    assert!(env_properties.is_empty());
+    assert_eq!(required, &None);
+    assert!(matches!(value_schema.as_ref(), JsonSchema::String { .. }));
+}
+
+#[test]
 fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
     let config = test_config();
     let model_info = ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);

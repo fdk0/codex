@@ -1138,6 +1138,22 @@ fn create_spawn_agent_tool(config: &ToolsConfig) -> ToolSpec {
             },
         ),
         (
+            "env".to_string(),
+            JsonSchema::Object {
+                properties: BTreeMap::new(),
+                required: None,
+                additional_properties: Some(
+                    JsonSchema::String {
+                        description: Some(
+                            "Environment variable value to merge into the child thread's shell environment."
+                                .to_string(),
+                        ),
+                    }
+                    .into(),
+                ),
+            },
+        ),
+        (
             "fork_context".to_string(),
             JsonSchema::Boolean {
                 description: Some(
@@ -1168,7 +1184,7 @@ fn create_spawn_agent_tool(config: &ToolsConfig) -> ToolSpec {
             "wake_parent_on_completion".to_string(),
             JsonSchema::Boolean {
                 description: Some(
-                    "When true, Codex wakes the spawning parent thread after this child reaches a terminal status so the parent can continue without polling wait_agent. When omitted, Codex uses the configured agents.wake_parent_on_completion_default policy."
+                    "When true, Codex wakes the spawning parent thread after this child reaches a terminal status so the parent can continue without polling wait_agent. Root/non-subagent parents receive an injected agent_inbox message; subagent parents receive a subagent_notification prompt. When omitted, Codex uses the configured agents.wake_parent_on_completion_default policy. On configurations with agents.wait_on_wake_enabled = \"reject\", wait_agent(ids=[...]) against wake-enabled children may fail immediately and instruct the parent to end the turn and rely on the automatic wake path instead."
                         .to_string(),
                 ),
             },
@@ -1212,13 +1228,17 @@ fn create_spawn_agent_tool(config: &ToolsConfig) -> ToolSpec {
 - Do not duplicate work between the main rollout and delegated subtasks.
 - Avoid issuing multiple delegate calls on the same unresolved thread unless the new delegated task is genuinely different and necessary.
 - Narrow the delegated ask to the concrete output you need next.
+- Use `env` when the child needs thread-scoped shell variables; provided keys override inherited values for that child thread.
+- Prefer `env` for stable child-lifetime shell vars instead of repeating the same `KEY=VALUE` declarations in every child payload or shell command.
 - For coding tasks, prefer delegating concrete code-change worker subtasks over read-only explorer analysis when the subagent can make a bounded patch in a clear write scope.
 - When delegating coding work, instruct the submodel to edit files directly in its forked workspace and list the file paths it changed in the final answer.
 - For code-edit subtasks, decompose work so each delegated task has a disjoint write set.
 
 ### After you delegate
 - Call wait_agent very sparingly. Only call wait_agent when you need the result immediately for the next critical-path step and you are blocked until it returns.
-- If you spawn with `wake_parent_on_completion=true`, prefer ending the current turn and relying on the automatic wake path instead of polling.
+- Prefer wake_parent_on_completion=true for long-running or uncertain-duration children, then either continue non-overlapping work or end the turn and resume when the wake arrives.
+- If wake_parent_on_completion is omitted, Codex may still treat the child as wake-enabled depending on agents.wake_parent_on_completion_default.
+- On configurations with agents.wait_on_wake_enabled = "reject", wait_agent(ids=[...]) against wake-enabled children returns a correction instead of blocking; use wait_agent only when you explicitly want same-turn polling behavior.
 - Do not redo delegated subagent tasks yourself; focus on integrating results or tackling non-overlapping work.
 - While the subagent is running in the background, do meaningful non-overlapping work immediately.
 - Do not repeatedly wait by reflex.
@@ -1557,9 +1577,9 @@ fn create_list_agents_tool(agent_watchdog: bool) -> ToolSpec {
 
 fn wait_agent_tool_parameters(agent_watchdog: bool) -> JsonSchema {
     let targets_description = if agent_watchdog {
-        "Agent ids or canonical task names to wait on. Pass multiple targets to wait for whichever finishes first. Watchdog handle ids are status-only here: if all targets are watchdog handles, wait_agent returns an immediate correction instead of blocking; if mixed with normal agent ids, wait_agent still waits on normal agents and includes current watchdog statuses."
+        "Agent ids or canonical task names to wait on. Pass multiple targets to wait for whichever finishes first. Watchdog handle ids are status-only here: if all targets are watchdog handles, wait_agent returns an immediate correction instead of blocking; if mixed with normal agent ids, wait_agent still waits on normal agents and includes current watchdog statuses. On configurations with agents.wait_on_wake_enabled = \"reject\", wake-enabled child agent ids also return an immediate correction instead of blocking."
     } else {
-        "Agent ids or canonical task names to wait on. Pass multiple targets to wait for whichever finishes first."
+        "Agent ids or canonical task names to wait on. Pass multiple targets to wait for whichever finishes first. On configurations with agents.wait_on_wake_enabled = \"reject\", wake-enabled child agent ids return an immediate correction instead of blocking."
     };
     let mut properties = BTreeMap::new();
     properties.insert(
@@ -1587,9 +1607,9 @@ fn wait_agent_tool_parameters(agent_watchdog: bool) -> JsonSchema {
 
 fn create_wait_agent_tool_v1(agent_watchdog: bool) -> ToolSpec {
     let description = if agent_watchdog {
-        "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status. Watchdog handles cannot be waited on for new check-ins, and sleeping or polling cannot make a watchdog fire while the current turn is active."
+        "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Use wait_agent for short, same-turn-needed work only. Watchdog handles cannot be waited on for new check-ins, and sleeping or polling cannot make a watchdog fire while the current turn is active. Wake-enabled child agents may also reject wait_agent under the configured agents.wait_on_wake_enabled policy; when that happens, end the turn and rely on the automatic wake path."
     } else {
-        "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Depending on configuration, wake-enabled child agents may reject wait_agent and instruct you to rely on the automatic wake path instead."
+        "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Use wait_agent for short, same-turn-needed work only. Wake-enabled child agents may reject wait_agent under the configured agents.wait_on_wake_enabled policy; when that happens, end the turn and rely on the automatic wake path."
     };
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
@@ -1603,9 +1623,9 @@ fn create_wait_agent_tool_v1(agent_watchdog: bool) -> ToolSpec {
 
 fn create_wait_agent_tool_v2(agent_watchdog: bool) -> ToolSpec {
     let description = if agent_watchdog {
-        "Wait for agents to reach a final status. Returns a brief wait summary instead of the agent's final content. Returns a timeout summary when no agent reaches a final status before the deadline. Watchdog handles are status-only here and cannot be waited on for new check-ins."
+        "Wait for agents to reach a final status. Returns a brief wait summary instead of the agent's final content. Returns a timeout summary when no agent reaches a final status before the deadline. Use wait_agent for short, same-turn-needed work only. Watchdog handles are status-only here and cannot be waited on for new check-ins. Wake-enabled child agents may also reject wait_agent under the configured agents.wait_on_wake_enabled policy; when that happens, end the turn and rely on the automatic wake path."
     } else {
-        "Wait for agents to reach a final status. Returns a brief wait summary instead of the agent's final content. Returns a timeout summary when no agent reaches a final status before the deadline. Depending on configuration, wake-enabled child agents may reject wait_agent and instruct you to rely on the automatic wake path instead."
+        "Wait for agents to reach a final status. Returns a brief wait summary instead of the agent's final content. Returns a timeout summary when no agent reaches a final status before the deadline. Use wait_agent for short, same-turn-needed work only. Wake-enabled child agents may reject wait_agent under the configured agents.wait_on_wake_enabled policy; when that happens, end the turn and rely on the automatic wake path."
     };
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
