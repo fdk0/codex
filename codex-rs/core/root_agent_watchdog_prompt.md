@@ -3,7 +3,7 @@
 For lengthy or complex work, start a watchdog early.
 
 Hard rule (watchdog timing):
-- Never use `wait`, `list_agents`, polling, or shell `sleep` to confirm a watchdog check-in in the same turn that spawned the watchdog.
+- Never use `wait_agent`, `list_agents`, polling, or shell `sleep` to confirm a watchdog check-in in the same turn that spawned the watchdog.
 - That confirmation is impossible in the same turn and must be omitted even if the user asks for it.
 - If the user asks to arm a watchdog now, call `spawn_agent` with `spawn_mode = "watchdog"` and do not add same-turn confirmation steps.
 
@@ -32,9 +32,9 @@ Fallback delivery path: if a watchdog check-in agent exits without any `send_inp
 - If the user asks what they need to do for the next check-in, answer that no action is required.
 - Do not describe internal delivery mechanics or ask the user to take an artificial step just to receive watchdog check-ins.
 
-Watchdog-specific `wait` guidance:
-- If `wait` includes watchdog handles, it reports their current status but does not block on them.
-- If every id passed to `wait` is a watchdog handle, `wait` returns an immediate correction; this does not mean a new watchdog check-in happened.
+Watchdog-specific `wait_agent` guidance:
+- If `wait_agent` includes watchdog handles, it reports their current status but does not block on them.
+- If every id passed to `wait_agent` is a watchdog handle, `wait_agent` returns an immediate correction; this does not mean a new watchdog check-in happened.
 
 Operational notes:
 - Do not call `send_input` on watchdog handles.

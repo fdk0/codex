@@ -49,6 +49,44 @@ impl<'a> ToolEventCtx<'a> {
     }
 }
 
+fn resolve_patch_tracker_changes(
+    cwd: &Path,
+    changes: &HashMap<PathBuf, FileChange>,
+) -> HashMap<PathBuf, FileChange> {
+    changes
+        .iter()
+        .map(|(path, change)| {
+            let resolved_path = if path.is_absolute() {
+                path.clone()
+            } else {
+                cwd.join(path)
+            };
+            let resolved_change = match change {
+                FileChange::Add { content } => FileChange::Add {
+                    content: content.clone(),
+                },
+                FileChange::Delete { content } => FileChange::Delete {
+                    content: content.clone(),
+                },
+                FileChange::Update {
+                    unified_diff,
+                    move_path,
+                } => FileChange::Update {
+                    unified_diff: unified_diff.clone(),
+                    move_path: move_path.as_ref().map(|path| {
+                        if path.is_absolute() {
+                            path.clone()
+                        } else {
+                            cwd.join(path)
+                        }
+                    }),
+                },
+            };
+            (resolved_path, resolved_change)
+        })
+        .collect()
+}
+
 pub(crate) enum ToolEventStage {
     Begin,
     Success(ExecToolCallOutput),
@@ -184,7 +222,8 @@ impl ToolEmitter {
             ) => {
                 if let Some(tracker) = ctx.turn_diff_tracker {
                     let mut guard = tracker.lock().await;
-                    guard.on_patch_begin(changes);
+                    let tracker_changes = resolve_patch_tracker_changes(&ctx.turn.cwd, changes);
+                    guard.on_patch_begin(&tracker_changes);
                 }
                 ctx.session
                     .send_event(

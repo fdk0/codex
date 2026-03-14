@@ -65,16 +65,16 @@ Guidance:
 - Subagents can call `send_input` without an `id` (or with `id = "parent"` / `id = "root"`). In this runtime those forms resolve to the immediate parent thread.
 - Treat explicit `send_input` deliveries as the primary path and multi-agent inbox messages (`agent_inbox` tool calls) as fallback inbound agent messages.
 
-### 3) `wait`
+### 3) `wait_agent`
 
 Wait for one or more agents to complete or report status.
 
 Guidance:
-- You do not need to wait after every spawn. Do useful parallel work, then wait when you need results.
-- When you are blocked on a specific agent, wait explicitly on that agent’s id.
-- Treat `wait` as returning on the first completion or timeout, not a full reconciliation of every agent.
-- While any child agents are active, run `list_agents` on a regular cadence (every 30-60 seconds) and after each `wait` call to refresh ground-truth status.
-- Keep an explicit set of outstanding agent ids. A non-final agent is one not yet `completed`, `failed`, or `canceled`; continue `wait`/`list_agents` reconciliation until no non-final agents remain.
+- You do not need to wait after every spawn. Do useful parallel work, then call `wait_agent` when you need results.
+- When you are blocked on a specific agent, call `wait_agent` explicitly on that agent’s id.
+- Treat `wait_agent` as returning on the first completion or timeout, not a full reconciliation of every agent.
+- While any child agents are active, run `list_agents` on a regular cadence (every 30-60 seconds) and after each `wait_agent` call to refresh ground-truth status.
+- Keep an explicit set of outstanding agent ids. A non-final agent is one not yet `completed`, `failed`, or `canceled`; continue `wait_agent`/`list_agents` reconciliation until no non-final agents remain.
 
 ### 4) `close_agent`
 

@@ -1208,7 +1208,7 @@ fn create_spawn_agent_tool(config: &ToolsConfig) -> ToolSpec {
 - For code-edit subtasks, decompose work so each delegated task has a disjoint write set.
 
 ### After you delegate
-- Call wait very sparingly. Only call wait when you need the result immediately for the next critical-path step and you are blocked until it returns.
+- Call wait_agent very sparingly. Only call wait_agent when you need the result immediately for the next critical-path step and you are blocked until it returns.
 - Do not redo delegated subagent tasks yourself; focus on integrating results or tackling non-overlapping work.
 - While the subagent is running in the background, do meaningful non-overlapping work immediately.
 - Do not repeatedly wait by reflex.
@@ -1448,7 +1448,7 @@ fn create_resume_agent_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "resume_agent".to_string(),
         description:
-            "Resume a previously closed agent by id so it can receive send_input and wait calls."
+            "Resume a previously closed agent by id so it can receive send_input and wait_agent calls."
                 .to_string(),
         strict: false,
         defer_loading: None,

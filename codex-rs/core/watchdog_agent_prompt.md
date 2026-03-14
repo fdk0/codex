@@ -55,7 +55,7 @@ Use only the multi-agent tools that exist here:
 - `spawn_agent` (prefer `spawn_mode = "fork"` when shared context matters).
 - `send_input`.
 - `compact_parent_context` (watchdog-only recovery tool; see below).
-- `wait`.
+- `wait_agent`.
 - `close_agent`.
 
 There is no cancel tool. Use `close_agent` to stop agents that are done or no longer needed.
