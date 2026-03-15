@@ -6208,10 +6208,11 @@ impl ChatWidget {
     }
 
     fn clean_background_terminals(&mut self) {
+        self.clear_unified_exec_processes();
         self.submit_op(Op::CleanBackgroundTerminals);
         self.add_info_message(
-            "Stopping all background terminals.".to_string(),
-            /*hint*/ None,
+            "Stopping background terminals for this thread.".to_string(),
+            None,
         );
     }
 

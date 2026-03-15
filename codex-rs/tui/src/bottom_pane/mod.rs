@@ -218,6 +218,10 @@ impl ActiveAgentStatusSummary {
             return None;
         }
 
+        if self.active_agents == 0 {
+            return Some(label.to_string());
+        }
+
         let noun = if self.active_agents == 1 {
             "open agent"
         } else {
@@ -1994,6 +1998,29 @@ mod tests {
         pane.set_task_running(true);
 
         assert_eq!(pane.status_inline_message(), None);
+    }
+
+    #[test]
+    fn active_agent_summary_hides_zero_open_agent_count() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut pane = BottomPane::new(BottomPaneParams {
+            app_event_tx: tx,
+            frame_requester: FrameRequester::test_dummy(),
+            has_input_focus: true,
+            enhanced_keys_supported: false,
+            placeholder_text: "Ask Codex to do anything".to_string(),
+            disable_paste_burst: false,
+            animations_enabled: true,
+            skills: Some(Vec::new()),
+        });
+
+        pane.set_active_agent_summary(Some(ActiveAgentStatusSummary {
+            label: "Main [default]".to_string(),
+            active_agents: 0,
+        }));
+
+        assert_eq!(pane.status_line_text(), Some("Main [default]".to_string()));
     }
 
     #[test]
