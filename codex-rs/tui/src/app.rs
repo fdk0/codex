@@ -5775,7 +5775,7 @@ mod tests {
         app.sync_active_agent_status_summary();
         assert_eq!(
             app.chat_widget.status_line_text(),
-            Some("Main [default] • 0 open agents".to_string())
+            Some("Main [default]".to_string())
         );
 
         app.upsert_agent_picker_thread(
@@ -5847,7 +5847,7 @@ mod tests {
         );
         assert_eq!(
             app.chat_widget.status_line_text(),
-            Some("Main [default] • 0 open agents".to_string())
+            Some("Main [default]".to_string())
         );
         Ok(())
     }
