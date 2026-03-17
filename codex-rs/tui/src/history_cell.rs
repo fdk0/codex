@@ -1997,6 +1997,7 @@ pub(crate) fn format_subagent_notification_for_display(message: &str) -> Option<
     let title = match &notification.status {
         AgentStatus::PendingInit => "Subagent pending init",
         AgentStatus::Running => "Subagent running",
+        AgentStatus::Interrupted => "Subagent interrupted",
         AgentStatus::Completed(_) => "Subagent completed",
         AgentStatus::Errored(_) => "Subagent errored",
         AgentStatus::Shutdown => "Subagent shutdown",
@@ -2005,6 +2006,7 @@ pub(crate) fn format_subagent_notification_for_display(message: &str) -> Option<
     let detail = match notification.status {
         AgentStatus::PendingInit
         | AgentStatus::Running
+        | AgentStatus::Interrupted
         | AgentStatus::Shutdown
         | AgentStatus::NotFound => None,
         AgentStatus::Completed(message) => message.filter(|text| !text.trim().is_empty()),
