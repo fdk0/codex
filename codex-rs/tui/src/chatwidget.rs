@@ -2842,6 +2842,14 @@ impl ChatWidget {
         self.bottom_pane.set_unified_exec_processes(processes);
     }
 
+    fn clear_unified_exec_processes(&mut self) {
+        if self.unified_exec_processes.is_empty() {
+            return;
+        }
+        self.unified_exec_processes.clear();
+        self.sync_unified_exec_footer();
+    }
+
     /// Record recent stdout/stderr lines for the unified exec footer.
     fn track_unified_exec_output_chunk(&mut self, call_id: &str, chunk: &[u8]) {
         let Some(process) = self

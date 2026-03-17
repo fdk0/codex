@@ -1425,6 +1425,7 @@ impl App {
             AgentStatus::Shutdown | AgentStatus::NotFound => AgentThreadAvailability::ReplayOnly,
             AgentStatus::PendingInit
             | AgentStatus::Running
+            | AgentStatus::Interrupted
             | AgentStatus::Completed(_)
             | AgentStatus::Errored(_) => AgentThreadAvailability::Live,
         }
