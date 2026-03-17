@@ -270,7 +270,9 @@ impl WatchdogManager {
                     AgentStatus::NotFound => Some(
                         "Watchdog check-in disappeared before calling send_input.".to_string(),
                     ),
-                    AgentStatus::PendingInit | AgentStatus::Running => None,
+                    AgentStatus::PendingInit
+                    | AgentStatus::Running
+                    | AgentStatus::Interrupted => None,
                 };
 
                 if let Some(message) = fallback_message {
