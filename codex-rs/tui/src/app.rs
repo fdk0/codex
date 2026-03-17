@@ -1885,6 +1885,12 @@ impl App {
             .set_follow_latest_thread(self.follow_latest_thread);
     }
 
+    fn disable_follow_latest_thread(&mut self) {
+        self.follow_latest_thread = false;
+        self.pending_follow_thread_id = None;
+        self.sync_follow_latest_thread_state();
+    }
+
     fn explicit_follow_target_for_event(&self, event: &Event) -> Option<ThreadId> {
         let target = match &event.msg {
             EventMsg::CollabAgentSpawnEnd(ev) if Self::is_live_status(&ev.status) => {
@@ -2327,6 +2333,18 @@ impl App {
     fn mark_agent_picker_thread_closed(&mut self, thread_id: ThreadId) {
         self.agent_navigation.mark_closed(thread_id);
         self.sync_active_agent_footer_context();
+    }
+
+    async fn select_agent_thread_manually(
+        &mut self,
+        tui: &mut tui::Tui,
+        thread_id: ThreadId,
+    ) -> Result<()> {
+        if Some(thread_id) != self.current_displayed_thread_id() && self.follow_latest_thread {
+            self.disable_follow_latest_thread();
+        }
+
+        self.select_agent_thread(tui, thread_id).await
     }
 
     async fn select_agent_thread(&mut self, tui: &mut tui::Tui, thread_id: ThreadId) -> Result<()> {
@@ -4279,7 +4297,7 @@ impl App {
                 self.open_agent_picker().await;
             }
             AppEvent::SelectAgentThread(thread_id) => {
-                self.select_agent_thread(tui, thread_id).await?;
+                self.select_agent_thread_manually(tui, thread_id).await?;
             }
             AppEvent::OpenSkillsList => {
                 self.chat_widget.open_skills_list();
@@ -4894,7 +4912,7 @@ impl App {
                 self.current_displayed_thread_id(),
                 AgentNavigationDirection::Previous,
             ) {
-                let _ = self.select_agent_thread(tui, thread_id).await;
+                let _ = self.select_agent_thread_manually(tui, thread_id).await;
             }
             return;
         }
@@ -4909,7 +4927,7 @@ impl App {
                 self.current_displayed_thread_id(),
                 AgentNavigationDirection::Next,
             ) {
-                let _ = self.select_agent_thread(tui, thread_id).await;
+                let _ = self.select_agent_thread_manually(tui, thread_id).await;
             }
             return;
         }
@@ -7124,6 +7142,59 @@ guardian_approval = true
             Some(agent_thread.thread_id)
         );
         assert_eq!(app.chat_widget.thread_id(), Some(agent_thread.thread_id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn manual_agent_selection_disables_follow_latest_thread() -> Result<()> {
+        let mut app = make_test_app().await;
+        let mut tui = make_test_tui();
+        let main_thread = app.server.start_thread(app.config.clone()).await?;
+        let selected_thread = app.server.start_thread(app.config.clone()).await?;
+        let later_thread = app.server.start_thread(app.config.clone()).await?;
+
+        app.primary_thread_id = Some(main_thread.thread_id);
+        app.active_thread_id = Some(main_thread.thread_id);
+        app.thread_event_channels
+            .insert(main_thread.thread_id, ThreadEventChannel::new(1));
+        app.follow_latest_thread = true;
+        app.sync_follow_latest_thread_state();
+
+        app.select_agent_thread_manually(&mut tui, selected_thread.thread_id)
+            .await?;
+
+        assert_eq!(
+            app.current_displayed_thread_id(),
+            Some(selected_thread.thread_id)
+        );
+        assert!(!app.follow_latest_thread);
+        assert!(app.pending_follow_thread_id.is_none());
+
+        app.enqueue_thread_event(
+            main_thread.thread_id,
+            Event {
+                id: "ev-follow-disabled".to_string(),
+                msg: EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+                    call_id: "spawn-follow-disabled".to_string(),
+                    sender_thread_id: main_thread.thread_id,
+                    new_thread_id: Some(later_thread.thread_id),
+                    new_agent_nickname: Some("Ada".to_string()),
+                    new_agent_role: Some("worker".to_string()),
+                    prompt: "run tests".to_string(),
+                    model: "gpt-5".to_string(),
+                    reasoning_effort: ReasoningEffortConfig::High,
+                    spawn_mode: AgentSpawnMode::Spawn,
+                    status: AgentStatus::Running,
+                }),
+            },
+        )
+        .await?;
+        app.maybe_follow_latest_thread(&mut tui).await?;
+
+        assert_eq!(
+            app.current_displayed_thread_id(),
+            Some(selected_thread.thread_id)
+        );
         Ok(())
     }
 
