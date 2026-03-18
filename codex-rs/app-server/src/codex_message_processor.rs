@@ -8444,6 +8444,9 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             ephemeral: false,
             agent_use_function_call_inbox: false,
+            agent_wake_parent_on_completion_default: false,
+            agent_wake_descendant_policy:
+                codex_core::config::types::AgentWakeDescendantPolicy::Immediate,
             reasoning_effort: None,
             personality: None,
             session_source: SessionSource::Cli,
