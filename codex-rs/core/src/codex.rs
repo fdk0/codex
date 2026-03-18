@@ -6055,6 +6055,7 @@ pub(crate) async fn run_turn(
                         turn_id: turn_context.sub_id.clone(),
                         cwd: turn_context.cwd.clone(),
                         transcript_path: sess.hook_transcript_path().await,
+                        active_profile: turn_context.config.active_profile.clone(),
                         model: turn_context.model_info.slug.clone(),
                         permission_mode: stop_hook_permission_mode,
                         stop_hook_active,

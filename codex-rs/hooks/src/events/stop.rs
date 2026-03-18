@@ -15,7 +15,7 @@ use crate::engine::ConfiguredHandler;
 use crate::engine::command_runner::CommandRunResult;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
-use crate::schema::NullableString;
+use crate::schema::CommandInputContext;
 use crate::schema::StopCommandInput;
 
 #[derive(Debug, Clone)]
@@ -24,6 +24,7 @@ pub struct StopRequest {
     pub turn_id: String,
     pub cwd: PathBuf,
     pub transcript_path: Option<PathBuf>,
+    pub active_profile: Option<String>,
     pub model: String,
     pub permission_mode: String,
     pub stop_hook_active: bool,
@@ -51,12 +52,21 @@ struct StopHandlerData {
 
 pub(crate) fn preview(
     handlers: &[ConfiguredHandler],
-    _request: &StopRequest,
+    request: &StopRequest,
 ) -> Vec<HookRunSummary> {
-    dispatcher::select_handlers(handlers, HookEventName::Stop, /*matcher_input*/ None)
-        .into_iter()
-        .map(|handler| dispatcher::running_summary(&handler))
-        .collect()
+    dispatcher::select_handlers(
+        handlers,
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::Stop,
+            matcher_input: request.last_assistant_message.as_deref(),
+            active_profile: request.active_profile.as_deref(),
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
+    )
+    .into_iter()
+    .map(|handler| dispatcher::running_summary(&handler))
+    .collect()
 }
 
 pub(crate) async fn run(
@@ -64,8 +74,16 @@ pub(crate) async fn run(
     shell: &CommandShell,
     request: StopRequest,
 ) -> StopOutcome {
-    let matched =
-        dispatcher::select_handlers(handlers, HookEventName::Stop, /*matcher_input*/ None);
+    let matched = dispatcher::select_handlers(
+        handlers,
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::Stop,
+            matcher_input: request.last_assistant_message.as_deref(),
+            active_profile: request.active_profile.as_deref(),
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
+    );
     if matched.is_empty() {
         return StopOutcome {
             hook_events: Vec::new(),
@@ -77,17 +95,19 @@ pub(crate) async fn run(
         };
     }
 
-    let input_json = match serde_json::to_string(&StopCommandInput {
-        session_id: request.session_id.to_string(),
-        turn_id: request.turn_id.clone(),
-        transcript_path: NullableString::from_path(request.transcript_path.clone()),
-        cwd: request.cwd.display().to_string(),
-        hook_event_name: "Stop".to_string(),
-        model: request.model.clone(),
-        permission_mode: request.permission_mode.clone(),
-        stop_hook_active: request.stop_hook_active,
-        last_assistant_message: NullableString::from_string(request.last_assistant_message.clone()),
-    }) {
+    let input_json = match serde_json::to_string(&StopCommandInput::from_context(
+        CommandInputContext {
+            session_id: request.session_id.to_string(),
+            transcript_path: request.transcript_path.clone(),
+            cwd: request.cwd.display().to_string(),
+            active_profile: request.active_profile.clone(),
+            model: request.model.clone(),
+            permission_mode: request.permission_mode.clone(),
+        },
+        request.turn_id.clone(),
+        request.stop_hook_active,
+        request.last_assistant_message.clone(),
+    )) {
         Ok(input_json) => input_json,
         Err(error) => {
             return serialization_failure_outcome(common::serialization_failure_hook_events(
@@ -312,6 +332,7 @@ fn serialization_failure_outcome(hook_events: Vec<HookCompletedEvent>) -> StopOu
 mod tests {
     use std::path::PathBuf;
 
+    use codex_protocol::ThreadId;
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookOutputEntry;
     use codex_protocol::protocol::HookOutputEntryKind;
@@ -321,10 +342,13 @@ mod tests {
     use codex_protocol::items::HookPromptFragment;
 
     use super::StopHandlerData;
+    use super::StopRequest;
     use super::aggregate_results;
     use super::parse_completed;
+    use super::preview;
     use crate::engine::ConfiguredHandler;
     use crate::engine::command_runner::CommandRunResult;
+    use crate::engine::config::HookConditions;
 
     #[test]
     fn block_decision_with_reason_sets_continuation_prompt() {
@@ -515,10 +539,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn preview_filters_by_last_assistant_message_and_profile() {
+        let handlers = vec![
+            ConfiguredHandler {
+                event_name: HookEventName::Stop,
+                matcher: Some("^done$".to_string()),
+                conditions: HookConditions {
+                    profiles: vec!["review".to_string()],
+                    ..HookConditions::default()
+                },
+                command: "echo scoped".to_string(),
+                timeout_sec: 600,
+                status_message: None,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 0,
+            },
+            ConfiguredHandler {
+                event_name: HookEventName::Stop,
+                matcher: None,
+                conditions: HookConditions::default(),
+                command: "echo general".to_string(),
+                timeout_sec: 600,
+                status_message: None,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 1,
+            },
+        ];
+        let request = StopRequest {
+            session_id: ThreadId::new(),
+            turn_id: "turn-1".to_string(),
+            cwd: PathBuf::from("/tmp"),
+            transcript_path: None,
+            active_profile: Some("review".to_string()),
+            model: "gpt-5".to_string(),
+            permission_mode: "default".to_string(),
+            stop_hook_active: false,
+            last_assistant_message: Some("done".to_string()),
+        };
+
+        let runs = preview(&handlers, &request);
+
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].display_order, 0);
+        assert_eq!(runs[1].display_order, 1);
+    }
+
     fn handler() -> ConfiguredHandler {
         ConfiguredHandler {
             event_name: HookEventName::Stop,
             matcher: None,
+            conditions: HookConditions::default(),
             command: "echo hook".to_string(),
             timeout_sec: 600,
             status_message: None,

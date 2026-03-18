@@ -92,6 +92,7 @@ pub(crate) async fn run_pending_session_start_hooks(
         session_id: sess.conversation_id,
         cwd: turn_context.cwd.clone(),
         transcript_path: sess.hook_transcript_path().await,
+        active_profile: hook_active_profile(turn_context),
         model: turn_context.model_info.slug.clone(),
         permission_mode: hook_permission_mode(turn_context),
         source: session_start_source,
@@ -119,6 +120,7 @@ pub(crate) async fn run_user_prompt_submit_hooks(
         turn_id: turn_context.sub_id.clone(),
         cwd: turn_context.cwd.clone(),
         transcript_path: sess.hook_transcript_path().await,
+        active_profile: hook_active_profile(turn_context),
         model: turn_context.model_info.slug.clone(),
         permission_mode: hook_permission_mode(turn_context),
         prompt,
@@ -273,6 +275,10 @@ fn hook_permission_mode(turn_context: &TurnContext) -> String {
         | AskForApproval::Granular(_) => "default",
     }
     .to_string()
+}
+
+fn hook_active_profile(turn_context: &TurnContext) -> Option<String> {
+    turn_context.config.active_profile.clone()
 }
 
 #[cfg(test)]

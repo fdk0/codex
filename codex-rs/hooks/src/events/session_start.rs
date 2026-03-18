@@ -14,6 +14,7 @@ use crate::engine::ConfiguredHandler;
 use crate::engine::command_runner::CommandRunResult;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
+use crate::schema::CommandInputContext;
 use crate::schema::SessionStartCommandInput;
 
 #[derive(Debug, Clone, Copy)]
@@ -36,6 +37,7 @@ pub struct SessionStartRequest {
     pub session_id: ThreadId,
     pub cwd: PathBuf,
     pub transcript_path: Option<PathBuf>,
+    pub active_profile: Option<String>,
     pub model: String,
     pub permission_mode: String,
     pub source: SessionStartSource,
@@ -62,8 +64,13 @@ pub(crate) fn preview(
 ) -> Vec<HookRunSummary> {
     dispatcher::select_handlers(
         handlers,
-        HookEventName::SessionStart,
-        Some(request.source.as_str()),
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::SessionStart,
+            matcher_input: Some(request.source.as_str()),
+            active_profile: request.active_profile.as_deref(),
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
     )
     .into_iter()
     .map(|handler| dispatcher::running_summary(&handler))
@@ -78,8 +85,13 @@ pub(crate) async fn run(
 ) -> SessionStartOutcome {
     let matched = dispatcher::select_handlers(
         handlers,
-        HookEventName::SessionStart,
-        Some(request.source.as_str()),
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::SessionStart,
+            matcher_input: Some(request.source.as_str()),
+            active_profile: request.active_profile.as_deref(),
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
     );
     if matched.is_empty() {
         return SessionStartOutcome {
@@ -90,12 +102,15 @@ pub(crate) async fn run(
         };
     }
 
-    let input_json = match serde_json::to_string(&SessionStartCommandInput::new(
-        request.session_id.to_string(),
-        request.transcript_path.clone(),
-        request.cwd.display().to_string(),
-        request.model.clone(),
-        request.permission_mode.clone(),
+    let input_json = match serde_json::to_string(&SessionStartCommandInput::from_context(
+        CommandInputContext {
+            session_id: request.session_id.to_string(),
+            transcript_path: request.transcript_path.clone(),
+            cwd: request.cwd.display().to_string(),
+            active_profile: request.active_profile.clone(),
+            model: request.model.clone(),
+            permission_mode: request.permission_mode.clone(),
+        },
         request.source.as_str().to_string(),
     )) {
         Ok(input_json) => input_json,
@@ -247,6 +262,7 @@ fn serialization_failure_outcome(hook_events: Vec<HookCompletedEvent>) -> Sessio
 mod tests {
     use std::path::PathBuf;
 
+    use codex_protocol::ThreadId;
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookOutputEntry;
     use codex_protocol::protocol::HookOutputEntryKind;
@@ -254,9 +270,13 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::SessionStartHandlerData;
+    use super::SessionStartRequest;
+    use super::SessionStartSource;
     use super::parse_completed;
+    use super::preview;
     use crate::engine::ConfiguredHandler;
     use crate::engine::command_runner::CommandRunResult;
+    use crate::engine::config::HookConditions;
 
     #[test]
     fn plain_stdout_becomes_model_context() {
@@ -350,10 +370,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn preview_filters_by_source_and_profile() {
+        let handlers = vec![
+            ConfiguredHandler {
+                event_name: HookEventName::SessionStart,
+                matcher: Some("^resume$".to_string()),
+                conditions: HookConditions {
+                    profiles: vec!["review".to_string()],
+                    ..HookConditions::default()
+                },
+                command: "echo scoped".to_string(),
+                timeout_sec: 600,
+                status_message: None,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 0,
+            },
+            ConfiguredHandler {
+                event_name: HookEventName::SessionStart,
+                matcher: None,
+                conditions: HookConditions::default(),
+                command: "echo general".to_string(),
+                timeout_sec: 600,
+                status_message: None,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 1,
+            },
+        ];
+        let request = SessionStartRequest {
+            session_id: ThreadId::new(),
+            cwd: PathBuf::from("/tmp"),
+            transcript_path: None,
+            active_profile: Some("review".to_string()),
+            model: "gpt-5".to_string(),
+            permission_mode: "default".to_string(),
+            source: SessionStartSource::Resume,
+        };
+
+        let runs = preview(&handlers, &request);
+
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].display_order, 0);
+        assert_eq!(runs[1].display_order, 1);
+    }
+
     fn handler() -> ConfiguredHandler {
         ConfiguredHandler {
             event_name: HookEventName::SessionStart,
             matcher: None,
+            conditions: HookConditions::default(),
             command: "echo hook".to_string(),
             timeout_sec: 600,
             status_message: None,
