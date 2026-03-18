@@ -2,6 +2,7 @@ use super::AgentRoleConfig;
 use super::AgentRoleToml;
 use super::AgentsToml;
 use super::ConfigToml;
+use crate::agent::built_in_roles;
 use crate::config_loader::ConfigLayerStack;
 use crate::config_loader::ConfigLayerStackOrdering;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -93,6 +94,7 @@ pub(crate) fn load_agent_roles(
             if let Some(existing_role) = roles.get(&role_name) {
                 merge_missing_role_fields(&mut merged_role, existing_role);
             }
+            merge_missing_built_in_role_fields(&role_name, &mut merged_role);
             if let Err(err) = validate_required_agent_role_description(
                 &role_name,
                 merged_role.description.as_deref(),
@@ -119,7 +121,8 @@ fn load_agent_roles_without_layers(
     let mut roles = BTreeMap::new();
     if let Some(agents_toml) = cfg.agents.as_ref() {
         for (declared_role_name, role_toml) in &agents_toml.roles {
-            let (role_name, role) = read_declared_role(declared_role_name, role_toml)?;
+            let (role_name, mut role) = read_declared_role(declared_role_name, role_toml)?;
+            merge_missing_built_in_role_fields(&role_name, &mut role);
             validate_required_agent_role_description(&role_name, role.description.as_deref())?;
 
             if roles.insert(role_name.clone(), role).is_some() {
@@ -159,6 +162,12 @@ fn merge_missing_role_fields(role: &mut AgentRoleConfig, fallback: &AgentRoleCon
         .nickname_candidates
         .clone()
         .or(fallback.nickname_candidates.clone());
+}
+
+fn merge_missing_built_in_role_fields(role_name: &str, role: &mut AgentRoleConfig) {
+    if let Some(built_in_role) = built_in_roles::configs().get(role_name) {
+        merge_missing_role_fields(role, built_in_role);
+    }
 }
 
 fn agents_toml_from_layer(layer_toml: &TomlValue) -> std::io::Result<Option<AgentsToml>> {

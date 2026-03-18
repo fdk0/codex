@@ -6,6 +6,7 @@
 //! explicitly takes ownership of model selection. It does not decide when to spawn a sub-agent or
 //! which role to use; the multi-agent tool handler owns that orchestration.
 
+use crate::agent::built_in_roles;
 use crate::config::AgentRoleConfig;
 use crate::config::AgentRoleSpawnMode;
 use crate::config::Config;
@@ -21,7 +22,6 @@ use codex_app_server_protocol::ConfigLayerSource;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::LazyLock;
 use toml::Value as TomlValue;
 
 /// The role name used when a caller omits `agent_type`.
@@ -34,6 +34,7 @@ pub(crate) fn default_spawn_mode_for_role(
 ) -> AgentRoleSpawnMode {
     let role_name = role_name.unwrap_or(DEFAULT_ROLE_NAME);
     resolve_role_config(config, role_name)
+        .as_ref()
         .and_then(|role| role.spawn_mode)
         .unwrap_or_default()
 }
@@ -52,7 +53,6 @@ pub(crate) async fn apply_role_to_config(
 ) -> Result<(), String> {
     let role_name = role_name.unwrap_or(DEFAULT_ROLE_NAME);
     let role = resolve_role_config(config, role_name)
-        .cloned()
         .ok_or_else(|| format!("unknown agent_type '{role_name}'"))?;
 
     apply_role_to_config_inner(config, role_name, &role)
@@ -68,7 +68,10 @@ async fn apply_role_to_config_inner(
     role_name: &str,
     role: &AgentRoleConfig,
 ) -> anyhow::Result<()> {
-    let is_built_in = !config.agent_roles.contains_key(role_name);
+    let is_built_in = built_in_roles::configs()
+        .get(role_name)
+        .and_then(|built_in_role| built_in_role.config_file.as_ref())
+        == role.config_file.as_ref();
     let Some(config_file) = role.config_file.as_ref() else {
         if let Some(model) = &role.model {
             config.model = Some(model.clone());
@@ -97,7 +100,7 @@ async fn load_role_layer_toml(
     role: &AgentRoleConfig,
 ) -> anyhow::Result<TomlValue> {
     let (role_config_toml, role_config_base) = if is_built_in {
-        let role_config_contents = built_in::config_file_contents(config_file)
+        let role_config_contents = built_in_roles::config_file_contents(config_file)
             .map(str::to_owned)
             .ok_or(anyhow!("No corresponding config content"))?;
         let role_config_toml: TomlValue = toml::from_str(&role_config_contents)?;
@@ -127,14 +130,33 @@ async fn load_role_layer_toml(
     Ok(role_layer_toml)
 }
 
-pub(crate) fn resolve_role_config<'a>(
-    config: &'a Config,
+pub(crate) fn resolve_role_config(
+    config: &Config,
     role_name: &str,
-) -> Option<&'a AgentRoleConfig> {
-    config
+) -> Option<AgentRoleConfig> {
+    let mut role = config
         .agent_roles
         .get(role_name)
-        .or_else(|| built_in::configs().get(role_name))
+        .cloned()
+        .or_else(|| built_in_roles::configs().get(role_name).cloned())?;
+    if let Some(built_in_role) = built_in_roles::configs().get(role_name) {
+        if role.description.is_none() {
+            role.description = built_in_role.description.clone();
+        }
+        if role.model.is_none() {
+            role.model = built_in_role.model.clone();
+        }
+        if role.config_file.is_none() {
+            role.config_file = built_in_role.config_file.clone();
+        }
+        if role.spawn_mode.is_none() {
+            role.spawn_mode = built_in_role.spawn_mode;
+        }
+        if role.nickname_candidates.is_none() {
+            role.nickname_candidates = built_in_role.nickname_candidates.clone();
+        }
+    }
+    Some(role)
 }
 
 fn preservation_policy(config: &Config, role_layer_toml: &TomlValue) -> (bool, bool) {
@@ -285,7 +307,7 @@ pub(crate) mod spawn_tool_spec {
 
     /// Builds the spawn-agent tool description text from built-in and configured roles.
     pub(crate) fn build(user_defined_agent_roles: &BTreeMap<String, AgentRoleConfig>) -> String {
-        let built_in_roles = built_in::configs();
+        let built_in_roles = built_in_roles::configs();
         build_from_configs(built_in_roles, user_defined_agent_roles)
     }
 
@@ -322,7 +344,7 @@ pub(crate) mod spawn_tool_spec {
             .config_file
             .as_ref()
             .and_then(|config_file| {
-                built_in::config_file_contents(config_file)
+                built_in_roles::config_file_contents(config_file)
                     .map(str::to_owned)
                     .or_else(|| std::fs::read_to_string(config_file).ok())
             })
@@ -363,113 +385,6 @@ pub(crate) mod spawn_tool_spec {
             format!("{name}: no description")
         } else {
             format!("{name}: {{\n{}\n}}", body.join("\n"))
-        }
-    }
-}
-
-mod built_in {
-    use super::*;
-
-    /// Returns the cached built-in role declarations defined in this module.
-    pub(super) fn configs() -> &'static BTreeMap<String, AgentRoleConfig> {
-        static CONFIG: LazyLock<BTreeMap<String, AgentRoleConfig>> = LazyLock::new(|| {
-            BTreeMap::from([
-                (
-                    DEFAULT_ROLE_NAME.to_string(),
-                    AgentRoleConfig {
-                        description: Some("Default agent.".to_string()),
-                        config_file: None,
-                        model: None,
-                        spawn_mode: None,
-                        nickname_candidates: None,
-                    },
-                ),
-                (
-                    "explorer".to_string(),
-                    AgentRoleConfig {
-                        description: Some(r#"Use `explorer` for specific codebase questions.
-Explorers are fast and authoritative.
-They must be used to ask specific, well-scoped questions on the codebase.
-Rules:
-- In order to avoid redundant work, you should avoid exploring the same problem that explorers have already covered. Typically, you should trust the explorer results without additional verification. You are still allowed to inspect the code yourself to gain the needed context!
-- You are encouraged to spawn up multiple explorers in parallel when you have multiple distinct questions to ask about the codebase that can be answered independently. This allows you to get more information faster without waiting for one question to finish before asking the next. While waiting for the explorer results, you can continue working on other local tasks that do not depend on those results. This parallelism is a key advantage of delegation, so use it whenever you have multiple questions to ask.
-- Reuse existing explorers for related questions."#
-                            .to_string()),
-                        model: None,
-                        config_file: Some("explorer.toml".to_string().parse().unwrap_or_default()),
-                        spawn_mode: None,
-                        nickname_candidates: None,
-                    },
-                ),
-                (
-                    "fast-worker".to_string(),
-                    AgentRoleConfig {
-                        description: Some(r#"Use `fast-worker` for tightly constrained problems.
-Typical tasks:
-- Make a small, localized code change
-- Execute a narrowly scoped command sequence
-- Handle an isolated fix from a self-contained prompt
-Rules:
-- Keep scope tight and avoid broad repo exploration.
-- Treat the prompt as self-contained and do not assume shared context.
-- Prefer direct execution over extended analysis."#
-                            .to_string()),
-                        config_file: None,
-                        model: None,
-                        spawn_mode: None,
-                        nickname_candidates: None,
-                    },
-                ),
-                (
-                    "worker".to_string(),
-                    AgentRoleConfig {
-                        description: Some(r#"Use for execution and production work.
-Typical tasks:
-- Implement part of a feature
-- Fix tests or bugs
-- Split large refactors into independent chunks
-Rules:
-- Explicitly assign **ownership** of the task (files / responsibility). When the subtask involves code changes, you should clearly specify which files or modules the worker is responsible for. This helps avoid merge conflicts and ensures accountability. For example, you can say "Worker 1 is responsible for updating the authentication module, while Worker 2 will handle the database layer." By defining clear ownership, you can delegate more effectively and reduce coordination overhead.
-- Always tell workers they are **not alone in the codebase**, and they should not revert the edits made by others, and they should adjust their implementation to accommodate the changes made by others. This is important because there may be multiple workers making changes in parallel, and they need to be aware of each other's work to avoid conflicts and ensure a cohesive final product."#
-                            .to_string()),
-                        config_file: None,
-                        model: None,
-                        spawn_mode: None,
-                        nickname_candidates: None,
-                    },
-                ),
-                (
-                    "awaiter".to_string(),
-                    AgentRoleConfig {
-                        description: Some(r#"Use an `awaiter` agent EVERY TIME you must run a command that might take some time.
-This includes, but is not limited to:
-* testing
-* monitoring of a long-running process
-* explicit ask to wait for something
-
-Rules:
-- When you wait for the `awaiter` to be done, use the largest possible timeout.
-- Only use `awaiter` for commands that may take time."#
-                            .to_string()),
-                        config_file: Some("awaiter.toml".to_string().parse().unwrap_or_default()),
-                        model: None,
-                        spawn_mode: None,
-                        nickname_candidates: None,
-                    },
-                ),
-            ])
-        });
-        &CONFIG
-    }
-
-    /// Resolves a built-in role `config_file` path to embedded content.
-    pub(super) fn config_file_contents(path: &Path) -> Option<&'static str> {
-        const EXPLORER: &str = include_str!("builtins/explorer.toml");
-        const AWAITER: &str = include_str!("builtins/awaiter.toml");
-        match path.to_str()? {
-            "explorer.toml" => Some(EXPLORER),
-            "awaiter.toml" => Some(AWAITER),
-            _ => None,
         }
     }
 }

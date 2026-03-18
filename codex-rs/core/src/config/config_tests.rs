@@ -3432,6 +3432,61 @@ description = "Review role"
 }
 
 #[tokio::test]
+async fn built_in_agent_role_model_override_inherits_stock_fields() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    tokio::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"[agents.awaiter]
+model = "gpt-5.4-mini"
+
+[agents.explorer]
+model = "gpt-5.4-mini"
+"#,
+    )
+    .await?;
+
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    let awaiter = config
+        .agent_roles
+        .get("awaiter")
+        .expect("stock awaiter role");
+    assert_eq!(awaiter.model.as_deref(), Some("gpt-5.4-mini"));
+    assert_eq!(
+        awaiter.config_file.as_deref(),
+        Some(Path::new("awaiter.toml"))
+    );
+    assert!(
+        awaiter
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("awaiter"))
+    );
+
+    let explorer = config
+        .agent_roles
+        .get("explorer")
+        .expect("stock explorer role");
+    assert_eq!(explorer.model.as_deref(), Some("gpt-5.4-mini"));
+    assert_eq!(
+        explorer.config_file.as_deref(),
+        Some(Path::new("explorer.toml"))
+    );
+    assert!(
+        explorer
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("explorer"))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn discovered_agent_role_file_without_name_is_dropped_with_warning() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let repo_root = TempDir::new()?;
