@@ -17,9 +17,12 @@ use anyhow::bail;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::info_span;
 
@@ -84,6 +87,16 @@ impl ShellSnapshot {
         session_telemetry: SessionTelemetry,
     ) {
         let snapshot_span = info_span!("shell_snapshot", thread_id = %session_id);
+        let shutdown = CancellationToken::new();
+        let shutdown_on_closed = shutdown.clone();
+        let shell_snapshot_tx_closed = shell_snapshot_tx.clone();
+        tokio::spawn(
+            async move {
+                shell_snapshot_tx_closed.closed().await;
+                shutdown_on_closed.cancel();
+            }
+            .instrument(snapshot_span.clone()),
+        );
         tokio::spawn(
             async move {
                 let timer = session_telemetry.start_timer("codex.shell_snapshot.duration_ms", &[]);
@@ -92,9 +105,13 @@ impl ShellSnapshot {
                     session_id,
                     session_cwd.as_path(),
                     &snapshot_shell,
+                    &shutdown,
                 )
                 .await
                 .map(Arc::new);
+                if shutdown.is_cancelled() {
+                    return;
+                }
                 let success = snapshot.is_ok();
                 let success_tag = if success { "true" } else { "false" };
                 let _ = timer.map(|timer| timer.record(&[("success", success_tag)]));
@@ -114,6 +131,7 @@ impl ShellSnapshot {
         session_id: ThreadId,
         session_cwd: &Path,
         shell: &Shell,
+        shutdown: &CancellationToken,
     ) -> std::result::Result<Self, &'static str> {
         // File to store the snapshot
         let extension = match shell.shell_type {
@@ -142,7 +160,9 @@ impl ShellSnapshot {
 
         // Make the new snapshot.
         let temp_path =
-            match write_shell_snapshot(shell.shell_type.clone(), &temp_path, session_cwd).await {
+            match write_shell_snapshot(shell.shell_type.clone(), &temp_path, session_cwd, shutdown)
+                .await
+            {
                 Ok(path) => {
                     tracing::info!("Shell snapshot successfully created: {}", path.display());
                     path
@@ -161,7 +181,8 @@ impl ShellSnapshot {
             cwd: session_cwd.to_path_buf(),
         };
 
-        if let Err(err) = validate_snapshot(shell, &temp_snapshot.path, session_cwd).await {
+        if let Err(err) = validate_snapshot(shell, &temp_snapshot.path, session_cwd, shutdown).await
+        {
             tracing::error!("Shell snapshot validation failed: {err:?}");
             remove_snapshot_file(&temp_snapshot.path).await;
             return Err("validation_failed");
@@ -182,7 +203,9 @@ impl ShellSnapshot {
 
 impl Drop for ShellSnapshot {
     fn drop(&mut self) {
-        if let Err(err) = std::fs::remove_file(&self.path) {
+        if let Err(err) = std::fs::remove_file(&self.path)
+            && err.kind() != ErrorKind::NotFound
+        {
             tracing::warn!(
                 "Failed to delete shell snapshot at {:?}: {err:?}",
                 self.path
@@ -195,6 +218,7 @@ async fn write_shell_snapshot(
     shell_type: ShellType,
     output_path: &Path,
     cwd: &Path,
+    shutdown: &CancellationToken,
 ) -> Result<PathBuf> {
     if shell_type == ShellType::PowerShell || shell_type == ShellType::Cmd {
         bail!("Shell snapshot not supported yet for {shell_type:?}");
@@ -202,7 +226,7 @@ async fn write_shell_snapshot(
     let shell = get_shell(shell_type.clone(), /*path*/ None)
         .with_context(|| format!("No available shell for {shell_type:?}"))?;
 
-    let raw_snapshot = capture_snapshot(&shell, cwd).await?;
+    let raw_snapshot = capture_snapshot(&shell, cwd, shutdown).await?;
     let snapshot = strip_snapshot_preamble(&raw_snapshot)?;
 
     if let Some(parent) = output_path.parent() {
@@ -220,13 +244,19 @@ async fn write_shell_snapshot(
     Ok(output_path.to_path_buf())
 }
 
-async fn capture_snapshot(shell: &Shell, cwd: &Path) -> Result<String> {
+async fn capture_snapshot(
+    shell: &Shell,
+    cwd: &Path,
+    shutdown: &CancellationToken,
+) -> Result<String> {
     let shell_type = shell.shell_type.clone();
     match shell_type {
-        ShellType::Zsh => run_shell_script(shell, &zsh_snapshot_script(), cwd).await,
-        ShellType::Bash => run_shell_script(shell, &bash_snapshot_script(), cwd).await,
-        ShellType::Sh => run_shell_script(shell, &sh_snapshot_script(), cwd).await,
-        ShellType::PowerShell => run_shell_script(shell, powershell_snapshot_script(), cwd).await,
+        ShellType::Zsh => run_shell_script(shell, &zsh_snapshot_script(), cwd, shutdown).await,
+        ShellType::Bash => run_shell_script(shell, &bash_snapshot_script(), cwd, shutdown).await,
+        ShellType::Sh => run_shell_script(shell, &sh_snapshot_script(), cwd, shutdown).await,
+        ShellType::PowerShell => {
+            run_shell_script(shell, powershell_snapshot_script(), cwd, shutdown).await
+        }
         ShellType::Cmd => bail!("Shell snapshotting is not yet supported for {shell_type:?}"),
     }
 }
@@ -240,7 +270,12 @@ fn strip_snapshot_preamble(snapshot: &str) -> Result<String> {
     Ok(snapshot[start..].to_string())
 }
 
-async fn validate_snapshot(shell: &Shell, snapshot_path: &Path, cwd: &Path) -> Result<()> {
+async fn validate_snapshot(
+    shell: &Shell,
+    snapshot_path: &Path,
+    cwd: &Path,
+    shutdown: &CancellationToken,
+) -> Result<()> {
     let snapshot_path_display = snapshot_path.display();
     let script = format!("set -e; . \"{snapshot_path_display}\"");
     run_script_with_timeout(
@@ -249,18 +284,25 @@ async fn validate_snapshot(shell: &Shell, snapshot_path: &Path, cwd: &Path) -> R
         SNAPSHOT_TIMEOUT,
         /*use_login_shell*/ false,
         cwd,
+        shutdown,
     )
     .await
     .map(|_| ())
 }
 
-async fn run_shell_script(shell: &Shell, script: &str, cwd: &Path) -> Result<String> {
+async fn run_shell_script(
+    shell: &Shell,
+    script: &str,
+    cwd: &Path,
+    shutdown: &CancellationToken,
+) -> Result<String> {
     run_script_with_timeout(
         shell,
         script,
         SNAPSHOT_TIMEOUT,
         /*use_login_shell*/ true,
         cwd,
+        shutdown,
     )
     .await
 }
@@ -271,7 +313,18 @@ async fn run_script_with_timeout(
     snapshot_timeout: Duration,
     use_login_shell: bool,
     cwd: &Path,
+    shutdown: &CancellationToken,
 ) -> Result<String> {
+    async fn await_output_task(
+        handle: &mut JoinHandle<std::io::Result<Vec<u8>>>,
+    ) -> Result<Vec<u8>> {
+        match handle.await {
+            Ok(Ok(buffer)) => Ok(buffer),
+            Ok(Err(err)) => Err(err.into()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
     let args = shell.derive_exec_args(script, use_login_shell);
     let shell_name = shell.name();
 
@@ -280,6 +333,8 @@ async fn run_script_with_timeout(
     let mut handler = Command::new(&args[0]);
     handler.args(&args[1..]);
     handler.stdin(Stdio::null());
+    handler.stdout(Stdio::piped());
+    handler.stderr(Stdio::piped());
     handler.current_dir(cwd);
     #[cfg(unix)]
     unsafe {
@@ -289,18 +344,79 @@ async fn run_script_with_timeout(
         });
     }
     handler.kill_on_drop(true);
-    let output = timeout(snapshot_timeout, handler.output())
-        .await
-        .map_err(|_| anyhow!("Snapshot command timed out for {shell_name}"))?
+    let mut child = handler
+        .spawn()
         .with_context(|| format!("Failed to execute {shell_name}"))?;
+    let child_pid = child.id();
 
-    if !output.status.success() {
-        let status = output.status;
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = child.stdout.take().ok_or_else(|| {
+        anyhow!("stdout pipe was unexpectedly not available for snapshot command")
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        anyhow!("stderr pipe was unexpectedly not available for snapshot command")
+    })?;
+
+    let mut stdout_task = tokio::spawn(async move {
+        let mut reader = stdout;
+        let mut buffer = Vec::new();
+        reader.read_to_end(&mut buffer).await?;
+        Ok(buffer)
+    });
+    let mut stderr_task = tokio::spawn(async move {
+        let mut reader = stderr;
+        let mut buffer = Vec::new();
+        reader.read_to_end(&mut buffer).await?;
+        Ok(buffer)
+    });
+
+    let started_at = tokio::time::Instant::now();
+    let status = tokio::select! {
+        status = child.wait() => status?,
+        _ = tokio::time::sleep(snapshot_timeout) => {
+            if let Some(pid) = child_pid {
+                let _ = codex_utils_pty::process_group::kill_process_group_by_pid(pid);
+            }
+            let _ = child.start_kill();
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(anyhow!("Snapshot command timed out for {shell_name}"));
+        }
+        _ = shutdown.cancelled() => {
+            if let Some(pid) = child_pid {
+                let _ = codex_utils_pty::process_group::kill_process_group_by_pid(pid);
+            }
+            let _ = child.start_kill();
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(anyhow!("Snapshot command cancelled for {shell_name}"));
+        }
+    };
+    let remaining_timeout = snapshot_timeout.saturating_sub(started_at.elapsed());
+    let (stdout, stderr) = match timeout(remaining_timeout, async {
+        let stdout = await_output_task(&mut stdout_task).await?;
+        let stderr = await_output_task(&mut stderr_task).await?;
+        Ok::<_, anyhow::Error>((stdout, stderr))
+    })
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            if let Some(pid) = child_pid {
+                let _ = codex_utils_pty::process_group::kill_process_group_by_pid(pid);
+            }
+            let _ = child.start_kill();
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(anyhow!("Snapshot command timed out for {shell_name}"));
+        }
+    };
+
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
         bail!("Snapshot command exited with status {status}: {stderr}");
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
 }
 
 fn excluded_exports_regex() -> String {

@@ -223,260 +223,295 @@ fn parse_simple_csv_line(line: &str) -> Vec<String> {
     line.split(',').map(str::to_string).collect()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn report_agent_job_result_rejects_wrong_thread() -> Result<()> {
-    let server = start_mock_server().await;
-    let mut builder = test_codex().with_config(|config| {
-        config
-            .features
-            .enable(Feature::SpawnCsv)
-            .expect("test config should allow feature update");
-        config
-            .features
-            .enable(Feature::Sqlite)
-            .expect("test config should allow feature update");
-    });
-    let test = builder.build(&server).await?;
+fn run_async_test_with_large_stack<F, Fut>(f: F) -> Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+{
+    let handle = match std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.worker_threads(2);
+            builder.thread_stack_size(32 * 1024 * 1024);
+            let runtime = match builder.enable_all().build() {
+                Ok(runtime) => runtime,
+                Err(error) => panic!("failed to build runtime for large-stack test: {error}"),
+            };
+            runtime.block_on(f())
+        }) {
+        Ok(handle) => handle,
+        Err(error) => panic!("failed to spawn large-stack test thread: {error}"),
+    };
 
-    let input_path = test.cwd_path().join("agent_jobs_wrong_thread.csv");
-    let output_path = test.cwd_path().join("agent_jobs_wrong_thread_out.csv");
-    fs::write(&input_path, "path\nfile-1\n")?;
-
-    let args = json!({
-        "csv_path": input_path.display().to_string(),
-        "instruction": "Return {path}",
-        "output_csv_path": output_path.display().to_string(),
-    });
-    let args_json = serde_json::to_string(&args)?;
-
-    let responder = AgentJobsResponder::new(args_json);
-    Mock::given(method("POST"))
-        .and(path_regex(".*/responses$"))
-        .respond_with(responder)
-        .mount(&server)
-        .await;
-
-    test.submit_turn("run job").await?;
-
-    let db = test.codex.state_db().expect("state db");
-    let output = fs::read_to_string(&output_path)?;
-    let rows: Vec<&str> = output.lines().skip(1).collect();
-    assert_eq!(rows.len(), 1);
-    let job_id = rows
-        .first()
-        .and_then(|line| {
-            parse_simple_csv_line(line)
-                .iter()
-                .find(|value| value.len() == 36)
-                .cloned()
-        })
-        .expect("job_id from csv");
-    let job = db.get_agent_job(job_id.as_str()).await?.expect("job");
-    let items = db
-        .list_agent_job_items(job.id.as_str(), None, Some(10))
-        .await?;
-    let item = items.first().expect("item");
-    let wrong_thread_id = "00000000-0000-0000-0000-000000000000";
-    let accepted = db
-        .report_agent_job_item_result(
-            job.id.as_str(),
-            item.item_id.as_str(),
-            wrong_thread_id,
-            &json!({ "wrong": true }),
-        )
-        .await?;
-    assert!(!accepted);
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawn_agents_on_csv_runs_and_exports() -> Result<()> {
-    let server = start_mock_server().await;
-    let mut builder = test_codex().with_config(|config| {
-        config
-            .features
-            .enable(Feature::SpawnCsv)
-            .expect("test config should allow feature update");
-        config
-            .features
-            .enable(Feature::Sqlite)
-            .expect("test config should allow feature update");
-    });
-    let test = builder.build(&server).await?;
-
-    let input_path = test.cwd_path().join("agent_jobs_input.csv");
-    let output_path = test.cwd_path().join("agent_jobs_output.csv");
-    fs::write(&input_path, "path,area\nfile-1,test\nfile-2,test\n")?;
-
-    let args = json!({
-        "csv_path": input_path.display().to_string(),
-        "instruction": "Return {path}",
-        "output_csv_path": output_path.display().to_string(),
-    });
-    let args_json = serde_json::to_string(&args)?;
-
-    let responder = AgentJobsResponder::new(args_json);
-    Mock::given(method("POST"))
-        .and(path_regex(".*/responses$"))
-        .respond_with(responder)
-        .mount(&server)
-        .await;
-
-    test.submit_turn("run batch job").await?;
-
-    let output = fs::read_to_string(&output_path)?;
-    let mut lines = output.lines();
-    let headers = lines.next().expect("csv headers");
-    let header_cols = parse_simple_csv_line(headers);
-    let status_index = header_cols
-        .iter()
-        .position(|header| header == "status")
-        .expect("status column");
-    let result_json_index = header_cols
-        .iter()
-        .position(|header| header == "result_json")
-        .expect("result_json column");
-    assert!(header_cols.iter().any(|header| header == "result_json"));
-    assert!(header_cols.iter().any(|header| header == "item_id"));
-    let rows: Vec<Vec<String>> = lines.map(parse_simple_csv_line).collect();
-    assert_eq!(rows.len(), 2);
-    assert_eq!(
-        rows.iter()
-            .map(|cols| cols[status_index].as_str())
-            .collect::<Vec<_>>(),
-        vec!["completed", "completed"]
-    );
-    assert!(
-        rows.iter()
-            .all(|cols| !cols[result_json_index].trim().is_empty())
-    );
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawn_agents_on_csv_dedupes_item_ids() -> Result<()> {
-    let server = start_mock_server().await;
-
-    let mut builder = test_codex().with_config(|config| {
-        config
-            .features
-            .enable(Feature::SpawnCsv)
-            .expect("test config should allow feature update");
-        config
-            .features
-            .enable(Feature::Sqlite)
-            .expect("test config should allow feature update");
-    });
-    let test = builder.build(&server).await?;
-
-    let input_path = test.cwd_path().join("agent_jobs_dupe.csv");
-    let output_path = test.cwd_path().join("agent_jobs_dupe_out.csv");
-    fs::write(&input_path, "id,path\nfoo,alpha\nfoo,beta\n")?;
-
-    let args = json!({
-        "csv_path": input_path.display().to_string(),
-        "instruction": "Return {path}",
-        "id_column": "id",
-        "output_csv_path": output_path.display().to_string(),
-    });
-    let args_json = serde_json::to_string(&args)?;
-
-    let responder = AgentJobsResponder::new(args_json);
-    Mock::given(method("POST"))
-        .and(path_regex(".*/responses$"))
-        .respond_with(responder)
-        .mount(&server)
-        .await;
-
-    test.submit_turn("run batch job with duplicate ids").await?;
-
-    let output = fs::read_to_string(&output_path)?;
-    let mut lines = output.lines();
-    let headers = lines.next().expect("csv headers");
-    let header_cols = parse_simple_csv_line(headers);
-    let item_id_index = header_cols
-        .iter()
-        .position(|header| header == "item_id")
-        .expect("item_id column");
-
-    let mut item_ids = Vec::new();
-    for line in lines {
-        let cols = parse_simple_csv_line(line);
-        item_ids.push(cols[item_id_index].clone());
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
     }
-    item_ids.sort();
-    item_ids.dedup();
-    assert_eq!(item_ids.len(), 2);
-    assert!(item_ids.contains(&"foo".to_string()));
-    assert!(item_ids.contains(&"foo-2".to_string()));
-    Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawn_agents_on_csv_stop_halts_future_items() -> Result<()> {
-    let server = start_mock_server().await;
-    let mut builder = test_codex().with_config(|config| {
-        config
-            .features
-            .enable(Feature::SpawnCsv)
-            .expect("test config should allow feature update");
-        config
-            .features
-            .enable(Feature::Sqlite)
-            .expect("test config should allow feature update");
-    });
-    let test = builder.build(&server).await?;
+#[test]
+fn report_agent_job_result_rejects_wrong_thread() -> Result<()> {
+    run_async_test_with_large_stack(|| async {
+        let server = start_mock_server().await;
+        let mut builder = test_codex().with_config(|config| {
+            config
+                .features
+                .enable(Feature::SpawnCsv)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::Sqlite)
+                .expect("test config should allow feature update");
+        });
+        let test = builder.build(&server).await?;
 
-    let input_path = test.cwd_path().join("agent_jobs_stop.csv");
-    let output_path = test.cwd_path().join("agent_jobs_stop_out.csv");
-    fs::write(&input_path, "path\nfile-1\nfile-2\nfile-3\n")?;
+        let input_path = test.cwd_path().join("agent_jobs_wrong_thread.csv");
+        let output_path = test.cwd_path().join("agent_jobs_wrong_thread_out.csv");
+        fs::write(&input_path, "path\nfile-1\n")?;
 
-    let args = json!({
-        "csv_path": input_path.display().to_string(),
-        "instruction": "Return {path}",
-        "output_csv_path": output_path.display().to_string(),
-        "max_concurrency": 1,
-    });
-    let args_json = serde_json::to_string(&args)?;
+        let args = json!({
+            "csv_path": input_path.display().to_string(),
+            "instruction": "Return {path}",
+            "output_csv_path": output_path.display().to_string(),
+        });
+        let args_json = serde_json::to_string(&args)?;
 
-    let worker_calls = Arc::new(AtomicUsize::new(0));
-    let responder = StopAfterFirstResponder::new(args_json, worker_calls.clone());
-    Mock::given(method("POST"))
-        .and(path_regex(".*/responses$"))
-        .respond_with(responder)
-        .mount(&server)
-        .await;
+        let responder = AgentJobsResponder::new(args_json);
+        Mock::given(method("POST"))
+            .and(path_regex(".*/responses$"))
+            .respond_with(responder)
+            .mount(&server)
+            .await;
 
-    test.submit_turn("run job").await?;
+        test.submit_turn("run job").await?;
 
-    let output = fs::read_to_string(&output_path)?;
-    let mut lines = output.lines();
-    let headers = lines.next().expect("csv headers");
-    let header_cols = parse_simple_csv_line(headers);
-    let job_id_index = header_cols
-        .iter()
-        .position(|header| header == "job_id")
-        .expect("job_id column");
-    let rows: Vec<&str> = lines.collect();
-    assert_eq!(rows.len(), 3);
-    let job_id: String = rows
-        .first()
-        .map(|line| parse_simple_csv_line(line))
-        .and_then(|cols| cols.get(job_id_index).cloned())
-        .expect("job_id from csv");
-    let db = test.codex.state_db().expect("state db");
-    let job = db.get_agent_job(job_id.as_str()).await?.expect("job");
-    let progress = db.get_agent_job_progress(job_id.as_str()).await?;
-    assert_eq!(
-        job.status,
-        codex_state::AgentJobStatus::Cancelled,
-        "unexpected final job state: job={job:?} progress={progress:?} output={output}"
-    );
-    assert_eq!(progress.total_items, 3);
-    assert_eq!(progress.completed_items, 1);
-    assert_eq!(progress.failed_items, 0);
-    assert_eq!(progress.running_items, 0);
-    assert_eq!(progress.pending_items, 2);
-    assert_eq!(worker_calls.load(Ordering::SeqCst), 1);
-    Ok(())
+        let db = test.codex.state_db().expect("state db");
+        let output = fs::read_to_string(&output_path)?;
+        let rows: Vec<&str> = output.lines().skip(1).collect();
+        assert_eq!(rows.len(), 1);
+        let job_id = rows
+            .first()
+            .and_then(|line| {
+                parse_simple_csv_line(line)
+                    .iter()
+                    .find(|value| value.len() == 36)
+                    .cloned()
+            })
+            .expect("job_id from csv");
+        let job = db.get_agent_job(job_id.as_str()).await?.expect("job");
+        let items = db
+            .list_agent_job_items(job.id.as_str(), None, Some(10))
+            .await?;
+        let item = items.first().expect("item");
+        let wrong_thread_id = "00000000-0000-0000-0000-000000000000";
+        let accepted = db
+            .report_agent_job_item_result(
+                job.id.as_str(),
+                item.item_id.as_str(),
+                wrong_thread_id,
+                &json!({ "wrong": true }),
+            )
+            .await?;
+        assert!(!accepted);
+        Ok(())
+    })
+}
+
+#[test]
+fn spawn_agents_on_csv_runs_and_exports() -> Result<()> {
+    run_async_test_with_large_stack(|| async {
+        let server = start_mock_server().await;
+        let mut builder = test_codex().with_config(|config| {
+            config
+                .features
+                .enable(Feature::SpawnCsv)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::Sqlite)
+                .expect("test config should allow feature update");
+        });
+        let test = builder.build(&server).await?;
+
+        let input_path = test.cwd_path().join("agent_jobs_input.csv");
+        let output_path = test.cwd_path().join("agent_jobs_output.csv");
+        fs::write(&input_path, "path,area\nfile-1,test\nfile-2,test\n")?;
+
+        let args = json!({
+            "csv_path": input_path.display().to_string(),
+            "instruction": "Return {path}",
+            "output_csv_path": output_path.display().to_string(),
+        });
+        let args_json = serde_json::to_string(&args)?;
+
+        let responder = AgentJobsResponder::new(args_json);
+        Mock::given(method("POST"))
+            .and(path_regex(".*/responses$"))
+            .respond_with(responder)
+            .mount(&server)
+            .await;
+
+        test.submit_turn("run batch job").await?;
+
+        let output = fs::read_to_string(&output_path)?;
+        let mut lines = output.lines();
+        let headers = lines.next().expect("csv headers");
+        let header_cols = parse_simple_csv_line(headers);
+        let status_index = header_cols
+            .iter()
+            .position(|header| header == "status")
+            .expect("status column");
+        let result_json_index = header_cols
+            .iter()
+            .position(|header| header == "result_json")
+            .expect("result_json column");
+        assert!(header_cols.iter().any(|header| header == "result_json"));
+        assert!(header_cols.iter().any(|header| header == "item_id"));
+        let rows: Vec<Vec<String>> = lines.map(parse_simple_csv_line).collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows.iter()
+                .map(|cols| cols[status_index].as_str())
+                .collect::<Vec<_>>(),
+            vec!["completed", "completed"]
+        );
+        assert!(
+            rows.iter()
+                .all(|cols| !cols[result_json_index].trim().is_empty())
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn spawn_agents_on_csv_dedupes_item_ids() -> Result<()> {
+    run_async_test_with_large_stack(|| async {
+        let server = start_mock_server().await;
+
+        let mut builder = test_codex().with_config(|config| {
+            config
+                .features
+                .enable(Feature::SpawnCsv)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::Sqlite)
+                .expect("test config should allow feature update");
+        });
+        let test = builder.build(&server).await?;
+
+        let input_path = test.cwd_path().join("agent_jobs_dupe.csv");
+        let output_path = test.cwd_path().join("agent_jobs_dupe_out.csv");
+        fs::write(&input_path, "id,path\nfoo,alpha\nfoo,beta\n")?;
+
+        let args = json!({
+            "csv_path": input_path.display().to_string(),
+            "instruction": "Return {path}",
+            "id_column": "id",
+            "output_csv_path": output_path.display().to_string(),
+        });
+        let args_json = serde_json::to_string(&args)?;
+
+        let responder = AgentJobsResponder::new(args_json);
+        Mock::given(method("POST"))
+            .and(path_regex(".*/responses$"))
+            .respond_with(responder)
+            .mount(&server)
+            .await;
+
+        test.submit_turn("run batch job with duplicate ids").await?;
+
+        let output = fs::read_to_string(&output_path)?;
+        let mut lines = output.lines();
+        let headers = lines.next().expect("csv headers");
+        let header_cols = parse_simple_csv_line(headers);
+        let item_id_index = header_cols
+            .iter()
+            .position(|header| header == "item_id")
+            .expect("item_id column");
+
+        let mut item_ids = Vec::new();
+        for line in lines {
+            let cols = parse_simple_csv_line(line);
+            item_ids.push(cols[item_id_index].clone());
+        }
+        item_ids.sort();
+        item_ids.dedup();
+        assert_eq!(item_ids.len(), 2);
+        assert!(item_ids.contains(&"foo".to_string()));
+        assert!(item_ids.contains(&"foo-2".to_string()));
+        Ok(())
+    })
+}
+
+#[test]
+fn spawn_agents_on_csv_stop_halts_future_items() -> Result<()> {
+    run_async_test_with_large_stack(|| async {
+        let server = start_mock_server().await;
+        let mut builder = test_codex().with_config(|config| {
+            config
+                .features
+                .enable(Feature::SpawnCsv)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::Sqlite)
+                .expect("test config should allow feature update");
+        });
+        let test = builder.build(&server).await?;
+
+        let input_path = test.cwd_path().join("agent_jobs_stop.csv");
+        let output_path = test.cwd_path().join("agent_jobs_stop_out.csv");
+        fs::write(&input_path, "path\nfile-1\nfile-2\nfile-3\n")?;
+
+        let args = json!({
+            "csv_path": input_path.display().to_string(),
+            "instruction": "Return {path}",
+            "output_csv_path": output_path.display().to_string(),
+            "max_concurrency": 1,
+        });
+        let args_json = serde_json::to_string(&args)?;
+
+        let worker_calls = Arc::new(AtomicUsize::new(0));
+        let responder = StopAfterFirstResponder::new(args_json, worker_calls.clone());
+        Mock::given(method("POST"))
+            .and(path_regex(".*/responses$"))
+            .respond_with(responder)
+            .mount(&server)
+            .await;
+
+        test.submit_turn("run job").await?;
+
+        let output = fs::read_to_string(&output_path)?;
+        let mut lines = output.lines();
+        let headers = lines.next().expect("csv headers");
+        let header_cols = parse_simple_csv_line(headers);
+        let job_id_index = header_cols
+            .iter()
+            .position(|header| header == "job_id")
+            .expect("job_id column");
+        let rows: Vec<&str> = lines.collect();
+        assert_eq!(rows.len(), 3);
+        let job_id: String = rows
+            .first()
+            .map(|line| parse_simple_csv_line(line))
+            .and_then(|cols| cols.get(job_id_index).cloned())
+            .expect("job_id from csv");
+        let db = test.codex.state_db().expect("state db");
+        let job = db.get_agent_job(job_id.as_str()).await?.expect("job");
+        let progress = db.get_agent_job_progress(job_id.as_str()).await?;
+        assert_eq!(
+            job.status,
+            codex_state::AgentJobStatus::Cancelled,
+            "unexpected final job state: job={job:?} progress={progress:?} output={output}"
+        );
+        assert_eq!(progress.total_items, 3);
+        assert_eq!(progress.completed_items, 1);
+        assert_eq!(progress.failed_items, 0);
+        assert_eq!(progress.running_items, 0);
+        assert_eq!(progress.pending_items, 2);
+        assert_eq!(worker_calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    })
 }

@@ -7,13 +7,13 @@ use syn::parse::Nothing;
 use syn::parse_macro_input;
 use syn::parse_quote;
 
-const LARGE_STACK_TEST_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
+const LARGE_STACK_TEST_STACK_SIZE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Run a test body on a dedicated thread with a larger stack.
 ///
 /// For async tests, this macro creates a Tokio multi-thread runtime with two
-/// worker threads and blocks on the original async body inside the large-stack
-/// thread.
+/// worker threads, gives those workers a larger stack too, and blocks on the
+/// original async body inside the large-stack thread.
 #[proc_macro_attribute]
 pub fn large_stack_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     parse_macro_input!(attr as Nothing);
@@ -35,6 +35,7 @@ fn expand_large_stack_test(mut item: ItemFn) -> TokenStream2 {
             {
                 let runtime = ::tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
+                    .thread_stack_size(#LARGE_STACK_TEST_STACK_SIZE_BYTES)
                     .enable_all()
                     .build()
                     .unwrap_or_else(|error| {
@@ -150,6 +151,7 @@ mod tests {
         assert!(!has_attr(&expanded, "test"));
         let body = quote::quote!(#expanded).to_string();
         assert!(body.contains("tokio :: runtime :: Builder"));
+        assert!(body.contains("thread_stack_size"));
         assert!(!body.contains("tokio :: test"));
     }
 }

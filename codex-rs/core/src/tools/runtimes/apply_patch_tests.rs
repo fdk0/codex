@@ -107,3 +107,37 @@ fn build_command_spec_prefers_explicit_codex_exe() {
         vec![CODEX_CORE_APPLY_PATCH_ARG1.to_string(), expected_patch,]
     );
 }
+
+#[test]
+fn build_command_spec_ignores_explicit_sandbox_alias() {
+    let path = std::env::temp_dir().join("build-command-spec-apply-patch-sandbox-alias-test.txt");
+    let action = ApplyPatchAction::new_add_for_test(&path, "hello".to_string());
+    let request = ApplyPatchRequest {
+        action,
+        file_paths: vec![
+            AbsolutePathBuf::from_absolute_path(&path).expect("temp path should be absolute"),
+        ],
+        changes: HashMap::from([(
+            path,
+            FileChange::Add {
+                content: "hello".to_string(),
+            },
+        )]),
+        exec_approval_requirement: ExecApprovalRequirement::NeedsApproval {
+            reason: None,
+            proposed_execpolicy_amendment: None,
+        },
+        sandbox_permissions: SandboxPermissions::UseDefault,
+        additional_permissions: None,
+        permissions_preapproved: false,
+        timeout_ms: None,
+        codex_exe: Some(PathBuf::from("/tmp/codex-linux-sandbox")),
+    };
+
+    let current_exe = std::env::current_exe().expect("resolve current exe");
+    let spec =
+        ApplyPatchRuntime::build_command_spec(&request, std::path::Path::new("/unused-codex-home"))
+            .expect("build command spec");
+
+    assert_eq!(spec.program, current_exe.to_string_lossy());
+}
