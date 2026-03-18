@@ -1514,7 +1514,7 @@ fn create_list_agents_tool(agent_watchdog: bool) -> ToolSpec {
     })
 }
 
-fn create_wait_tool(agent_watchdog: bool) -> ToolSpec {
+fn create_wait_agent_tool(agent_watchdog: bool) -> ToolSpec {
     let ids_description = if agent_watchdog {
         "Agent ids to wait on. Pass multiple ids to wait for whichever finishes first. Watchdog handle ids are status-only here: if all ids are watchdog handles, wait_agent returns an immediate correction instead of blocking; if mixed with normal agent ids, wait_agent still waits on normal agents and includes current watchdog statuses. On configurations with agents.wait_on_wake_enabled = \"reject\", wake-enabled child agent ids also return an immediate correction instead of blocking."
     } else {
@@ -3109,7 +3109,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
         }
         push_tool_spec(
             &mut builder,
-            create_wait_tool(config.agent_watchdog),
+            create_wait_agent_tool(config.agent_watchdog),
             false,
             config.code_mode_enabled,
         );

@@ -352,6 +352,9 @@ impl AgentControl {
         let inherited_shell_snapshot = self
             .inherited_shell_snapshot_for_source(&state, session_source.as_ref())
             .await;
+        let inherited_exec_policy = self
+            .inherited_exec_policy_for_source(&state, session_source.as_ref(), &config)
+            .await;
 
         let new_thread = match session_source {
             Some(session_source) => {
@@ -363,6 +366,7 @@ impl AgentControl {
                         false,
                         None,
                         inherited_shell_snapshot,
+                        inherited_exec_policy,
                     )
                     .await?
             }
@@ -409,6 +413,9 @@ impl AgentControl {
         let inherited_shell_snapshot = self
             .inherited_shell_snapshot_for_source(&state, Some(&session_source))
             .await;
+        let inherited_exec_policy = self
+            .inherited_exec_policy_for_source(&state, Some(&session_source), &config)
+            .await;
 
         let parent_thread = state.get_thread(parent_thread_id).await.ok();
         if let Some(parent_thread) = parent_thread.as_ref() {
@@ -444,6 +451,7 @@ impl AgentControl {
                 session_source.clone(),
                 false,
                 inherited_shell_snapshot,
+                inherited_exec_policy,
             )
             .await?;
         reservation.commit(new_thread.thread_id);
@@ -1632,6 +1640,43 @@ async fn inject_agent_message(
         )
         .await
 }
+
+#[cfg(test)]
+enum LargeStackTestRuntime {
+    CurrentThread,
+    MultiThread { worker_threads: usize },
+}
+
+#[cfg(test)]
+fn run_async_test_with_large_stack<F, Fut>(runtime: LargeStackTestRuntime, f: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = match runtime {
+                LargeStackTestRuntime::CurrentThread => {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                }
+                LargeStackTestRuntime::MultiThread { worker_threads } => {
+                    let mut builder = tokio::runtime::Builder::new_multi_thread();
+                    builder.worker_threads(worker_threads);
+                    builder.thread_stack_size(32 * 1024 * 1024);
+                    builder.enable_all().build()
+                }
+            }
+            .expect("build runtime for large-stack test");
+            runtime.block_on(f());
+        })
+        .expect("spawn large-stack test thread")
+        .join()
+        .expect("large-stack test thread should finish");
+}
+
 #[cfg(test)]
 #[path = "control_tests.rs"]
 mod tests;
@@ -2067,7 +2112,7 @@ mod inbox_tests {
             reason: TurnAbortReason::Interrupted,
         }));
 
-        let expected = AgentStatus::Errored("Interrupted".to_string());
+        let expected = AgentStatus::Interrupted;
         assert_eq!(status, Some(expected));
     }
 
@@ -2923,137 +2968,139 @@ mod inbox_tests {
         assert_eq!(agent_nickname, Some("Atlas".to_string()));
     }
 
-    #[tokio::test]
-    async fn resume_thread_subagent_restores_stored_nickname_and_role() {
-        let (home, mut config) = test_config().await;
-        config
-            .features
-            .enable(Feature::Sqlite)
-            .expect("test config should allow sqlite");
-        let manager = ThreadManager::with_models_provider_and_home_for_tests(
-            CodexAuth::from_api_key("dummy"),
-            config.model_provider.clone(),
-            config.codex_home.clone(),
-        );
-        let control = manager.agent_control();
-        let harness = AgentControlHarness {
-            _home: home,
-            config,
-            manager,
-            control,
-        };
-        let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+    #[test]
+    fn resume_thread_subagent_restores_stored_nickname_and_role() {
+        run_async_test_with_large_stack(LargeStackTestRuntime::CurrentThread, || async {
+            let (home, mut config) = test_config().await;
+            config
+                .features
+                .enable(Feature::Sqlite)
+                .expect("test config should allow sqlite");
+            let manager = ThreadManager::with_models_provider_and_home_for_tests(
+                CodexAuth::from_api_key("dummy"),
+                config.model_provider.clone(),
+                config.codex_home.clone(),
+            );
+            let control = manager.agent_control();
+            let harness = AgentControlHarness {
+                _home: home,
+                config,
+                manager,
+                control,
+            };
+            let (parent_thread_id, _parent_thread) = harness.start_thread().await;
 
-        let child_thread_id = harness
-            .control
-            .spawn_agent(
-                harness.config.clone(),
-                text_input("hello child"),
-                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                    parent_thread_id,
-                    depth: 1,
-                    agent_nickname: None,
-                    agent_role: Some("explorer".to_string()),
-                })),
-            )
-            .await
-            .expect("child spawn should succeed");
+            let child_thread_id = harness
+                .control
+                .spawn_agent(
+                    harness.config.clone(),
+                    text_input("hello child"),
+                    Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                        parent_thread_id,
+                        depth: 1,
+                        agent_nickname: None,
+                        agent_role: Some("explorer".to_string()),
+                    })),
+                )
+                .await
+                .expect("child spawn should succeed");
 
-        let child_thread = harness
-            .manager
-            .get_thread(child_thread_id)
-            .await
-            .expect("child thread should exist");
-        let mut status_rx = harness
-            .control
-            .subscribe_status(child_thread_id)
-            .await
-            .expect("status subscription should succeed");
-        if matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
+            let child_thread = harness
+                .manager
+                .get_thread(child_thread_id)
+                .await
+                .expect("child thread should exist");
+            let mut status_rx = harness
+                .control
+                .subscribe_status(child_thread_id)
+                .await
+                .expect("status subscription should succeed");
+            if matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
+                timeout(Duration::from_secs(5), async {
+                    loop {
+                        status_rx
+                            .changed()
+                            .await
+                            .expect("child status should advance past pending init");
+                        if !matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .expect("child should initialize before shutdown");
+            }
+            let original_snapshot = child_thread.config_snapshot().await;
+            let original_nickname = original_snapshot
+                .session_source
+                .get_nickname()
+                .expect("spawned sub-agent should have a nickname");
+            let state_db = child_thread
+                .state_db()
+                .expect("sqlite state db should be available for nickname resume test");
             timeout(Duration::from_secs(5), async {
                 loop {
-                    status_rx
-                        .changed()
-                        .await
-                        .expect("child status should advance past pending init");
-                    if !matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
+                    if let Ok(Some(metadata)) = state_db.get_thread(child_thread_id).await
+                        && metadata.agent_nickname.is_some()
+                        && metadata.agent_role.as_deref() == Some("explorer")
+                    {
                         break;
                     }
+                    sleep(Duration::from_millis(10)).await;
                 }
             })
             .await
-            .expect("child should initialize before shutdown");
-        }
-        let original_snapshot = child_thread.config_snapshot().await;
-        let original_nickname = original_snapshot
-            .session_source
-            .get_nickname()
-            .expect("spawned sub-agent should have a nickname");
-        let state_db = child_thread
-            .state_db()
-            .expect("sqlite state db should be available for nickname resume test");
-        timeout(Duration::from_secs(5), async {
-            loop {
-                if let Ok(Some(metadata)) = state_db.get_thread(child_thread_id).await
-                    && metadata.agent_nickname.is_some()
-                    && metadata.agent_role.as_deref() == Some("explorer")
-                {
-                    break;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("child thread metadata should be persisted to sqlite before shutdown");
+            .expect("child thread metadata should be persisted to sqlite before shutdown");
 
-        let _ = harness
-            .control
-            .shutdown_agent(child_thread_id)
-            .await
-            .expect("child shutdown should submit");
+            let _ = harness
+                .control
+                .shutdown_agent(child_thread_id)
+                .await
+                .expect("child shutdown should submit");
 
-        let resumed_thread_id = harness
-            .control
-            .resume_agent_from_rollout(
-                harness.config.clone(),
-                child_thread_id,
-                SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                    parent_thread_id,
-                    depth: 1,
-                    agent_nickname: None,
-                    agent_role: None,
-                }),
-            )
-            .await
-            .expect("resume should succeed");
-        assert_eq!(resumed_thread_id, child_thread_id);
+            let resumed_thread_id = harness
+                .control
+                .resume_agent_from_rollout(
+                    harness.config.clone(),
+                    child_thread_id,
+                    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                        parent_thread_id,
+                        depth: 1,
+                        agent_nickname: None,
+                        agent_role: None,
+                    }),
+                )
+                .await
+                .expect("resume should succeed");
+            assert_eq!(resumed_thread_id, child_thread_id);
 
-        let resumed_snapshot = harness
-            .manager
-            .get_thread(resumed_thread_id)
-            .await
-            .expect("resumed child thread should exist")
-            .config_snapshot()
-            .await;
-        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id: resumed_parent_thread_id,
-            depth: resumed_depth,
-            agent_nickname: resumed_nickname,
-            agent_role: resumed_role,
-        }) = resumed_snapshot.session_source
-        else {
-            panic!("expected thread-spawn sub-agent source");
-        };
-        assert_eq!(resumed_parent_thread_id, parent_thread_id);
-        assert_eq!(resumed_depth, 1);
-        assert_eq!(resumed_nickname, Some(original_nickname));
-        assert_eq!(resumed_role, Some("explorer".to_string()));
+            let resumed_snapshot = harness
+                .manager
+                .get_thread(resumed_thread_id)
+                .await
+                .expect("resumed child thread should exist")
+                .config_snapshot()
+                .await;
+            let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: resumed_parent_thread_id,
+                depth: resumed_depth,
+                agent_nickname: resumed_nickname,
+                agent_role: resumed_role,
+            }) = resumed_snapshot.session_source
+            else {
+                panic!("expected thread-spawn sub-agent source");
+            };
+            assert_eq!(resumed_parent_thread_id, parent_thread_id);
+            assert_eq!(resumed_depth, 1);
+            assert_eq!(resumed_nickname, Some(original_nickname));
+            assert_eq!(resumed_role, Some("explorer".to_string()));
 
-        let _ = harness
-            .control
-            .shutdown_agent(resumed_thread_id)
-            .await
-            .expect("resumed child shutdown should submit");
+            let _ = harness
+                .control
+                .shutdown_agent(resumed_thread_id)
+                .await
+                .expect("resumed child shutdown should submit");
+        });
     }
 
     #[tokio::test]
@@ -3189,99 +3236,108 @@ mod inbox_tests {
             .expect("replacement thread shutdown should submit");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn run_watchdogs_once_wakes_owner_when_helper_exits_without_send_input() {
-        let harness = AgentControlHarness::new().await;
-        let (owner_thread_id, owner_thread) = harness.start_thread().await;
-        let watchdog_handle_id = harness
-            .control
-            .spawn_agent_handle(
-                harness.config.clone(),
-                Some(thread_spawn_source(owner_thread_id)),
-            )
-            .await
-            .expect("watchdog handle should spawn");
-        let helper_thread_id = harness
-            .control
-            .spawn_agent_handle(
-                harness.config.clone(),
-                Some(thread_spawn_source(owner_thread_id)),
-            )
-            .await
-            .expect("watchdog helper should spawn");
-        let removed = harness
-            .control
-            .register_watchdog(WatchdogRegistration {
-                owner_thread_id,
-                target_thread_id: watchdog_handle_id,
-                child_depth: 1,
-                interval_s: 1,
-                prompt: "check in".to_string(),
-                config: harness.config.clone(),
-            })
-            .await
-            .expect("watchdog registration should succeed");
-        assert_eq!(removed, Vec::<RemovedWatchdog>::new());
-        harness
-            .control
-            .set_watchdog_active_helper_for_tests(watchdog_handle_id, helper_thread_id)
-            .await;
-        harness
-            .control
-            .force_watchdog_due_for_tests(watchdog_handle_id)
-            .await;
-
-        let mut helper_status_rx = harness
-            .control
-            .subscribe_status(helper_thread_id)
-            .await
-            .expect("helper status subscription should succeed");
-        let _ = harness
-            .control
-            .shutdown_agent(helper_thread_id)
-            .await
-            .expect("helper shutdown should submit");
-        timeout(Duration::from_secs(2), async {
-            loop {
-                if matches!(helper_status_rx.borrow().clone(), AgentStatus::Shutdown) {
-                    break;
-                }
-                helper_status_rx
-                    .changed()
+    #[test]
+    fn run_watchdogs_once_wakes_owner_when_helper_exits_without_send_input() {
+        run_async_test_with_large_stack(
+            LargeStackTestRuntime::MultiThread { worker_threads: 2 },
+            || async {
+                let harness = AgentControlHarness::new().await;
+                let (owner_thread_id, owner_thread) = harness.start_thread().await;
+                let watchdog_handle_id = harness
+                    .control
+                    .spawn_agent_handle(
+                        harness.config.clone(),
+                        Some(thread_spawn_source(owner_thread_id)),
+                    )
                     .await
-                    .expect("helper status should reach shutdown");
-            }
-        })
-        .await
-        .expect("helper should reach shutdown");
-        harness.control.run_watchdogs_once_for_tests().await;
+                    .expect("watchdog handle should spawn");
+                let helper_thread_id = harness
+                    .control
+                    .spawn_agent_handle(
+                        harness.config.clone(),
+                        Some(thread_spawn_source(owner_thread_id)),
+                    )
+                    .await
+                    .expect("watchdog helper should spawn");
+                let removed = harness
+                    .control
+                    .register_watchdog(WatchdogRegistration {
+                        owner_thread_id,
+                        target_thread_id: watchdog_handle_id,
+                        child_depth: 1,
+                        interval_s: 1,
+                        prompt: "check in".to_string(),
+                        config: harness.config.clone(),
+                    })
+                    .await
+                    .expect("watchdog registration should succeed");
+                assert_eq!(removed, Vec::<RemovedWatchdog>::new());
+                harness
+                    .control
+                    .set_watchdog_active_helper_for_tests(watchdog_handle_id, helper_thread_id)
+                    .await;
+                harness
+                    .control
+                    .force_watchdog_due_for_tests(watchdog_handle_id)
+                    .await;
 
-        let payload = timeout(Duration::from_secs(2), async {
-            loop {
-                let history = owner_thread.codex.session.clone_history().await;
-                if let Some(payload) = history.raw_items().iter().find_map(|item| match item {
-                    ResponseItem::FunctionCallOutput { output, .. } => output
-                        .text_content()
-                        .and_then(|text| serde_json::from_str::<AgentInboxPayload>(text).ok()),
-                    _ => None,
-                }) {
-                    break payload;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("owner should receive fallback agent inbox payload");
-        assert_eq!(payload.sender_thread_id, helper_thread_id);
-        assert!(
-            payload.message.starts_with("Watchdog check-in "),
-            "expected watchdog fallback prefix, got {:?}",
-            payload.message
-        );
-        assert!(
-            payload.message.ends_with("before calling send_input."),
-            "expected watchdog fallback suffix, got {:?}",
-            payload.message
+                let mut helper_status_rx = harness
+                    .control
+                    .subscribe_status(helper_thread_id)
+                    .await
+                    .expect("helper status subscription should succeed");
+                let _ = harness
+                    .control
+                    .shutdown_agent(helper_thread_id)
+                    .await
+                    .expect("helper shutdown should submit");
+                timeout(Duration::from_secs(2), async {
+                    loop {
+                        if matches!(helper_status_rx.borrow().clone(), AgentStatus::Shutdown) {
+                            break;
+                        }
+                        helper_status_rx
+                            .changed()
+                            .await
+                            .expect("helper status should reach shutdown");
+                    }
+                })
+                .await
+                .expect("helper should reach shutdown");
+                harness.control.run_watchdogs_once_for_tests().await;
+
+                let payload = timeout(Duration::from_secs(2), async {
+                    loop {
+                        let history = owner_thread.codex.session.clone_history().await;
+                        if let Some(payload) =
+                            history.raw_items().iter().find_map(|item| match item {
+                                ResponseItem::FunctionCallOutput { output, .. } => {
+                                    output.text_content().and_then(|text| {
+                                        serde_json::from_str::<AgentInboxPayload>(text).ok()
+                                    })
+                                }
+                                _ => None,
+                            })
+                        {
+                            break payload;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("owner should receive fallback agent inbox payload");
+                assert_eq!(payload.sender_thread_id, helper_thread_id);
+                assert!(
+                    payload.message.starts_with("Watchdog check-in "),
+                    "expected watchdog fallback prefix, got {:?}",
+                    payload.message
+                );
+                assert!(
+                    payload.message.ends_with("before calling send_input."),
+                    "expected watchdog fallback suffix, got {:?}",
+                    payload.message
+                );
+            },
         );
     }
 

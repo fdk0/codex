@@ -4,44 +4,72 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tokio::process::Command;
 
+fn test_git_env() -> [(&'static str, &'static str); 2] {
+    [
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+    ]
+}
+
 #[tokio::test]
 async fn build_turn_metadata_header_includes_has_changes_for_clean_repo() {
     let temp_dir = TempDir::new().expect("temp dir");
     let repo_path = temp_dir.path().join("repo");
     std::fs::create_dir_all(&repo_path).expect("create repo");
 
-    Command::new("git")
+    let envs = test_git_env();
+
+    let init = Command::new("git")
+        .envs(envs)
         .args(["init"])
         .current_dir(&repo_path)
         .output()
         .await
         .expect("git init");
-    Command::new("git")
+    assert!(init.status.success(), "git init should succeed");
+
+    let config_user_name = Command::new("git")
+        .envs(envs)
         .args(["config", "user.name", "Test User"])
         .current_dir(&repo_path)
         .output()
         .await
         .expect("git config user.name");
-    Command::new("git")
+    assert!(
+        config_user_name.status.success(),
+        "git config user.name should succeed"
+    );
+
+    let config_user_email = Command::new("git")
+        .envs(envs)
         .args(["config", "user.email", "test@example.com"])
         .current_dir(&repo_path)
         .output()
         .await
         .expect("git config user.email");
+    assert!(
+        config_user_email.status.success(),
+        "git config user.email should succeed"
+    );
 
     std::fs::write(repo_path.join("README.md"), "hello").expect("write file");
-    Command::new("git")
+    let add = Command::new("git")
+        .envs(envs)
         .args(["add", "."])
         .current_dir(&repo_path)
         .output()
         .await
         .expect("git add");
-    Command::new("git")
+    assert!(add.status.success(), "git add should succeed");
+
+    let commit = Command::new("git")
+        .envs(envs)
         .args(["commit", "-m", "initial"])
         .current_dir(&repo_path)
         .output()
         .await
         .expect("git commit");
+    assert!(commit.status.success(), "git commit should succeed");
 
     let header = build_turn_metadata_header(&repo_path, Some("none"))
         .await

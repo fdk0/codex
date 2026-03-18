@@ -5,18 +5,22 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
+fn test_git_env() -> [(&'static str, &'static str); 2] {
+    [
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+    ]
+}
+
 // Helper function to create a test git repository
 async fn create_test_git_repo(temp_dir: &TempDir) -> PathBuf {
     let repo_path = temp_dir.path().join("repo");
     fs::create_dir(&repo_path).expect("Failed to create repo dir");
-    let envs = vec![
-        ("GIT_CONFIG_GLOBAL", "/dev/null"),
-        ("GIT_CONFIG_NOSYSTEM", "1"),
-    ];
+    let envs = test_git_env();
 
     // Initialize git repo
     Command::new("git")
-        .envs(envs.clone())
+        .envs(envs)
         .args(["init"])
         .current_dir(&repo_path)
         .output()
@@ -25,7 +29,7 @@ async fn create_test_git_repo(temp_dir: &TempDir) -> PathBuf {
 
     // Configure git user (required for commits)
     Command::new("git")
-        .envs(envs.clone())
+        .envs(envs)
         .args(["config", "user.name", "Test User"])
         .current_dir(&repo_path)
         .output()
@@ -33,7 +37,7 @@ async fn create_test_git_repo(temp_dir: &TempDir) -> PathBuf {
         .expect("Failed to set git user name");
 
     Command::new("git")
-        .envs(envs.clone())
+        .envs(envs)
         .args(["config", "user.email", "test@example.com"])
         .current_dir(&repo_path)
         .output()
@@ -45,7 +49,7 @@ async fn create_test_git_repo(temp_dir: &TempDir) -> PathBuf {
     fs::write(&test_file, "test content").expect("Failed to write test file");
 
     Command::new("git")
-        .envs(envs.clone())
+        .envs(envs)
         .args(["add", "."])
         .current_dir(&repo_path)
         .output()
@@ -53,7 +57,7 @@ async fn create_test_git_repo(temp_dir: &TempDir) -> PathBuf {
         .expect("Failed to add files");
 
     Command::new("git")
-        .envs(envs.clone())
+        .envs(envs)
         .args(["commit", "-m", "Initial commit"])
         .current_dir(&repo_path)
         .output()
@@ -83,12 +87,14 @@ async fn test_recent_commits_orders_and_limits() {
     fs::write(repo_path.join("file.txt"), "one").unwrap();
     Command::new("git")
         .args(["add", "file.txt"])
+        .envs(test_git_env())
         .current_dir(&repo_path)
         .output()
         .await
         .expect("git add");
     Command::new("git")
         .args(["commit", "-m", "first change"])
+        .envs(test_git_env())
         .current_dir(&repo_path)
         .output()
         .await
@@ -99,12 +105,14 @@ async fn test_recent_commits_orders_and_limits() {
     fs::write(repo_path.join("file.txt"), "two").unwrap();
     Command::new("git")
         .args(["add", "file.txt"])
+        .envs(test_git_env())
         .current_dir(&repo_path)
         .output()
         .await
         .expect("git add 2");
     Command::new("git")
         .args(["commit", "-m", "second change"])
+        .envs(test_git_env())
         .current_dir(&repo_path)
         .output()
         .await
@@ -115,12 +123,14 @@ async fn test_recent_commits_orders_and_limits() {
     fs::write(repo_path.join("file.txt"), "three").unwrap();
     Command::new("git")
         .args(["add", "file.txt"])
+        .envs(test_git_env())
         .current_dir(&repo_path)
         .output()
         .await
         .expect("git add 3");
     Command::new("git")
         .args(["commit", "-m", "third change"])
+        .envs(test_git_env())
         .current_dir(&repo_path)
         .output()
         .await
@@ -537,12 +547,14 @@ async fn test_get_git_working_tree_state_unpushed_commit() {
     fs::write(repo_path.join("test.txt"), "updated").unwrap();
     Command::new("git")
         .args(["add", "test.txt"])
+        .envs(test_git_env())
         .current_dir(&repo_path)
         .output()
         .await
         .expect("Failed to add file");
     Command::new("git")
         .args(["commit", "-m", "local change"])
+        .envs(test_git_env())
         .current_dir(&repo_path)
         .output()
         .await

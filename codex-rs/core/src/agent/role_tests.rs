@@ -297,6 +297,8 @@ model_verbosity = "high"
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
+            model: None,
+            spawn_mode: None,
         },
     );
 
