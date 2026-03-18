@@ -83,6 +83,33 @@ fn text_item(items: &[Value], index: usize) -> &str {
         .expect("content item should be input_text")
 }
 
+fn run_async_test_with_large_stack<F, Fut>(f: F) -> Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+{
+    let handle = match std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.worker_threads(2);
+            builder.thread_stack_size(32 * 1024 * 1024);
+            let runtime = match builder.enable_all().build() {
+                Ok(runtime) => runtime,
+                Err(error) => panic!("failed to build runtime for large-stack test: {error}"),
+            };
+            runtime.block_on(f())
+        }) {
+        Ok(handle) => handle,
+        Err(error) => panic!("failed to spawn large-stack test thread: {error}"),
+    };
+
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 fn extract_running_cell_id(text: &str) -> String {
     text.strip_prefix("Script running with cell ID ")
         .and_then(|rest| rest.split('\n').next())
@@ -2401,12 +2428,13 @@ text(
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_can_print_content_only_mcp_tool_result_fields() -> Result<()> {
-    skip_if_no_network!(Ok(()));
+#[test]
+fn code_mode_can_print_content_only_mcp_tool_result_fields() -> Result<()> {
+    run_async_test_with_large_stack(|| async {
+        skip_if_no_network!(Ok(()));
 
-    let server = responses::start_mock_server().await;
-    let code = r#"
+        let server = responses::start_mock_server().await;
+        let code = r#"
 const { content, structuredContent, isError } = await tools.mcp__rmcp__image_scenario({
   scenario: "text_only",
   caption: "caption from mcp",
@@ -2419,29 +2447,30 @@ text(
 );
 "#;
 
-    let (_test, second_mock) = run_code_mode_turn_with_rmcp(
-        &server,
-        "use exec to run the rmcp image scenario tool",
-        code,
-    )
-    .await?;
+        let (_test, second_mock) = run_code_mode_turn_with_rmcp(
+            &server,
+            "use exec to run the rmcp image scenario tool",
+            code,
+        )
+        .await?;
 
-    let req = second_mock.single_request();
-    let (output, success) = custom_tool_output_body_and_success(&req, "call-1");
-    assert_ne!(
-        success,
-        Some(false),
-        "exec rmcp image scenario call failed unexpectedly: {output}"
-    );
-    assert_eq!(
-        output,
-        "firstType=text
+        let req = second_mock.single_request();
+        let (output, success) = custom_tool_output_body_and_success(&req, "call-1");
+        assert_ne!(
+            success,
+            Some(false),
+            "exec rmcp image scenario call failed unexpectedly: {output}"
+        );
+        assert_eq!(
+            output,
+            "firstType=text
 firstText=caption from mcp
 structuredContent=null
 isError=false"
-    );
+        );
 
-    Ok(())
+        Ok(())
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

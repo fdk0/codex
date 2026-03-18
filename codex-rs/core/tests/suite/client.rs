@@ -80,6 +80,33 @@ fn assert_message_role(request_body: &serde_json::Value, role: &str) {
     assert_eq!(request_body["role"].as_str().unwrap(), role);
 }
 
+fn run_async_test_with_large_stack<F, Fut>(f: F) -> anyhow::Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    let handle = match std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.worker_threads(2);
+            builder.thread_stack_size(32 * 1024 * 1024);
+            let runtime = match builder.enable_all().build() {
+                Ok(runtime) => runtime,
+                Err(error) => panic!("failed to build runtime for large-stack test: {error}"),
+            };
+            runtime.block_on(f())
+        }) {
+        Ok(handle) => handle,
+        Err(error) => panic!("failed to spawn large-stack test thread: {error}"),
+    };
+
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 #[expect(clippy::unwrap_used)]
 fn message_input_texts(item: &serde_json::Value) -> Vec<&str> {
     item["content"]
@@ -1427,74 +1454,75 @@ async fn configured_reasoning_summary_is_sent() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn user_turn_explicit_reasoning_summary_overrides_model_catalog_default() -> anyhow::Result<()>
-{
-    skip_if_no_network!(Ok(()));
-    let server = MockServer::start().await;
+#[test]
+fn user_turn_explicit_reasoning_summary_overrides_model_catalog_default() -> anyhow::Result<()> {
+    run_async_test_with_large_stack(|| async {
+        skip_if_no_network!(Ok(()));
+        let server = MockServer::start().await;
 
-    let resp_mock = mount_sse_once(
-        &server,
-        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
-    )
-    .await;
+        let resp_mock = mount_sse_once(
+            &server,
+            sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+        )
+        .await;
 
-    let mut model_catalog: ModelsResponse =
-        serde_json::from_str(include_str!("../../models.json")).expect("valid models.json");
-    let model = model_catalog
-        .models
-        .iter_mut()
-        .find(|model| model.slug == "gpt-5.1")
-        .expect("gpt-5.1 exists in bundled models.json");
-    model.supports_reasoning_summaries = true;
-    model.default_reasoning_summary = ReasoningSummary::Detailed;
+        let mut model_catalog: ModelsResponse =
+            serde_json::from_str(include_str!("../../models.json")).expect("valid models.json");
+        let model = model_catalog
+            .models
+            .iter_mut()
+            .find(|model| model.slug == "gpt-5.1")
+            .expect("gpt-5.1 exists in bundled models.json");
+        model.supports_reasoning_summaries = true;
+        model.default_reasoning_summary = ReasoningSummary::Detailed;
 
-    let TestCodex {
-        codex,
-        config,
-        session_configured,
-        ..
-    } = test_codex()
-        .with_model("gpt-5.1")
-        .with_config(move |config| {
-            config.model_catalog = Some(model_catalog);
-        })
-        .build(&server)
-        .await?;
+        let TestCodex {
+            codex,
+            config,
+            session_configured,
+            ..
+        } = test_codex()
+            .with_model("gpt-5.1")
+            .with_config(move |config| {
+                config.model_catalog = Some(model_catalog);
+            })
+            .build(&server)
+            .await?;
 
-    codex
-        .submit(Op::UserTurn {
-            items: vec![UserInput::Text {
-                text: "hello".into(),
-                text_elements: Vec::new(),
-            }],
-            cwd: config.cwd.clone(),
-            approval_policy: config.permissions.approval_policy.value(),
-            sandbox_policy: config.permissions.sandbox_policy.get().clone(),
-            model: session_configured.model,
-            effort: None,
-            summary: Some(ReasoningSummary::Concise),
-            service_tier: None,
-            collaboration_mode: None,
-            final_output_json_schema: None,
-            personality: None,
-        })
-        .await
-        .unwrap();
+        codex
+            .submit(Op::UserTurn {
+                items: vec![UserInput::Text {
+                    text: "hello".into(),
+                    text_elements: Vec::new(),
+                }],
+                cwd: config.cwd.clone(),
+                approval_policy: config.permissions.approval_policy.value(),
+                sandbox_policy: config.permissions.sandbox_policy.get().clone(),
+                model: session_configured.model,
+                effort: None,
+                summary: Some(ReasoningSummary::Concise),
+                service_tier: None,
+                collaboration_mode: None,
+                final_output_json_schema: None,
+                personality: None,
+            })
+            .await
+            .unwrap();
 
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+        wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
-    let request_body = resp_mock.single_request().body_json();
+        let request_body = resp_mock.single_request().body_json();
 
-    pretty_assertions::assert_eq!(
-        request_body
-            .get("reasoning")
-            .and_then(|reasoning| reasoning.get("summary"))
-            .and_then(|value| value.as_str()),
-        Some("concise")
-    );
+        pretty_assertions::assert_eq!(
+            request_body
+                .get("reasoning")
+                .and_then(|reasoning| reasoning.get("summary"))
+                .and_then(|value| value.as_str()),
+            Some("concise")
+        );
 
-    Ok(())
+        Ok(())
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

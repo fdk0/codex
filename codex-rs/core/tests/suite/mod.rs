@@ -10,9 +10,16 @@ struct TestCodexAliasesGuard {
     _codex_home: TempDir,
     _arg0: Arg0PathEntryGuard,
     _previous_codex_home: Option<OsString>,
+    _previous_home: Option<OsString>,
+    _previous_rust_min_stack: Option<OsString>,
+    _previous_zdotdir: Option<OsString>,
 }
 
 const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
+const HOME_ENV_VAR: &str = "HOME";
+const RUST_MIN_STACK_ENV_VAR: &str = "RUST_MIN_STACK";
+const ZDOTDIR_ENV_VAR: &str = "ZDOTDIR";
+const LARGE_TEST_STACK_SIZE_BYTES: &str = "33554432";
 
 // This code runs before any other tests are run.
 // It allows the test binary to behave like codex and dispatch to apply_patch and codex-linux-sandbox
@@ -26,12 +33,23 @@ pub static CODEX_ALIASES_TEMP_DIR: TestCodexAliasesGuard = unsafe {
         .tempdir()
         .unwrap();
     let previous_codex_home = std::env::var_os(CODEX_HOME_ENV_VAR);
+    let previous_home = std::env::var_os(HOME_ENV_VAR);
+    let previous_rust_min_stack = std::env::var_os(RUST_MIN_STACK_ENV_VAR);
+    let previous_zdotdir = std::env::var_os(ZDOTDIR_ENV_VAR);
     // arg0_dispatch() creates helper links under CODEX_HOME/tmp. Point it at a
     // test-owned temp dir so startup never mutates the developer's real ~/.codex.
+    //
+    // Also point HOME/ZDOTDIR at the same test-owned temp dir for the lifetime
+    // of the suite binary so shell snapshot/login-shell tests do not source the
+    // developer's real shell startup files. That keeps the suite hermetic and
+    // avoids spawning dozens of slow snapshot shells under the real ~/.zshrc.
     //
     // Safety: #[ctor] runs before tests start, so no test threads exist yet.
     unsafe {
         std::env::set_var(CODEX_HOME_ENV_VAR, codex_home.path());
+        std::env::set_var(HOME_ENV_VAR, codex_home.path());
+        std::env::set_var(RUST_MIN_STACK_ENV_VAR, LARGE_TEST_STACK_SIZE_BYTES);
+        std::env::set_var(ZDOTDIR_ENV_VAR, codex_home.path());
     }
 
     #[allow(clippy::unwrap_used)]
@@ -51,6 +69,9 @@ pub static CODEX_ALIASES_TEMP_DIR: TestCodexAliasesGuard = unsafe {
         _codex_home: codex_home,
         _arg0: arg0,
         _previous_codex_home: previous_codex_home,
+        _previous_home: previous_home,
+        _previous_rust_min_stack: previous_rust_min_stack,
+        _previous_zdotdir: previous_zdotdir,
     }
 };
 

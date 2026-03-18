@@ -8,6 +8,7 @@ use std::process::Command;
 use std::process::Command as StdCommand;
 
 use tempfile::tempdir;
+use tokio_util::sync::CancellationToken;
 
 #[cfg(unix)]
 struct BlockingStdinPipe {
@@ -80,7 +81,8 @@ fn assert_posix_snapshot_sections(snapshot: &str) {
 async fn get_snapshot(shell_type: ShellType) -> Result<String> {
     let dir = tempdir()?;
     let path = dir.path().join("snapshot.sh");
-    write_shell_snapshot(shell_type, &path, dir.path()).await?;
+    let shutdown = CancellationToken::new();
+    write_shell_snapshot(shell_type, &path, dir.path(), &shutdown).await?;
     let content = fs::read_to_string(&path).await?;
     Ok(content)
 }
@@ -194,9 +196,11 @@ async fn try_new_creates_and_deletes_snapshot_file() -> Result<()> {
         shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
     };
 
-    let snapshot = ShellSnapshot::try_new(dir.path(), ThreadId::new(), dir.path(), &shell)
-        .await
-        .expect("snapshot should be created");
+    let shutdown = CancellationToken::new();
+    let snapshot =
+        ShellSnapshot::try_new(dir.path(), ThreadId::new(), dir.path(), &shell, &shutdown)
+            .await
+            .expect("snapshot should be created");
     let path = snapshot.path.clone();
     assert!(path.exists());
     assert_eq!(snapshot.cwd, dir.path().to_path_buf());
@@ -219,12 +223,15 @@ async fn try_new_uses_distinct_generation_paths() -> Result<()> {
         shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
     };
 
-    let initial_snapshot = ShellSnapshot::try_new(dir.path(), session_id, dir.path(), &shell)
-        .await
-        .expect("initial snapshot should be created");
-    let refreshed_snapshot = ShellSnapshot::try_new(dir.path(), session_id, dir.path(), &shell)
-        .await
-        .expect("refreshed snapshot should be created");
+    let shutdown = CancellationToken::new();
+    let initial_snapshot =
+        ShellSnapshot::try_new(dir.path(), session_id, dir.path(), &shell, &shutdown)
+            .await
+            .expect("initial snapshot should be created");
+    let refreshed_snapshot =
+        ShellSnapshot::try_new(dir.path(), session_id, dir.path(), &shell, &shutdown)
+            .await
+            .expect("refreshed snapshot should be created");
     let initial_path = initial_snapshot.path.clone();
     let refreshed_path = refreshed_snapshot.path.clone();
 
@@ -269,9 +276,17 @@ async fn snapshot_shell_does_not_inherit_stdin() -> Result<()> {
         "HOME=\"{home_display}\"; export HOME; {}",
         bash_snapshot_script()
     );
-    let output = run_script_with_timeout(&shell, &script, Duration::from_secs(2), true, home)
-        .await
-        .context("run snapshot command")?;
+    let shutdown = CancellationToken::new();
+    let output = run_script_with_timeout(
+        &shell,
+        &script,
+        Duration::from_secs(2),
+        true,
+        home,
+        &shutdown,
+    )
+    .await
+    .context("run snapshot command")?;
     let read_status = fs::read_to_string(&read_status_path)
         .await
         .context("read stdin probe status")?;
@@ -307,9 +322,17 @@ async fn timed_out_snapshot_shell_is_terminated() -> Result<()> {
         shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
     };
 
-    let err = run_script_with_timeout(&shell, &script, Duration::from_secs(1), true, dir.path())
-        .await
-        .expect_err("snapshot shell should time out");
+    let shutdown = CancellationToken::new();
+    let err = run_script_with_timeout(
+        &shell,
+        &script,
+        Duration::from_secs(1),
+        true,
+        dir.path(),
+        &shutdown,
+    )
+    .await
+    .expect_err("snapshot shell should time out");
     assert!(
         err.to_string().contains("timed out"),
         "expected timeout error, got {err:?}"
@@ -334,6 +357,157 @@ async fn timed_out_snapshot_shell_is_terminated() -> Result<()> {
         }
         if Instant::now() >= deadline {
             panic!("timed out snapshot shell is still alive after grace period");
+        }
+        sleep(TokioDuration::from_millis(50)).await;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn timed_out_snapshot_shell_kills_background_descendants() -> Result<()> {
+    use std::process::Stdio;
+    use tokio::time::Duration as TokioDuration;
+    use tokio::time::Instant;
+    use tokio::time::sleep;
+
+    let dir = tempdir()?;
+    let parent_pid_path = dir.path().join("parent_pid");
+    let child_pid_path = dir.path().join("child_pid");
+    let script = format!(
+        "echo $$ > \"{}\"; sleep 30 & bg=$!; echo \"$bg\" > \"{}\"; wait",
+        parent_pid_path.display(),
+        child_pid_path.display()
+    );
+
+    let shell = Shell {
+        shell_type: ShellType::Sh,
+        shell_path: PathBuf::from("/bin/sh"),
+        shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
+    };
+
+    let shutdown = CancellationToken::new();
+    let err = run_script_with_timeout(
+        &shell,
+        &script,
+        Duration::from_secs(1),
+        true,
+        dir.path(),
+        &shutdown,
+    )
+    .await
+    .expect_err("snapshot shell should time out");
+    assert!(
+        err.to_string().contains("timed out"),
+        "expected timeout error, got {err:?}"
+    );
+
+    let parent_pid = fs::read_to_string(&parent_pid_path)
+        .await
+        .expect("snapshot shell writes parent pid before timing out")
+        .trim()
+        .parse::<i32>()?;
+    let child_pid = fs::read_to_string(&child_pid_path)
+        .await
+        .expect("snapshot shell writes child pid before timing out")
+        .trim()
+        .parse::<i32>()?;
+
+    let deadline = Instant::now() + TokioDuration::from_secs(1);
+    loop {
+        let parent_alive = StdCommand::new("kill")
+            .arg("-0")
+            .arg(parent_pid.to_string())
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
+            .status()?
+            .success();
+        let child_alive = StdCommand::new("kill")
+            .arg("-0")
+            .arg(child_pid.to_string())
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
+            .status()?
+            .success();
+        if !parent_alive && !child_alive {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("timed out snapshot shell descendants are still alive after grace period");
+        }
+        sleep(TokioDuration::from_millis(50)).await;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn cancelled_snapshot_shell_is_terminated() -> Result<()> {
+    use std::process::Stdio;
+    use tokio::time::Duration as TokioDuration;
+    use tokio::time::Instant;
+    use tokio::time::sleep;
+
+    let dir = tempdir()?;
+    let pid_path = dir.path().join("pid");
+    let script = format!("echo $$ > \"{}\"; sleep 30", pid_path.display());
+
+    let shell = Shell {
+        shell_type: ShellType::Sh,
+        shell_path: PathBuf::from("/bin/sh"),
+        shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
+    };
+
+    let shutdown = CancellationToken::new();
+    let shutdown_for_task = shutdown.clone();
+    let dir_path = dir.path().to_path_buf();
+    let task = tokio::spawn(async move {
+        run_script_with_timeout(
+            &shell,
+            &script,
+            Duration::from_secs(30),
+            true,
+            dir_path.as_path(),
+            &shutdown_for_task,
+        )
+        .await
+    });
+
+    loop {
+        if pid_path.exists() {
+            break;
+        }
+        sleep(TokioDuration::from_millis(25)).await;
+    }
+
+    shutdown.cancel();
+    let err = task.await?.expect_err("snapshot shell should be cancelled");
+    assert!(
+        err.to_string().contains("cancelled"),
+        "expected cancellation error, got {err:?}"
+    );
+
+    let pid = fs::read_to_string(&pid_path)
+        .await
+        .expect("snapshot shell writes pid before cancellation")
+        .trim()
+        .parse::<i32>()?;
+
+    let deadline = Instant::now() + TokioDuration::from_secs(1);
+    loop {
+        let kill_status = StdCommand::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
+            .status()?;
+        if !kill_status.success() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("cancelled snapshot shell is still alive after grace period");
         }
         sleep(TokioDuration::from_millis(50)).await;
     }

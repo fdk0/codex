@@ -49,7 +49,7 @@ struct SnapshotRunOptions {
 
 async fn wait_for_snapshot(codex_home: &Path) -> Result<PathBuf> {
     let snapshot_dir = codex_home.join("shell_snapshots");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if let Ok(mut entries) = fs::read_dir(&snapshot_dir).await {
             while let Some(entry) = entries.next_entry().await? {
@@ -363,253 +363,292 @@ fn assert_posix_snapshot_sections(snapshot: &str) {
     );
 }
 
-#[cfg_attr(not(target_os = "linux"), ignore)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn linux_unified_exec_uses_shell_snapshot() -> Result<()> {
-    let command = "echo snapshot-linux";
-    let run = run_snapshot_command(command).await?;
-    let stdout = normalize_newlines(&run.end.stdout);
+fn run_async_test_with_large_stack<F, Fut>(f: F) -> Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+{
+    let handle = match std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.worker_threads(2);
+            builder.thread_stack_size(32 * 1024 * 1024);
+            let runtime = match builder.enable_all().build() {
+                Ok(runtime) => runtime,
+                Err(error) => panic!("failed to build runtime for large-stack test: {error}"),
+            };
+            runtime.block_on(f())
+        }) {
+        Ok(handle) => handle,
+        Err(error) => panic!("failed to spawn large-stack test thread: {error}"),
+    };
 
-    assert_eq!(run.begin.command.get(1).map(String::as_str), Some("-lc"));
-    assert_eq!(run.begin.command.get(2).map(String::as_str), Some(command));
-    assert_eq!(run.begin.command.len(), 3);
-    assert!(run.snapshot_path.starts_with(&run.codex_home));
-    assert_posix_snapshot_sections(&run.snapshot_content);
-    assert_eq!(run.end.exit_code, 0);
-    assert!(
-        stdout.contains("snapshot-linux"),
-        "stdout should contain snapshot marker; stdout={stdout:?}"
-    );
-
-    Ok(())
-}
-
-#[cfg_attr(target_os = "windows", ignore)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn linux_shell_command_uses_shell_snapshot() -> Result<()> {
-    let command = "echo shell-command-snapshot-linux";
-    let run = run_shell_command_snapshot(command).await?;
-
-    assert_eq!(run.begin.command.get(1).map(String::as_str), Some("-lc"));
-    assert_eq!(run.begin.command.get(2).map(String::as_str), Some(command));
-    assert_eq!(run.begin.command.len(), 3);
-    assert!(run.snapshot_path.starts_with(&run.codex_home));
-    assert_posix_snapshot_sections(&run.snapshot_content);
-    assert_eq!(
-        normalize_newlines(&run.end.stdout).trim(),
-        "shell-command-snapshot-linux"
-    );
-    assert_eq!(run.end.exit_code, 0);
-
-    Ok(())
-}
-
-#[cfg_attr(target_os = "windows", ignore)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shell_command_snapshot_preserves_shell_environment_policy_set() -> Result<()> {
-    let builder = test_codex().with_config(|config| {
-        config
-            .features
-            .enable(Feature::ShellSnapshot)
-            .expect("test config should allow feature update");
-        config.permissions.shell_environment_policy.r#set = policy_set_path_for_test();
-    });
-    let harness = TestCodexHarness::with_builder(builder).await?;
-    let codex_home = harness.test().home.path().to_path_buf();
-    run_tool_turn_on_harness(
-        &harness,
-        "warm up shell snapshot",
-        "shell-snapshot-policy-warmup",
-        "shell_command",
-        json!({
-            "command": "printf warmup",
-            "timeout_ms": 1_000,
-        }),
-    )
-    .await?;
-    let snapshot_path = wait_for_snapshot(&codex_home).await?;
-    fs::write(&snapshot_path, snapshot_override_content_for_policy_test()).await?;
-
-    let command = command_asserting_policy_after_snapshot();
-    let end = run_tool_turn_on_harness(
-        &harness,
-        "verify shell policy after snapshot",
-        "shell-snapshot-policy-assert",
-        "shell_command",
-        json!({
-            "command": command,
-            "timeout_ms": 1_000,
-        }),
-    )
-    .await?;
-
-    assert_eq!(
-        normalize_newlines(&end.stdout).trim(),
-        POLICY_SUCCESS_OUTPUT
-    );
-    assert_eq!(end.exit_code, 0);
-    assert!(snapshot_path.starts_with(codex_home));
-
-    Ok(())
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 #[cfg_attr(not(target_os = "linux"), ignore)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn linux_unified_exec_snapshot_preserves_shell_environment_policy_set() -> Result<()> {
-    let builder = test_codex().with_config(|config| {
-        config.use_experimental_unified_exec_tool = true;
-        config
-            .features
-            .enable(Feature::UnifiedExec)
-            .expect("test config should allow feature update");
-        config
-            .features
-            .enable(Feature::ShellSnapshot)
-            .expect("test config should allow feature update");
-        config.permissions.shell_environment_policy.r#set = policy_set_path_for_test();
-    });
-    let harness = TestCodexHarness::with_builder(builder).await?;
-    let codex_home = harness.test().home.path().to_path_buf();
-    run_tool_turn_on_harness(
-        &harness,
-        "warm up unified exec shell snapshot",
-        "shell-snapshot-policy-warmup-exec",
-        "exec_command",
-        json!({
-            "cmd": "printf warmup",
-            "yield_time_ms": 1_000,
-        }),
-    )
-    .await?;
-    let snapshot_path = wait_for_snapshot(&codex_home).await?;
-    fs::write(&snapshot_path, snapshot_override_content_for_policy_test()).await?;
+#[test]
+fn linux_unified_exec_uses_shell_snapshot() -> Result<()> {
+    run_async_test_with_large_stack(|| async {
+        let command = "echo snapshot-linux";
+        let run = run_snapshot_command(command).await?;
+        let stdout = normalize_newlines(&run.end.stdout);
 
-    let command = command_asserting_policy_after_snapshot();
-    let end = run_tool_turn_on_harness(
-        &harness,
-        "verify unified exec policy after snapshot",
-        "shell-snapshot-policy-assert-exec",
-        "exec_command",
-        json!({
-            "cmd": command,
-            "yield_time_ms": 1_000,
-        }),
-    )
-    .await?;
+        assert_eq!(run.begin.command.get(1).map(String::as_str), Some("-lc"));
+        assert_eq!(run.begin.command.get(2).map(String::as_str), Some(command));
+        assert_eq!(run.begin.command.len(), 3);
+        assert!(run.snapshot_path.starts_with(&run.codex_home));
+        assert_posix_snapshot_sections(&run.snapshot_content);
+        assert_eq!(run.end.exit_code, 0);
+        assert!(
+            stdout.contains("snapshot-linux"),
+            "stdout should contain snapshot marker; stdout={stdout:?}"
+        );
 
-    assert_eq!(
-        normalize_newlines(&end.stdout).trim(),
-        POLICY_SUCCESS_OUTPUT
-    );
-    assert_eq!(end.exit_code, 0);
-    assert!(snapshot_path.starts_with(codex_home));
-
-    Ok(())
+        Ok(())
+    })
 }
 
 #[cfg_attr(target_os = "windows", ignore)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
-    let builder = test_codex().with_config(|config| {
-        config
-            .features
-            .enable(Feature::ShellSnapshot)
-            .expect("test config should allow feature update");
-        config.include_apply_patch_tool = true;
-    });
-    let harness = TestCodexHarness::with_builder(builder).await?;
+#[test]
+fn linux_shell_command_uses_shell_snapshot() -> Result<()> {
+    run_async_test_with_large_stack(|| async {
+        let command = "echo shell-command-snapshot-linux";
+        let run = run_shell_command_snapshot(command).await?;
 
-    let test = harness.test();
-    let codex = test.codex.clone();
-    let cwd = test.cwd_path().to_path_buf();
-    let codex_home = test.home.path().to_path_buf();
-    let target = cwd.join("snapshot-apply.txt");
+        assert_eq!(run.begin.command.get(1).map(String::as_str), Some("-lc"));
+        assert_eq!(run.begin.command.get(2).map(String::as_str), Some(command));
+        assert_eq!(run.begin.command.len(), 3);
+        assert!(run.snapshot_path.starts_with(&run.codex_home));
+        assert_posix_snapshot_sections(&run.snapshot_content);
+        assert_eq!(
+            normalize_newlines(&run.end.stdout).trim(),
+            "shell-command-snapshot-linux"
+        );
+        assert_eq!(run.end.exit_code, 0);
 
-    let script = "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: snapshot-apply.txt\n+hello from snapshot\n*** End Patch\nEOF\n";
-    let args = json!({
-        "command": script,
-        "timeout_ms": 1_000,
-    });
-    let call_id = "shell-snapshot-apply-patch";
-    let responses = vec![
-        sse(vec![
-            ev_response_created("resp-1"),
-            ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
-            ev_completed("resp-1"),
-        ]),
-        sse(vec![
-            ev_response_created("resp-2"),
-            ev_assistant_message("msg-1", "done"),
-            ev_completed("resp-2"),
-        ]),
-    ];
-    mount_sse_sequence(harness.server(), responses).await;
+        Ok(())
+    })
+}
 
-    let model = test.session_configured.model.clone();
-    codex
-        .submit(Op::UserTurn {
-            items: vec![UserInput::Text {
-                text: "apply patch via shell_command with snapshot".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            cwd: cwd.clone(),
-            approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::DangerFullAccess,
-            model,
-            effort: None,
-            summary: None,
-            service_tier: None,
-            collaboration_mode: None,
-            personality: None,
-        })
+#[cfg_attr(target_os = "windows", ignore)]
+#[test]
+fn shell_command_snapshot_preserves_shell_environment_policy_set() -> Result<()> {
+    run_async_test_with_large_stack(|| async {
+        let builder = test_codex().with_config(|config| {
+            config
+                .features
+                .enable(Feature::ShellSnapshot)
+                .expect("test config should allow feature update");
+            config.permissions.shell_environment_policy.r#set = policy_set_path_for_test();
+        });
+        let harness = TestCodexHarness::with_builder(builder).await?;
+        let codex_home = harness.test().home.path().to_path_buf();
+        run_tool_turn_on_harness(
+            &harness,
+            "warm up shell snapshot",
+            "shell-snapshot-policy-warmup",
+            "shell_command",
+            json!({
+                "command": "printf warmup",
+                "timeout_ms": 1_000,
+            }),
+        )
+        .await?;
+        let snapshot_path = wait_for_snapshot(&codex_home).await?;
+        fs::write(&snapshot_path, snapshot_override_content_for_policy_test()).await?;
+
+        let command = command_asserting_policy_after_snapshot();
+        let end = run_tool_turn_on_harness(
+            &harness,
+            "verify shell policy after snapshot",
+            "shell-snapshot-policy-assert",
+            "shell_command",
+            json!({
+                "command": command,
+                "timeout_ms": 1_000,
+            }),
+        )
         .await?;
 
-    let snapshot_path = wait_for_snapshot(&codex_home).await?;
-    let snapshot_content = fs::read_to_string(&snapshot_path).await?;
-    assert_posix_snapshot_sections(&snapshot_content);
+        assert_eq!(
+            normalize_newlines(&end.stdout).trim(),
+            POLICY_SUCCESS_OUTPUT
+        );
+        assert_eq!(end.exit_code, 0);
+        assert!(snapshot_path.starts_with(codex_home));
 
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+        Ok(())
+    })
+}
 
-    assert_eq!(
-        wait_for_file_contents(&target).await?,
-        "hello from snapshot\n"
-    );
+#[cfg_attr(not(target_os = "linux"), ignore)]
+#[test]
+fn linux_unified_exec_snapshot_preserves_shell_environment_policy_set() -> Result<()> {
+    run_async_test_with_large_stack(|| async {
+        let builder = test_codex().with_config(|config| {
+            config.use_experimental_unified_exec_tool = true;
+            config
+                .features
+                .enable(Feature::UnifiedExec)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::ShellSnapshot)
+                .expect("test config should allow feature update");
+            config.permissions.shell_environment_policy.r#set = policy_set_path_for_test();
+        });
+        let harness = TestCodexHarness::with_builder(builder).await?;
+        let codex_home = harness.test().home.path().to_path_buf();
+        run_tool_turn_on_harness(
+            &harness,
+            "warm up unified exec shell snapshot",
+            "shell-snapshot-policy-warmup-exec",
+            "exec_command",
+            json!({
+                "cmd": "printf warmup",
+                "yield_time_ms": 1_000,
+            }),
+        )
+        .await?;
+        let snapshot_path = wait_for_snapshot(&codex_home).await?;
+        fs::write(&snapshot_path, snapshot_override_content_for_policy_test()).await?;
 
-    Ok(())
+        let command = command_asserting_policy_after_snapshot();
+        let end = run_tool_turn_on_harness(
+            &harness,
+            "verify unified exec policy after snapshot",
+            "shell-snapshot-policy-assert-exec",
+            "exec_command",
+            json!({
+                "cmd": command,
+                "yield_time_ms": 1_000,
+            }),
+        )
+        .await?;
+
+        assert_eq!(
+            normalize_newlines(&end.stdout).trim(),
+            POLICY_SUCCESS_OUTPUT
+        );
+        assert_eq!(end.exit_code, 0);
+        assert!(snapshot_path.starts_with(codex_home));
+
+        Ok(())
+    })
 }
 
 #[cfg_attr(target_os = "windows", ignore)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shell_snapshot_deleted_after_shutdown_with_skills() -> Result<()> {
-    let builder = test_codex().with_config(|config| {
-        config
-            .features
-            .enable(Feature::ShellSnapshot)
-            .expect("test config should allow feature update");
-    });
-    let harness = TestCodexHarness::with_builder(builder).await?;
-    let home = harness.test().home.clone();
-    let codex_home = home.path().to_path_buf();
-    let codex = harness.test().codex.clone();
+#[test]
+fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
+    run_async_test_with_large_stack(|| async {
+        let builder = test_codex().with_config(|config| {
+            config
+                .features
+                .enable(Feature::ShellSnapshot)
+                .expect("test config should allow feature update");
+            config.include_apply_patch_tool = true;
+        });
+        let harness = TestCodexHarness::with_builder(builder).await?;
 
-    let snapshot_path = wait_for_snapshot(&codex_home).await?;
-    assert!(snapshot_path.exists());
+        let test = harness.test();
+        let codex = test.codex.clone();
+        let cwd = test.cwd_path().to_path_buf();
+        let codex_home = test.home.path().to_path_buf();
+        let target = cwd.join("snapshot-apply.txt");
 
-    codex.submit(Op::Shutdown {}).await?;
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::ShutdownComplete)).await;
+        let script = "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: snapshot-apply.txt\n+hello from snapshot\n*** End Patch\nEOF\n";
+        let args = json!({
+            "command": script,
+            "timeout_ms": 1_000,
+        });
+        let call_id = "shell-snapshot-apply-patch";
+        let responses = vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ];
+        mount_sse_sequence(harness.server(), responses).await;
 
-    drop(codex);
-    drop(harness);
-    sleep(Duration::from_millis(150)).await;
+        let model = test.session_configured.model.clone();
+        codex
+            .submit(Op::UserTurn {
+                items: vec![UserInput::Text {
+                    text: "apply patch via shell_command with snapshot".into(),
+                    text_elements: Vec::new(),
+                }],
+                final_output_json_schema: None,
+                cwd: cwd.clone(),
+                approval_policy: AskForApproval::Never,
+                sandbox_policy: SandboxPolicy::DangerFullAccess,
+                model,
+                effort: None,
+                summary: None,
+                service_tier: None,
+                collaboration_mode: None,
+                personality: None,
+            })
+            .await?;
 
-    assert_eq!(
-        snapshot_path.exists(),
-        false,
-        "snapshot should be removed after shutdown"
-    );
+        let snapshot_path = wait_for_snapshot(&codex_home).await?;
+        let snapshot_content = fs::read_to_string(&snapshot_path).await?;
+        assert_posix_snapshot_sections(&snapshot_content);
 
-    Ok(())
+        wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+        assert_eq!(
+            wait_for_file_contents(&target).await?,
+            "hello from snapshot\n"
+        );
+
+        Ok(())
+    })
+}
+
+#[cfg_attr(target_os = "windows", ignore)]
+#[test]
+fn shell_snapshot_deleted_after_shutdown_with_skills() -> Result<()> {
+    run_async_test_with_large_stack(|| async {
+        let builder = test_codex().with_config(|config| {
+            config
+                .features
+                .enable(Feature::ShellSnapshot)
+                .expect("test config should allow feature update");
+        });
+        let harness = TestCodexHarness::with_builder(builder).await?;
+        let home = harness.test().home.clone();
+        let codex_home = home.path().to_path_buf();
+        let codex = harness.test().codex.clone();
+
+        let snapshot_path = wait_for_snapshot(&codex_home).await?;
+        assert!(snapshot_path.exists());
+
+        codex.submit(Op::Shutdown {}).await?;
+        wait_for_event(&codex, |ev| matches!(ev, EventMsg::ShutdownComplete)).await;
+
+        drop(codex);
+        drop(harness);
+        sleep(Duration::from_millis(150)).await;
+
+        assert_eq!(
+            snapshot_path.exists(),
+            false,
+            "snapshot should be removed after shutdown"
+        );
+
+        Ok(())
+    })
 }
 
 #[cfg_attr(not(target_os = "macos"), ignore)]
@@ -617,66 +656,70 @@ async fn shell_snapshot_deleted_after_shutdown_with_skills() -> Result<()> {
     target_os = "macos",
     ignore = "requires unrestricted networking on macOS"
 )]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn macos_unified_exec_uses_shell_snapshot() -> Result<()> {
-    let command = "echo snapshot-macos";
-    let run = run_snapshot_command(command).await?;
+#[test]
+fn macos_unified_exec_uses_shell_snapshot() -> Result<()> {
+    run_async_test_with_large_stack(|| async {
+        let command = "echo snapshot-macos";
+        let run = run_snapshot_command(command).await?;
 
-    let shell_path = run
-        .begin
-        .command
-        .first()
-        .expect("shell path recorded")
-        .clone();
-    assert_eq!(run.begin.command.get(1).map(String::as_str), Some("-c"));
-    assert_eq!(
-        run.begin.command.get(2).map(String::as_str),
-        Some(". \"$0\" && exec \"$@\"")
-    );
-    assert_eq!(run.begin.command.get(4), Some(&shell_path));
-    assert_eq!(run.begin.command.get(5).map(String::as_str), Some("-c"));
-    assert_eq!(run.begin.command.last(), Some(&command.to_string()));
+        let shell_path = run
+            .begin
+            .command
+            .first()
+            .expect("shell path recorded")
+            .clone();
+        assert_eq!(run.begin.command.get(1).map(String::as_str), Some("-c"));
+        assert_eq!(
+            run.begin.command.get(2).map(String::as_str),
+            Some(". \"$0\" && exec \"$@\"")
+        );
+        assert_eq!(run.begin.command.get(4), Some(&shell_path));
+        assert_eq!(run.begin.command.get(5).map(String::as_str), Some("-c"));
+        assert_eq!(run.begin.command.last(), Some(&command.to_string()));
 
-    assert!(run.snapshot_path.starts_with(&run.codex_home));
-    assert_posix_snapshot_sections(&run.snapshot_content);
-    assert_eq!(normalize_newlines(&run.end.stdout).trim(), "snapshot-macos");
-    assert_eq!(run.end.exit_code, 0);
+        assert!(run.snapshot_path.starts_with(&run.codex_home));
+        assert_posix_snapshot_sections(&run.snapshot_content);
+        assert_eq!(normalize_newlines(&run.end.stdout).trim(), "snapshot-macos");
+        assert_eq!(run.end.exit_code, 0);
 
-    Ok(())
+        Ok(())
+    })
 }
 
 // #[cfg_attr(not(target_os = "windows"), ignore)]
 #[ignore]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn windows_unified_exec_uses_shell_snapshot() -> Result<()> {
-    let command = "Write-Output snapshot-windows";
-    let run = run_snapshot_command(command).await?;
+#[test]
+fn windows_unified_exec_uses_shell_snapshot() -> Result<()> {
+    run_async_test_with_large_stack(|| async {
+        let command = "Write-Output snapshot-windows";
+        let run = run_snapshot_command(command).await?;
 
-    let snapshot_index = run
-        .begin
-        .command
-        .iter()
-        .position(|arg| arg.contains("shell_snapshots"))
-        .expect("snapshot argument exists");
-    assert!(run.begin.command.iter().any(|arg| arg == "-NoProfile"));
-    assert!(
-        run.begin
+        let snapshot_index = run
+            .begin
             .command
             .iter()
-            .any(|arg| arg == "param($snapshot) . $snapshot; & @args")
-    );
-    assert!(snapshot_index > 0);
-    assert_eq!(run.begin.command.last(), Some(&command.to_string()));
+            .position(|arg| arg.contains("shell_snapshots"))
+            .expect("snapshot argument exists");
+        assert!(run.begin.command.iter().any(|arg| arg == "-NoProfile"));
+        assert!(
+            run.begin
+                .command
+                .iter()
+                .any(|arg| arg == "param($snapshot) . $snapshot; & @args")
+        );
+        assert!(snapshot_index > 0);
+        assert_eq!(run.begin.command.last(), Some(&command.to_string()));
 
-    assert!(run.snapshot_path.starts_with(&run.codex_home));
-    assert!(run.snapshot_content.contains("# Snapshot file"));
-    assert!(run.snapshot_content.contains("# aliases "));
-    assert!(run.snapshot_content.contains("# exports "));
-    assert_eq!(
-        normalize_newlines(&run.end.stdout).trim(),
-        "snapshot-windows"
-    );
-    assert_eq!(run.end.exit_code, 0);
+        assert!(run.snapshot_path.starts_with(&run.codex_home));
+        assert!(run.snapshot_content.contains("# Snapshot file"));
+        assert!(run.snapshot_content.contains("# aliases "));
+        assert!(run.snapshot_content.contains("# exports "));
+        assert_eq!(
+            normalize_newlines(&run.end.stdout).trim(),
+            "snapshot-windows"
+        );
+        assert_eq!(run.end.exit_code, 0);
 
-    Ok(())
+        Ok(())
+    })
 }

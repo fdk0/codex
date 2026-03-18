@@ -30,6 +30,7 @@ use codex_protocol::protocol::ReviewDecision;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -53,6 +54,13 @@ impl ApplyPatchRuntime {
         Self
     }
 
+    fn supports_internal_apply_patch_cli(path: &Path) -> bool {
+        !matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("codex-linux-sandbox" | "apply_patch" | "applypatch" | "codex-execve-wrapper")
+        )
+    }
+
     fn build_guardian_review_request(
         req: &ApplyPatchRequest,
         call_id: &str,
@@ -70,7 +78,9 @@ impl ApplyPatchRuntime {
         req: &ApplyPatchRequest,
         _codex_home: &std::path::Path,
     ) -> Result<CommandSpec, ToolError> {
-        let exe = if let Some(path) = &req.codex_exe {
+        let exe = if let Some(path) = &req.codex_exe
+            && Self::supports_internal_apply_patch_cli(path)
+        {
             path.clone()
         } else {
             #[cfg(target_os = "windows")]
