@@ -301,6 +301,7 @@ pub(crate) struct ToolsConfig {
     pub can_request_original_image_detail: bool,
     pub collab_tools: bool,
     pub multi_agent_v2: bool,
+    pub agent_watchdog: bool,
     pub artifact_tools: bool,
     pub request_user_input: bool,
     pub default_mode_request_user_input: bool,
@@ -352,6 +353,8 @@ impl ToolsConfig {
         let include_collab_tools = features.enabled(Feature::Collab);
         let include_multi_agent_v2 = features.enabled(Feature::MultiAgentV2);
         let include_agent_jobs = features.enabled(Feature::SpawnCsv);
+        let include_agent_watchdog =
+            include_collab_tools && features.enabled(Feature::AgentWatchdog);
         let include_request_user_input = !matches!(session_source, SessionSource::SubAgent(_));
         let include_default_mode_request_user_input =
             include_request_user_input && features.enabled(Feature::DefaultModeRequestUserInput);
@@ -435,6 +438,7 @@ impl ToolsConfig {
             can_request_original_image_detail: include_original_image_detail,
             collab_tools: include_collab_tools,
             multi_agent_v2: include_multi_agent_v2,
+            agent_watchdog: include_agent_watchdog,
             artifact_tools: include_artifact_tools,
             request_user_input: include_request_user_input,
             default_mode_request_user_input: include_default_mode_request_user_input,
@@ -1104,6 +1108,16 @@ fn create_collab_input_items_schema() -> JsonSchema {
 fn create_spawn_agent_tool(config: &ToolsConfig) -> ToolSpec {
     let available_models_description = spawn_agent_models_description(&config.available_models);
     let return_value_description = "Returns the canonical task name when the spawned agent was named, otherwise the agent id, plus the user-facing nickname when available.";
+    let spawn_mode_description = if config.agent_watchdog {
+        "Spawn behavior: fork, spawn (fresh context), or watchdog (idle-time check-ins). Roles may override the omitted-mode default. Watchdog mode returns a handle, not a conversational worker, and check-ins only happen after the current turn ends and the owner thread is idle."
+    } else {
+        "Spawn behavior: fork or spawn (fresh context). Roles may override the omitted-mode default."
+    };
+    let description_prefix = if config.agent_watchdog {
+        "Spawn a sub-agent for a well-scoped task. Returns the agent id (and user-facing nickname when available) to use to communicate with this agent. Watchdog mode returns a control handle, not a conversational worker; watchdog check-ins are asynchronous and cannot arrive until the current turn ends and the owner thread becomes idle."
+    } else {
+        "Spawn a sub-agent for a well-scoped task. Returns the agent id (and user-facing nickname when available) to use to communicate with this agent."
+    };
     let mut properties = BTreeMap::from([
         (
             "message".to_string(),
@@ -1150,6 +1164,12 @@ fn create_spawn_agent_tool(config: &ToolsConfig) -> ToolSpec {
                 ),
             },
         ),
+        (
+            "spawn_mode".to_string(),
+            JsonSchema::String {
+                description: Some(spawn_mode_description.to_string()),
+            },
+        ),
     ]);
     properties.insert(
         "task_name".to_string(),
@@ -1168,7 +1188,7 @@ fn create_spawn_agent_tool(config: &ToolsConfig) -> ToolSpec {
         Only use `spawn_agent` if and only if the user explicitly asks for sub-agents, delegation, or parallel agent work.
         Requests for depth, thoroughness, research, investigation, or detailed codebase analysis do not count as permission to spawn.
         Agent-role guidance below only helps choose which agent to use after spawning is already authorized; it never authorizes spawning by itself.
-        Spawn a sub-agent for a well-scoped task. {return_value_description} This spawn_agent tool provides you access to smaller but more efficient sub-agents. A mini model can solve many tasks faster than the main model. You should follow the rules and guidelines below to use this tool.
+        {description_prefix} {return_value_description} This spawn_agent tool provides you access to smaller but more efficient sub-agents. A mini model can solve many tasks faster than the main model. You should follow the rules and guidelines below to use this tool.
 
 {available_models_description}
 ### When to delegate vs. do the subtask yourself
@@ -1188,7 +1208,7 @@ fn create_spawn_agent_tool(config: &ToolsConfig) -> ToolSpec {
 - For code-edit subtasks, decompose work so each delegated task has a disjoint write set.
 
 ### After you delegate
-- Call wait_agent very sparingly. Only call wait_agent when you need the result immediately for the next critical-path step and you are blocked until it returns.
+- Call wait very sparingly. Only call wait when you need the result immediately for the next critical-path step and you are blocked until it returns.
 - Do not redo delegated subagent tasks yourself; focus on integrating results or tackling non-overlapping work.
 - While the subagent is running in the background, do meaningful non-overlapping work immediately.
 - Do not repeatedly wait by reflex.
@@ -1375,7 +1395,8 @@ fn create_send_input_tool() -> ToolSpec {
             "target".to_string(),
             JsonSchema::String {
                 description: Some(
-                    "Agent id or canonical task name to message (from spawn_agent).".to_string(),
+                    "Agent id or canonical task name to message (from spawn_agent). Use \"parent\" or \"root\" when available to target the parent thread."
+                        .to_string(),
                 ),
             },
         ),
@@ -1411,7 +1432,7 @@ fn create_send_input_tool() -> ToolSpec {
             required: Some(vec!["target".to_string()]),
             additional_properties: Some(false.into()),
         },
-        output_schema: Some(send_input_output_schema()),
+        output_schema: None,
     })
 }
 
@@ -1427,7 +1448,7 @@ fn create_resume_agent_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "resume_agent".to_string(),
         description:
-            "Resume a previously closed agent by id so it can receive send_input and wait_agent calls."
+            "Resume a previously closed agent by id so it can receive send_input and wait calls."
                 .to_string(),
         strict: false,
         defer_loading: None,
@@ -1440,16 +1461,102 @@ fn create_resume_agent_tool() -> ToolSpec {
     })
 }
 
-fn wait_agent_tool_parameters() -> JsonSchema {
+fn create_compact_parent_context_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "reason".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional short reason describing why the parent appears stuck.".to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "evidence".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional concrete evidence of non-progress (for example repeated identical replies with no tool or file actions)."
+                    .to_string(),
+            ),
+        },
+    );
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "compact_parent_context".to_string(),
+        description: "Watchdog-only: request compaction for the watchdog helper's parent thread when it is idle and appears stuck."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::Object {
+            properties,
+            required: None,
+            additional_properties: Some(false.into()),
+        },
+        output_schema: Some(send_input_output_schema()),
+    })
+}
+
+fn create_list_agents_tool(agent_watchdog: bool) -> ToolSpec {
+    let description = if agent_watchdog {
+        "List agents spawned by an agent, optionally recursively. This is a status view; polling it will not make a watchdog fire."
+    } else {
+        "List agents spawned by an agent, optionally recursively."
+    };
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "id".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Identifier of the parent agent whose spawned agents to list. Defaults to the current agent."
+                    .to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "recursive".to_string(),
+        JsonSchema::Boolean {
+            description: Some(
+                "When true (default), include all descendants recursively. When false, include only direct children."
+                    .to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "all".to_string(),
+        JsonSchema::Boolean {
+            description: Some(
+                "When true, ignore id/recursive and return all tracked open agents that currently count toward this session's agent limit."
+                    .to_string(),
+            ),
+        },
+    );
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "list_agents".to_string(),
+        description: description.to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::Object {
+            properties,
+            required: None,
+            additional_properties: Some(false.into()),
+        },
+        output_schema: None,
+    })
+}
+
+fn wait_agent_tool_parameters(agent_watchdog: bool) -> JsonSchema {
+    let targets_description = if agent_watchdog {
+        "Agent ids or canonical task names to wait on. Pass multiple targets to wait for whichever finishes first. Watchdog handle ids are status-only here: if all targets are watchdog handles, wait_agent returns an immediate correction instead of blocking; if mixed with normal agent ids, wait_agent still waits on normal agents and includes current watchdog statuses."
+    } else {
+        "Agent ids or canonical task names to wait on. Pass multiple targets to wait for whichever finishes first."
+    };
     let mut properties = BTreeMap::new();
     properties.insert(
         "targets".to_string(),
         JsonSchema::Array {
             items: Box::new(JsonSchema::String { description: None }),
-            description: Some(
-                "Agent ids or canonical task names to wait on. Pass multiple targets to wait for whichever finishes first."
-                    .to_string(),
-            ),
+            description: Some(targets_description.to_string()),
         },
     );
     properties.insert(
@@ -1468,26 +1575,34 @@ fn wait_agent_tool_parameters() -> JsonSchema {
     }
 }
 
-fn create_wait_agent_tool_v1() -> ToolSpec {
+fn create_wait_agent_tool_v1(agent_watchdog: bool) -> ToolSpec {
+    let description = if agent_watchdog {
+        "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status. Watchdog handles cannot be waited on for new check-ins, and sleeping or polling cannot make a watchdog fire while the current turn is active."
+    } else {
+        "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status."
+    };
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
-        description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status."
-            .to_string(),
+        description: description.to_string(),
         strict: false,
         defer_loading: None,
-        parameters: wait_agent_tool_parameters(),
+        parameters: wait_agent_tool_parameters(agent_watchdog),
         output_schema: Some(wait_output_schema_v1()),
     })
 }
 
-fn create_wait_agent_tool_v2() -> ToolSpec {
+fn create_wait_agent_tool_v2(agent_watchdog: bool) -> ToolSpec {
+    let description = if agent_watchdog {
+        "Wait for agents to reach a final status. Returns a brief wait summary instead of the agent's final content. Returns a timeout summary when no agent reaches a final status before the deadline. Watchdog handles are status-only here and cannot be waited on for new check-ins."
+    } else {
+        "Wait for agents to reach a final status. Returns a brief wait summary instead of the agent's final content. Returns a timeout summary when no agent reaches a final status before the deadline."
+    };
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
-        description: "Wait for agents to reach a final status. Returns a brief wait summary instead of the agent's final content. Returns a timeout summary when no agent reaches a final status before the deadline."
-            .to_string(),
+        description: description.to_string(),
         strict: false,
         defer_loading: None,
-        parameters: wait_agent_tool_parameters(),
+        parameters: wait_agent_tool_parameters(agent_watchdog),
         output_schema: Some(wait_output_schema_v2()),
     })
 }
@@ -2632,10 +2747,12 @@ pub(crate) fn build_specs_with_discoverable_tools(
     use crate::tools::handlers::UnifiedExecHandler;
     use crate::tools::handlers::ViewImageHandler;
     use crate::tools::handlers::multi_agents::CloseAgentHandler;
+    use crate::tools::handlers::multi_agents::CompactParentContextHandler;
+    use crate::tools::handlers::multi_agents::ListAgentsHandler;
     use crate::tools::handlers::multi_agents::ResumeAgentHandler;
     use crate::tools::handlers::multi_agents::SendInputHandler;
     use crate::tools::handlers::multi_agents::SpawnAgentHandler;
-    use crate::tools::handlers::multi_agents::WaitAgentHandler;
+    use crate::tools::handlers::multi_agents::WaitHandler;
     use crate::tools::handlers::multi_agents_v2::SendInputHandler as SendInputHandlerV2;
     use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
     use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
@@ -3040,10 +3157,24 @@ pub(crate) fn build_specs_with_discoverable_tools(
         }
         push_tool_spec(
             &mut builder,
+            create_list_agents_tool(config.agent_watchdog),
+            /*supports_parallel_tool_calls*/ false,
+            config.code_mode_enabled,
+        );
+        if config.agent_watchdog {
+            push_tool_spec(
+                &mut builder,
+                create_compact_parent_context_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                config.code_mode_enabled,
+            );
+        }
+        push_tool_spec(
+            &mut builder,
             if config.multi_agent_v2 {
-                create_wait_agent_tool_v2()
+                create_wait_agent_tool_v2(config.agent_watchdog)
             } else {
-                create_wait_agent_tool_v1()
+                create_wait_agent_tool_v1(config.agent_watchdog)
             },
             /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
@@ -3061,7 +3192,14 @@ pub(crate) fn build_specs_with_discoverable_tools(
         } else {
             builder.register_handler("spawn_agent", Arc::new(SpawnAgentHandler));
             builder.register_handler("send_input", Arc::new(SendInputHandler));
-            builder.register_handler("wait_agent", Arc::new(WaitAgentHandler));
+            builder.register_handler("wait_agent", Arc::new(WaitHandler));
+        }
+        builder.register_handler("list_agents", Arc::new(ListAgentsHandler));
+        if config.agent_watchdog {
+            builder.register_handler(
+                "compact_parent_context",
+                Arc::new(CompactParentContextHandler),
+            );
         }
         builder.register_handler("close_agent", Arc::new(CloseAgentHandler));
     }
