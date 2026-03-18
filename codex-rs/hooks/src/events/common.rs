@@ -74,8 +74,10 @@ pub(crate) fn matcher_pattern_for_event(
     matcher: Option<&str>,
 ) -> Option<&str> {
     match event_name {
-        HookEventName::PreToolUse | HookEventName::SessionStart => matcher,
-        HookEventName::UserPromptSubmit | HookEventName::Stop => None,
+        HookEventName::PreToolUse
+        | HookEventName::SessionStart
+        | HookEventName::UserPromptSubmit
+        | HookEventName::Stop => matcher,
     }
 }
 
@@ -155,18 +157,6 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_events_ignore_matchers() {
-        assert_eq!(
-            matcher_pattern_for_event(HookEventName::UserPromptSubmit, Some("^hello")),
-            None
-        );
-        assert_eq!(
-            matcher_pattern_for_event(HookEventName::Stop, Some("^done$")),
-            None
-        );
-    }
-
-    #[test]
     fn supported_events_keep_matchers() {
         assert_eq!(
             matcher_pattern_for_event(HookEventName::PreToolUse, Some("Bash")),
@@ -175,6 +165,14 @@ mod tests {
         assert_eq!(
             matcher_pattern_for_event(HookEventName::SessionStart, Some("startup|resume")),
             Some("startup|resume")
+        );
+        assert_eq!(
+            matcher_pattern_for_event(HookEventName::UserPromptSubmit, Some("^hello")),
+            Some("^hello")
+        );
+        assert_eq!(
+            matcher_pattern_for_event(HookEventName::Stop, Some("^done$")),
+            Some("^done$")
         );
     }
 }

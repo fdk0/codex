@@ -224,6 +224,7 @@ pub(crate) struct SessionStartCommandInput {
     pub cwd: String,
     #[schemars(schema_with = "session_start_hook_event_name_schema")]
     pub hook_event_name: String,
+    pub active_profile: NullableString,
     pub model: String,
     #[schemars(schema_with = "permission_mode_schema")]
     pub permission_mode: String,
@@ -231,22 +232,26 @@ pub(crate) struct SessionStartCommandInput {
     pub source: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CommandInputContext {
+    pub session_id: String,
+    pub transcript_path: Option<PathBuf>,
+    pub cwd: String,
+    pub active_profile: Option<String>,
+    pub model: String,
+    pub permission_mode: String,
+}
+
 impl SessionStartCommandInput {
-    pub(crate) fn new(
-        session_id: impl Into<String>,
-        transcript_path: Option<PathBuf>,
-        cwd: impl Into<String>,
-        model: impl Into<String>,
-        permission_mode: impl Into<String>,
-        source: impl Into<String>,
-    ) -> Self {
+    pub(crate) fn from_context(context: CommandInputContext, source: impl Into<String>) -> Self {
         Self {
-            session_id: session_id.into(),
-            transcript_path: NullableString::from_path(transcript_path),
-            cwd: cwd.into(),
+            session_id: context.session_id,
+            transcript_path: NullableString::from_path(context.transcript_path),
+            cwd: context.cwd,
             hook_event_name: "SessionStart".to_string(),
-            model: model.into(),
-            permission_mode: permission_mode.into(),
+            active_profile: NullableString::from_string(context.active_profile),
+            model: context.model,
+            permission_mode: context.permission_mode,
             source: source.into(),
         }
     }
@@ -263,12 +268,32 @@ pub(crate) struct UserPromptSubmitCommandInput {
     pub cwd: String,
     #[schemars(schema_with = "user_prompt_submit_hook_event_name_schema")]
     pub hook_event_name: String,
+    pub active_profile: NullableString,
     pub model: String,
     #[schemars(schema_with = "permission_mode_schema")]
     pub permission_mode: String,
     pub prompt: String,
 }
 
+impl UserPromptSubmitCommandInput {
+    pub(crate) fn from_context(
+        context: CommandInputContext,
+        turn_id: impl Into<String>,
+        prompt: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_id: context.session_id,
+            turn_id: turn_id.into(),
+            transcript_path: NullableString::from_path(context.transcript_path),
+            cwd: context.cwd,
+            hook_event_name: "UserPromptSubmit".to_string(),
+            active_profile: NullableString::from_string(context.active_profile),
+            model: context.model,
+            permission_mode: context.permission_mode,
+            prompt: prompt.into(),
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(rename = "stop.command.input")]
@@ -280,6 +305,7 @@ pub(crate) struct StopCommandInput {
     pub cwd: String,
     #[schemars(schema_with = "stop_hook_event_name_schema")]
     pub hook_event_name: String,
+    pub active_profile: NullableString,
     pub model: String,
     #[schemars(schema_with = "permission_mode_schema")]
     pub permission_mode: String,
@@ -287,6 +313,27 @@ pub(crate) struct StopCommandInput {
     pub last_assistant_message: NullableString,
 }
 
+impl StopCommandInput {
+    pub(crate) fn from_context(
+        context: CommandInputContext,
+        turn_id: impl Into<String>,
+        stop_hook_active: bool,
+        last_assistant_message: Option<String>,
+    ) -> Self {
+        Self {
+            session_id: context.session_id,
+            turn_id: turn_id.into(),
+            transcript_path: NullableString::from_path(context.transcript_path),
+            cwd: context.cwd,
+            hook_event_name: "Stop".to_string(),
+            active_profile: NullableString::from_string(context.active_profile),
+            model: context.model,
+            permission_mode: context.permission_mode,
+            stop_hook_active,
+            last_assistant_message: NullableString::from_string(last_assistant_message),
+        }
+    }
+}
 pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
     let generated_dir = schema_root.join(GENERATED_DIR);
     ensure_empty_dir(&generated_dir)?;

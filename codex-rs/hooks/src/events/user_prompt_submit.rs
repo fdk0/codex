@@ -14,7 +14,7 @@ use crate::engine::ConfiguredHandler;
 use crate::engine::command_runner::CommandRunResult;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
-use crate::schema::NullableString;
+use crate::schema::CommandInputContext;
 use crate::schema::UserPromptSubmitCommandInput;
 
 #[derive(Debug, Clone)]
@@ -23,6 +23,7 @@ pub struct UserPromptSubmitRequest {
     pub turn_id: String,
     pub cwd: PathBuf,
     pub transcript_path: Option<PathBuf>,
+    pub active_profile: Option<String>,
     pub model: String,
     pub permission_mode: String,
     pub prompt: String,
@@ -45,12 +46,17 @@ struct UserPromptSubmitHandlerData {
 
 pub(crate) fn preview(
     handlers: &[ConfiguredHandler],
-    _request: &UserPromptSubmitRequest,
+    request: &UserPromptSubmitRequest,
 ) -> Vec<HookRunSummary> {
     dispatcher::select_handlers(
         handlers,
-        HookEventName::UserPromptSubmit,
-        /*matcher_input*/ None,
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::UserPromptSubmit,
+            matcher_input: Some(request.prompt.as_str()),
+            active_profile: request.active_profile.as_deref(),
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
     )
     .into_iter()
     .map(|handler| dispatcher::running_summary(&handler))
@@ -64,8 +70,13 @@ pub(crate) async fn run(
 ) -> UserPromptSubmitOutcome {
     let matched = dispatcher::select_handlers(
         handlers,
-        HookEventName::UserPromptSubmit,
-        /*matcher_input*/ None,
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::UserPromptSubmit,
+            matcher_input: Some(request.prompt.as_str()),
+            active_profile: request.active_profile.as_deref(),
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
     );
     if matched.is_empty() {
         return UserPromptSubmitOutcome {
@@ -76,16 +87,18 @@ pub(crate) async fn run(
         };
     }
 
-    let input_json = match serde_json::to_string(&UserPromptSubmitCommandInput {
-        session_id: request.session_id.to_string(),
-        turn_id: request.turn_id.clone(),
-        transcript_path: NullableString::from_path(request.transcript_path.clone()),
-        cwd: request.cwd.display().to_string(),
-        hook_event_name: "UserPromptSubmit".to_string(),
-        model: request.model.clone(),
-        permission_mode: request.permission_mode.clone(),
-        prompt: request.prompt.clone(),
-    }) {
+    let input_json = match serde_json::to_string(&UserPromptSubmitCommandInput::from_context(
+        CommandInputContext {
+            session_id: request.session_id.to_string(),
+            transcript_path: request.transcript_path.clone(),
+            cwd: request.cwd.display().to_string(),
+            active_profile: request.active_profile.clone(),
+            model: request.model.clone(),
+            permission_mode: request.permission_mode.clone(),
+        },
+        request.turn_id.clone(),
+        request.prompt.clone(),
+    )) {
         Ok(input_json) => input_json,
         Err(error) => {
             return serialization_failure_outcome(common::serialization_failure_hook_events(
@@ -270,6 +283,7 @@ fn serialization_failure_outcome(hook_events: Vec<HookCompletedEvent>) -> UserPr
 mod tests {
     use std::path::PathBuf;
 
+    use codex_protocol::ThreadId;
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookOutputEntry;
     use codex_protocol::protocol::HookOutputEntryKind;
@@ -277,9 +291,12 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::UserPromptSubmitHandlerData;
+    use super::UserPromptSubmitRequest;
     use super::parse_completed;
+    use super::preview;
     use crate::engine::ConfiguredHandler;
     use crate::engine::command_runner::CommandRunResult;
+    use crate::engine::config::HookConditions;
 
     #[test]
     fn continue_false_preserves_context_for_later_turns() {
@@ -410,10 +427,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn preview_filters_by_prompt_matcher_and_profile() {
+        let handlers = vec![
+            ConfiguredHandler {
+                event_name: HookEventName::UserPromptSubmit,
+                matcher: None,
+                conditions: HookConditions::default(),
+                command: "echo general".to_string(),
+                timeout_sec: 5,
+                status_message: None,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 0,
+            },
+            ConfiguredHandler {
+                event_name: HookEventName::UserPromptSubmit,
+                matcher: Some("^deploy".to_string()),
+                conditions: HookConditions {
+                    profiles: vec!["bd-worker".to_string()],
+                    ..HookConditions::default()
+                },
+                command: "echo scoped".to_string(),
+                timeout_sec: 5,
+                status_message: None,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 1,
+            },
+        ];
+        let request = UserPromptSubmitRequest {
+            session_id: ThreadId::new(),
+            turn_id: "turn-1".to_string(),
+            cwd: PathBuf::from("/tmp"),
+            transcript_path: None,
+            active_profile: Some("bd-worker".to_string()),
+            model: "gpt-5".to_string(),
+            permission_mode: "default".to_string(),
+            prompt: "deploy now".to_string(),
+        };
+
+        let runs = preview(&handlers, &request);
+
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].display_order, 0);
+        assert_eq!(runs[1].display_order, 1);
+    }
+
     fn handler() -> ConfiguredHandler {
         ConfiguredHandler {
             event_name: HookEventName::UserPromptSubmit,
             matcher: None,
+            conditions: HookConditions::default(),
             command: "echo hook".to_string(),
             timeout_sec: 5,
             status_message: None,

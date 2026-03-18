@@ -237,6 +237,56 @@ elif mode == "exit_2":
     Ok(())
 }
 
+fn write_profile_scoped_user_prompt_submit_hooks(home: &Path) -> Result<()> {
+    let general_script_path = home.join("user_prompt_submit_general.py");
+    let scoped_script_path = home.join("user_prompt_submit_scoped.py");
+    let general_log_path = home.join("user_prompt_submit_general_log.jsonl");
+    let scoped_log_path = home.join("user_prompt_submit_scoped_log.jsonl");
+    let make_script = |log_path: &Path| {
+        format!(
+            r#"import json
+from pathlib import Path
+import sys
+
+payload = json.load(sys.stdin)
+with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload) + "\n")
+"#,
+            log_path = log_path.display(),
+        )
+    };
+    let hooks = serde_json::json!({
+        "hooks": {
+            "UserPromptSubmit": [
+                {
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!("python3 {}", general_script_path.display()),
+                        "statusMessage": "running general user prompt hook",
+                    }]
+                },
+                {
+                    "conditions": {
+                        "profiles": ["bd-worker"]
+                    },
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!("python3 {}", scoped_script_path.display()),
+                        "statusMessage": "running scoped user prompt hook",
+                    }]
+                }
+            ]
+        }
+    });
+
+    fs::write(&general_script_path, make_script(&general_log_path))
+        .context("write general user prompt submit hook script")?;
+    fs::write(&scoped_script_path, make_script(&scoped_log_path))
+        .context("write scoped user prompt submit hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
+    Ok(())
+}
+
 fn write_session_start_hook_recording_transcript(home: &Path) -> Result<()> {
     let script_path = home.join("session_start_hook.py");
     let log_path = home.join("session_start_hook_log.jsonl");
@@ -1271,6 +1321,61 @@ async fn pre_tool_use_does_not_fire_for_non_shell_tools() -> Result<()> {
     assert!(
         !hook_log_path.exists(),
         "non-shell tools should not trigger pre tool use hooks",
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_prompt_submit_hooks_support_general_and_profile_scoped_handlers() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let _response = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "hook profile response"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            if let Err(error) = write_profile_scoped_user_prompt_submit_hooks(home) {
+                panic!("failed to write profile scoped user prompt hook fixture: {error}");
+            }
+        })
+        .with_config(|config| {
+            config.active_profile = Some("bd-worker".to_string());
+            config
+                .features
+                .enable(Feature::CodexHooks)
+                .expect("test config should allow feature update");
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("run scoped hooks").await?;
+
+    let general_inputs = read_hook_log(
+        test.codex_home_path(),
+        "user_prompt_submit_general_log.jsonl",
+    )?;
+    let scoped_inputs = read_hook_log(
+        test.codex_home_path(),
+        "user_prompt_submit_scoped_log.jsonl",
+    )?;
+
+    assert_eq!(general_inputs.len(), 1);
+    assert_eq!(scoped_inputs.len(), 1);
+    assert_eq!(
+        general_inputs[0].get("active_profile").and_then(Value::as_str),
+        Some("bd-worker")
+    );
+    assert_eq!(
+        scoped_inputs[0].get("active_profile").and_then(Value::as_str),
+        Some("bd-worker")
     );
 
     Ok(())

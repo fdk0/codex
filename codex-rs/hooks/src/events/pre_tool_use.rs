@@ -48,8 +48,13 @@ pub(crate) fn preview(
 ) -> Vec<HookRunSummary> {
     dispatcher::select_handlers(
         handlers,
-        HookEventName::PreToolUse,
-        Some(&request.tool_name),
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::PreToolUse,
+            matcher_input: Some(request.tool_name.as_str()),
+            active_profile: None,
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
     )
     .into_iter()
     .map(|handler| dispatcher::running_summary(&handler))
@@ -63,8 +68,13 @@ pub(crate) async fn run(
 ) -> PreToolUseOutcome {
     let matched = dispatcher::select_handlers(
         handlers,
-        HookEventName::PreToolUse,
-        Some(&request.tool_name),
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::PreToolUse,
+            matcher_input: Some(request.tool_name.as_str()),
+            active_profile: None,
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
     );
     if matched.is_empty() {
         return PreToolUseOutcome {

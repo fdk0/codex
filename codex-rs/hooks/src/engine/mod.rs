@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use codex_config::ConfigLayerStack;
 use codex_protocol::protocol::HookRunSummary;
 
+use crate::engine::config::HookConditions;
 use crate::events::pre_tool_use::PreToolUseOutcome;
 use crate::events::pre_tool_use::PreToolUseRequest;
 use crate::events::session_start::SessionStartOutcome;
@@ -29,6 +30,7 @@ pub(crate) struct CommandShell {
 pub(crate) struct ConfiguredHandler {
     pub event_name: codex_protocol::protocol::HookEventName,
     pub matcher: Option<String>,
+    pub conditions: HookConditions,
     pub command: String,
     pub timeout_sec: u64,
     pub status_message: Option<String>,
