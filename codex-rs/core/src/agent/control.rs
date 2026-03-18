@@ -94,7 +94,7 @@ fn agent_nickname_candidates(
 ) -> Vec<String> {
     let role_name = role_name.unwrap_or(DEFAULT_ROLE_NAME);
     if let Some(candidates) =
-        resolve_role_config(config, role_name).and_then(|role| role.nickname_candidates.clone())
+        resolve_role_config(config, role_name).and_then(|role| role.nickname_candidates)
     {
         return candidates;
     }

@@ -1,3 +1,4 @@
+pub(crate) mod built_in_roles;
 pub(crate) mod control;
 mod guards;
 pub(crate) mod role;
