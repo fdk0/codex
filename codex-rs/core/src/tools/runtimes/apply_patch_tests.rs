@@ -68,3 +68,45 @@ fn guardian_review_request_includes_patch_context() {
         }
     );
 }
+
+#[test]
+fn build_command_spec_prefers_explicit_codex_exe() {
+    let path = std::env::temp_dir().join("build-command-spec-apply-patch-test.txt");
+    let action = ApplyPatchAction::new_add_for_test(&path, "hello".to_string());
+    let expected_patch = action.patch.clone();
+    let codex_exe = std::env::temp_dir().join("codex-explicit-exe");
+    let request = ApplyPatchRequest {
+        action,
+        file_paths: vec![
+            AbsolutePathBuf::from_absolute_path(&path).expect("temp path should be absolute"),
+        ],
+        changes: HashMap::from([(
+            path,
+            FileChange::Add {
+                content: "hello".to_string(),
+            },
+        )]),
+        exec_approval_requirement: ExecApprovalRequirement::NeedsApproval {
+            reason: None,
+            proposed_execpolicy_amendment: None,
+        },
+        sandbox_permissions: SandboxPermissions::UseDefault,
+        additional_permissions: None,
+        permissions_preapproved: false,
+        timeout_ms: None,
+        codex_exe: Some(codex_exe.clone()),
+    };
+
+    let spec =
+        ApplyPatchRuntime::build_command_spec(&request, std::path::Path::new("/unused-codex-home"))
+            .expect("build command spec");
+
+    assert_eq!(spec.program, codex_exe.to_string_lossy());
+    assert_eq!(
+        spec.args,
+        vec![
+            CODEX_CORE_APPLY_PATCH_ARG1.to_string(),
+            expected_patch,
+        ]
+    );
+}
