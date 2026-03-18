@@ -104,9 +104,6 @@ fn build_command_spec_prefers_explicit_codex_exe() {
     assert_eq!(spec.program, codex_exe.to_string_lossy());
     assert_eq!(
         spec.args,
-        vec![
-            CODEX_CORE_APPLY_PATCH_ARG1.to_string(),
-            expected_patch,
-        ]
+        vec![CODEX_CORE_APPLY_PATCH_ARG1.to_string(), expected_patch,]
     );
 }
