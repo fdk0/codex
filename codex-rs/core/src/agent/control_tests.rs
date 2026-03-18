@@ -1671,144 +1671,146 @@ async fn spawn_thread_subagent_uses_role_specific_nickname_candidates() {
     assert_eq!(agent_nickname, Some("Atlas".to_string()));
 }
 
-#[tokio::test]
-async fn resume_thread_subagent_restores_stored_nickname_and_role() {
-    let (home, mut config) = test_config().await;
-    config
-        .features
-        .enable(Feature::Sqlite)
-        .expect("test config should allow sqlite");
-    let manager = ThreadManager::with_models_provider_and_home_for_tests(
-        CodexAuth::from_api_key("dummy"),
-        config.model_provider.clone(),
-        config.codex_home.clone(),
-    );
-    let control = manager.agent_control();
-    let harness = AgentControlHarness {
-        _home: home,
-        config,
-        manager,
-        control,
-    };
-    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
-    let agent_path = AgentPath::from_string("/root/explorer".to_string())
-        .expect("test agent path should be valid");
+#[test]
+fn resume_thread_subagent_restores_stored_nickname_and_role() {
+    run_async_test_with_large_stack(LargeStackTestRuntime::CurrentThread, || async {
+        let (home, mut config) = test_config().await;
+        config
+            .features
+            .enable(Feature::Sqlite)
+            .expect("test config should allow sqlite");
+        let manager = ThreadManager::with_models_provider_and_home_for_tests(
+            CodexAuth::from_api_key("dummy"),
+            config.model_provider.clone(),
+            config.codex_home.clone(),
+        );
+        let control = manager.agent_control();
+        let harness = AgentControlHarness {
+            _home: home,
+            config,
+            manager,
+            control,
+        };
+        let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+        let agent_path = AgentPath::from_string("/root/explorer".to_string())
+            .expect("test agent path should be valid");
 
-    let child_thread_id = harness
-        .control
-        .spawn_agent(
-            harness.config.clone(),
-            text_input("hello child"),
-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id,
-                depth: 1,
-                agent_path: Some(agent_path.clone()),
-                agent_nickname: None,
-                agent_role: Some("explorer".to_string()),
-            })),
-        )
-        .await
-        .expect("child spawn should succeed");
+        let child_thread_id = harness
+            .control
+            .spawn_agent(
+                harness.config.clone(),
+                text_input("hello child"),
+                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id,
+                    depth: 1,
+                    agent_path: Some(agent_path.clone()),
+                    agent_nickname: None,
+                    agent_role: Some("explorer".to_string()),
+                })),
+            )
+            .await
+            .expect("child spawn should succeed");
 
-    let child_thread = harness
-        .manager
-        .get_thread(child_thread_id)
-        .await
-        .expect("child thread should exist");
-    let mut status_rx = harness
-        .control
-        .subscribe_status(child_thread_id)
-        .await
-        .expect("status subscription should succeed");
-    if matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
+        let child_thread = harness
+            .manager
+            .get_thread(child_thread_id)
+            .await
+            .expect("child thread should exist");
+        let mut status_rx = harness
+            .control
+            .subscribe_status(child_thread_id)
+            .await
+            .expect("status subscription should succeed");
+        if matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    status_rx
+                        .changed()
+                        .await
+                        .expect("child status should advance past pending init");
+                    if !matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("child should initialize before shutdown");
+        }
+        let original_snapshot = child_thread.config_snapshot().await;
+        let original_nickname = original_snapshot
+            .session_source
+            .get_nickname()
+            .expect("spawned sub-agent should have a nickname");
+        let state_db = child_thread
+            .state_db()
+            .expect("sqlite state db should be available for nickname resume test");
         timeout(Duration::from_secs(5), async {
             loop {
-                status_rx
-                    .changed()
-                    .await
-                    .expect("child status should advance past pending init");
-                if !matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
+                if let Ok(Some(metadata)) = state_db.get_thread(child_thread_id).await
+                    && metadata.agent_nickname.is_some()
+                    && metadata.agent_role.as_deref() == Some("explorer")
+                {
                     break;
                 }
+                sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("child should initialize before shutdown");
-    }
-    let original_snapshot = child_thread.config_snapshot().await;
-    let original_nickname = original_snapshot
-        .session_source
-        .get_nickname()
-        .expect("spawned sub-agent should have a nickname");
-    let state_db = child_thread
-        .state_db()
-        .expect("sqlite state db should be available for nickname resume test");
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if let Ok(Some(metadata)) = state_db.get_thread(child_thread_id).await
-                && metadata.agent_nickname.is_some()
-                && metadata.agent_role.as_deref() == Some("explorer")
-            {
-                break;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("child thread metadata should be persisted to sqlite before shutdown");
+        .expect("child thread metadata should be persisted to sqlite before shutdown");
 
-    let _ = harness
-        .control
-        .shutdown_live_agent(child_thread_id)
-        .await
-        .expect("child shutdown should submit");
+        let _ = harness
+            .control
+            .shutdown_live_agent(child_thread_id)
+            .await
+            .expect("child shutdown should submit");
 
-    let resumed_thread_id = harness
-        .control
-        .resume_agent_from_rollout(
-            harness.config.clone(),
-            child_thread_id,
-            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id,
-                depth: 1,
-                agent_path: Some(agent_path.clone()),
-                agent_nickname: None,
-                agent_role: None,
-            }),
-        )
-        .await
-        .expect("resume should succeed");
-    assert_eq!(resumed_thread_id, child_thread_id);
+        let resumed_thread_id = harness
+            .control
+            .resume_agent_from_rollout(
+                harness.config.clone(),
+                child_thread_id,
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id,
+                    depth: 1,
+                    agent_path: Some(agent_path.clone()),
+                    agent_nickname: None,
+                    agent_role: None,
+                }),
+            )
+            .await
+            .expect("resume should succeed");
+        assert_eq!(resumed_thread_id, child_thread_id);
 
-    let resumed_snapshot = harness
-        .manager
-        .get_thread(resumed_thread_id)
-        .await
-        .expect("resumed child thread should exist")
-        .config_snapshot()
-        .await;
-    let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: resumed_parent_thread_id,
-        depth: resumed_depth,
-        agent_path: resumed_agent_path,
-        agent_nickname: resumed_nickname,
-        agent_role: resumed_role,
-        ..
-    }) = resumed_snapshot.session_source
-    else {
-        panic!("expected thread-spawn sub-agent source");
-    };
-    assert_eq!(resumed_parent_thread_id, parent_thread_id);
-    assert_eq!(resumed_depth, 1);
-    assert_eq!(resumed_agent_path, Some(agent_path));
-    assert_eq!(resumed_nickname, Some(original_nickname));
-    assert_eq!(resumed_role, Some("explorer".to_string()));
+        let resumed_snapshot = harness
+            .manager
+            .get_thread(resumed_thread_id)
+            .await
+            .expect("resumed child thread should exist")
+            .config_snapshot()
+            .await;
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: resumed_parent_thread_id,
+            depth: resumed_depth,
+            agent_path: resumed_agent_path,
+            agent_nickname: resumed_nickname,
+            agent_role: resumed_role,
+            ..
+        }) = resumed_snapshot.session_source
+        else {
+            panic!("expected thread-spawn sub-agent source");
+        };
+        assert_eq!(resumed_parent_thread_id, parent_thread_id);
+        assert_eq!(resumed_depth, 1);
+        assert_eq!(resumed_agent_path, Some(agent_path));
+        assert_eq!(resumed_nickname, Some(original_nickname));
+        assert_eq!(resumed_role, Some("explorer".to_string()));
 
-    let _ = harness
-        .control
-        .shutdown_live_agent(resumed_thread_id)
-        .await
-        .expect("resumed child shutdown should submit");
+        let _ = harness
+            .control
+            .shutdown_live_agent(resumed_thread_id)
+            .await
+            .expect("resumed child shutdown should submit");
+    });
 }
 
 #[tokio::test]

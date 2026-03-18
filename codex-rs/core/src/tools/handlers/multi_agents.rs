@@ -2399,56 +2399,77 @@ mod tests {
         assert!(message.contains("disabled for wake-enabled child agents"));
     }
 
-    #[tokio::test]
-    async fn wait_allows_wake_enabled_child_agents_when_configured() {
-        #[derive(Debug, Deserialize)]
-        struct SpawnAgentResult {
-            agent_id: String,
-        }
+    fn run_async_test_with_large_stack<F, Fut>(f: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + 'static,
+    {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build runtime for large-stack test")
+                    .block_on(f());
+            })
+            .expect("spawn large-stack test thread")
+            .join()
+            .expect("large-stack test thread should finish");
+    }
 
-        let (mut session, mut turn) = make_session_and_context().await;
-        let manager = thread_manager();
-        session.services.agent_control = manager.agent_control();
-        let mut config = (*turn.config).clone();
-        config.agent_wait_on_wake_enabled_behavior = AgentWaitOnWakeEnabledBehavior::Allow;
-        turn.config = Arc::new(config);
-        let session = Arc::new(session);
-        let turn = Arc::new(turn);
+    #[test]
+    fn wait_allows_wake_enabled_child_agents_when_configured() {
+        run_async_test_with_large_stack(|| async {
+            #[derive(Debug, Deserialize)]
+            struct SpawnAgentResult {
+                agent_id: String,
+            }
 
-        let spawn_invocation = invocation(
-            Arc::clone(&session),
-            Arc::clone(&turn),
-            "spawn_agent",
-            function_payload(json!({
-                "message":"hello child",
-                "wake_parent_on_completion": true
-            })),
-        );
-        let output = MultiAgentHandler
-            .handle(spawn_invocation)
-            .await
-            .expect("spawn_agent should succeed");
-        let (content, _) = expect_text_output(output);
-        let spawn_result: SpawnAgentResult =
-            serde_json::from_str(&content).expect("spawn result should be json");
+            let (mut session, mut turn) = make_session_and_context().await;
+            let manager = thread_manager();
+            session.services.agent_control = manager.agent_control();
+            let mut config = (*turn.config).clone();
+            config.agent_wait_on_wake_enabled_behavior = AgentWaitOnWakeEnabledBehavior::Allow;
+            turn.config = Arc::new(config);
+            let session = Arc::new(session);
+            let turn = Arc::new(turn);
 
-        let wait_invocation = invocation(
-            session,
-            turn,
-            "wait",
-            function_payload(json!({"ids":[spawn_result.agent_id],"timeout_ms":10})),
-        );
-        let output = MultiAgentHandler
-            .handle(wait_invocation)
-            .await
-            .expect("wait should be allowed when configured");
-        let (content, _) = expect_text_output(output);
-        let result: wait::WaitResult =
-            serde_json::from_str(&content).expect("wait result should be json");
-        assert!(
-            result.timed_out || !result.status.is_empty(),
-            "wait should either time out cleanly or return a final status for the wake-enabled child"
-        );
+            let spawn_invocation = invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "spawn_agent",
+                function_payload(json!({
+                    "message":"hello child",
+                    "wake_parent_on_completion": true
+                })),
+            );
+            let output = MultiAgentHandler
+                .handle(spawn_invocation)
+                .await
+                .expect("spawn_agent should succeed");
+            let (content, _) = expect_text_output(output);
+            let spawn_result: SpawnAgentResult =
+                serde_json::from_str(&content).expect("spawn result should be json");
+
+            let wait_invocation = invocation(
+                session,
+                turn,
+                "wait",
+                function_payload(json!({"ids":[spawn_result.agent_id],"timeout_ms":10})),
+            );
+            let output = MultiAgentHandler
+                .handle(wait_invocation)
+                .await
+                .expect("wait should be allowed when configured");
+            let (content, _) = expect_text_output(output);
+            let result: wait::WaitResult =
+                serde_json::from_str(&content).expect("wait result should be json");
+            assert!(
+                result.timed_out || !result.status.is_empty(),
+                "wait should either time out cleanly or return a final status for the wake-enabled child"
+            );
+        });
     }
 
     #[tokio::test]
