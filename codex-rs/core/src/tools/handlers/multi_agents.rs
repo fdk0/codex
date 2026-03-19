@@ -596,7 +596,7 @@ mod spawn {
         let superseded_after_register = match agent_control.register_watchdog(registration).await {
             Ok(removed) => removed,
             Err(err) => {
-                let _ = agent_control.shutdown_agent(target_thread_id).await;
+                let _ = agent_control.shutdown_live_agent(target_thread_id).await;
                 return Err(err);
             }
         };
@@ -618,7 +618,7 @@ mod spawn {
         let mut thread_ids = thread_ids.into_iter().collect::<Vec<_>>();
         thread_ids.sort_by_key(ToString::to_string);
         for thread_id in thread_ids {
-            let _ = agent_control.shutdown_agent(thread_id).await;
+            let _ = agent_control.shutdown_live_agent(thread_id).await;
         }
     }
 }
@@ -1365,14 +1365,10 @@ pub mod close_agent {
                     let _ = session
                         .services
                         .agent_control
-                        .shutdown_agent(helper_id)
+                        .shutdown_live_agent(helper_id)
                         .await;
                 }
-                let _ = session
-                    .services
-                    .agent_control
-                    .shutdown_agent(agent_id)
-                    .await;
+                let _ = session.services.agent_control.close_agent(agent_id).await;
                 let status = session.services.agent_control.get_status(agent_id).await;
                 session
                     .send_event(
@@ -1412,15 +1408,10 @@ pub mod close_agent {
             let _ = session
                 .services
                 .agent_control
-                .shutdown_agent(helper_id)
+                .shutdown_live_agent(helper_id)
                 .await;
         }
-        let result = match session
-            .services
-            .agent_control
-            .shutdown_agent(agent_id)
-            .await
-        {
+        let result = match session.services.agent_control.close_agent(agent_id).await {
             Ok(_) | Err(CodexErr::ThreadNotFound(_)) | Err(CodexErr::InternalAgentDied) => Ok(()),
             Err(err) => Err(collab_agent_error(agent_id, err)),
         };
@@ -2687,7 +2678,7 @@ mod tests {
         let agent_id = thread.thread_id;
         let _ = manager
             .agent_control()
-            .shutdown_agent(agent_id)
+            .shutdown_live_agent(agent_id)
             .await
             .expect("shutdown agent");
         assert_eq!(
@@ -2735,7 +2726,7 @@ mod tests {
 
         let _ = manager
             .agent_control()
-            .shutdown_agent(agent_id)
+            .shutdown_live_agent(agent_id)
             .await
             .expect("shutdown resumed agent");
     }

@@ -7,7 +7,6 @@ use crate::agent::guards::Guards;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::resolve_role_config;
 use crate::agent::status::is_final;
-use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::Config;
 use crate::config::types::AgentWakeDescendantPolicy;
 use crate::error::CodexErr;
@@ -893,19 +892,6 @@ impl AgentControl {
             session_source.get_nickname(),
             session_source.get_agent_role(),
         ))
-    }
-
-    pub(crate) async fn get_agent_config_snapshot(
-        &self,
-        agent_id: ThreadId,
-    ) -> Option<ThreadConfigSnapshot> {
-        let Ok(state) = self.upgrade() else {
-            return None;
-        };
-        let Ok(thread) = state.get_thread(agent_id).await else {
-            return None;
-        };
-        Some(thread.config_snapshot().await)
     }
 
     /// Subscribe to status updates for `agent_id`, yielding the latest value and changes.
@@ -2359,7 +2345,7 @@ mod inbox_tests {
 
         let _ = harness
             .control
-            .shutdown_agent(child_thread_id)
+            .shutdown_live_agent(child_thread_id)
             .await
             .expect("child shutdown should submit");
         let _ = parent_thread
@@ -2436,7 +2422,7 @@ mod inbox_tests {
 
         let _ = harness
             .control
-            .shutdown_agent(child_thread_id)
+            .shutdown_live_agent(child_thread_id)
             .await
             .expect("child shutdown should submit");
         let _ = parent_thread
@@ -2514,7 +2500,7 @@ mod inbox_tests {
 
         let _ = harness
             .control
-            .shutdown_agent(child_thread_id)
+            .shutdown_live_agent(child_thread_id)
             .await
             .expect("child shutdown should submit");
         let _ = parent_thread
@@ -2591,7 +2577,7 @@ mod inbox_tests {
 
         let _ = harness
             .control
-            .shutdown_agent(child_thread_id)
+            .shutdown_live_agent(child_thread_id)
             .await
             .expect("child shutdown should submit");
         let _ = parent_thread
@@ -2638,7 +2624,7 @@ mod inbox_tests {
         assert_eq!(seen_max_threads, max_threads);
 
         let _ = control
-            .shutdown_agent(first_agent_id)
+            .shutdown_live_agent(first_agent_id)
             .await
             .expect("shutdown agent");
     }
@@ -2663,7 +2649,7 @@ mod inbox_tests {
             .await
             .expect("spawn_agent should succeed");
         let _ = control
-            .shutdown_agent(first_agent_id)
+            .shutdown_live_agent(first_agent_id)
             .await
             .expect("shutdown agent");
 
@@ -2672,7 +2658,7 @@ mod inbox_tests {
             .await
             .expect("spawn_agent should succeed after shutdown");
         let _ = control
-            .shutdown_agent(second_agent_id)
+            .shutdown_live_agent(second_agent_id)
             .await
             .expect("shutdown agent");
     }
@@ -2708,7 +2694,7 @@ mod inbox_tests {
         assert_eq!(max_threads, 1);
 
         let _ = control
-            .shutdown_agent(first_agent_id)
+            .shutdown_live_agent(first_agent_id)
             .await
             .expect("shutdown agent");
     }
@@ -2733,7 +2719,7 @@ mod inbox_tests {
             .await
             .expect("spawn_agent should succeed");
         let _ = control
-            .shutdown_agent(resumable_id)
+            .shutdown_live_agent(resumable_id)
             .await
             .expect("shutdown resumable thread");
 
@@ -2755,7 +2741,7 @@ mod inbox_tests {
         assert_eq!(seen_max_threads, max_threads);
 
         let _ = control
-            .shutdown_agent(active_id)
+            .shutdown_live_agent(active_id)
             .await
             .expect("shutdown active thread");
     }
@@ -2785,7 +2771,7 @@ mod inbox_tests {
             .await
             .expect("spawn should succeed after failed resume");
         let _ = control
-            .shutdown_agent(resumed_id)
+            .shutdown_live_agent(resumed_id)
             .await
             .expect("shutdown resumed thread");
     }
@@ -3054,7 +3040,7 @@ mod inbox_tests {
 
             let _ = harness
                 .control
-                .shutdown_agent(child_thread_id)
+                .shutdown_live_agent(child_thread_id)
                 .await
                 .expect("child shutdown should submit");
 
@@ -3097,7 +3083,7 @@ mod inbox_tests {
 
             let _ = harness
                 .control
-                .shutdown_agent(resumed_thread_id)
+                .shutdown_live_agent(resumed_thread_id)
                 .await
                 .expect("resumed child shutdown should submit");
         });
@@ -3231,7 +3217,7 @@ mod inbox_tests {
 
         let _ = harness
             .control
-            .shutdown_agent(replacement_thread_id)
+            .shutdown_live_agent(replacement_thread_id)
             .await
             .expect("replacement thread shutdown should submit");
     }
@@ -3288,7 +3274,7 @@ mod inbox_tests {
                     .expect("helper status subscription should succeed");
                 let _ = harness
                     .control
-                    .shutdown_agent(helper_thread_id)
+                    .shutdown_live_agent(helper_thread_id)
                     .await
                     .expect("helper shutdown should submit");
                 timeout(Duration::from_secs(2), async {
@@ -3449,12 +3435,12 @@ mod inbox_tests {
 
         let _ = harness
             .control
-            .shutdown_agent(watchdog_handle_id)
+            .shutdown_live_agent(watchdog_handle_id)
             .await
             .expect("watchdog handle shutdown should submit");
         let _ = harness
             .control
-            .shutdown_agent(owner_thread_id)
+            .shutdown_live_agent(owner_thread_id)
             .await
             .expect("owner shutdown should submit");
     }

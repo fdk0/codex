@@ -1153,7 +1153,7 @@ async fn resume_agent_from_rollout_preserves_parent_wake_subscription() {
     }
     let _ = harness
         .control
-        .shutdown_agent(child_thread_id)
+        .shutdown_live_agent(child_thread_id)
         .await
         .expect("child shutdown should submit");
 
@@ -1475,11 +1475,11 @@ fn resume_thread_subagent_restores_stored_nickname_and_role() {
         .await
         .expect("child thread metadata should be persisted to sqlite before shutdown");
 
-    let _ = harness
-        .control
-        .shutdown_live_agent(child_thread_id)
-        .await
-        .expect("child shutdown should submit");
+        let _ = harness
+            .control
+            .shutdown_live_agent(child_thread_id)
+            .await
+            .expect("child shutdown should submit");
 
         let resumed_thread_id = harness
             .control
@@ -1518,11 +1518,12 @@ fn resume_thread_subagent_restores_stored_nickname_and_role() {
         assert_eq!(resumed_nickname, Some(original_nickname));
         assert_eq!(resumed_role, Some("explorer".to_string()));
 
-    let _ = harness
-        .control
-        .shutdown_live_agent(resumed_thread_id)
-        .await
-        .expect("resumed child shutdown should submit");
+        let _ = harness
+            .control
+            .shutdown_live_agent(resumed_thread_id)
+            .await
+            .expect("resumed child shutdown should submit");
+    });
 }
 
 #[tokio::test]

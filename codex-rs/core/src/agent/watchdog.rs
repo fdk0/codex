@@ -192,7 +192,7 @@ impl WatchdogManager {
             Arc::clone(self),
         );
         if is_watchdog_terminated(&owner_status) {
-            match Box::pin(control_for_spawn.shutdown_agent(target_thread_id)).await {
+            match Box::pin(control_for_spawn.shutdown_live_agent(target_thread_id)).await {
                 Ok(_) | Err(CodexErr::ThreadNotFound(_)) | Err(CodexErr::InternalAgentDied) => {}
                 Err(err) => {
                     warn!(
