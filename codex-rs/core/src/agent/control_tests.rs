@@ -1430,7 +1430,7 @@ async fn resume_agent_from_rollout_preserves_parent_wake_subscription() {
     }
     let _ = harness
         .control
-        .shutdown_agent(child_thread_id)
+        .shutdown_live_agent(child_thread_id)
         .await
         .expect("child shutdown should submit");
 

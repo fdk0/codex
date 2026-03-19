@@ -130,10 +130,7 @@ async fn load_role_layer_toml(
     Ok(role_layer_toml)
 }
 
-pub(crate) fn resolve_role_config(
-    config: &Config,
-    role_name: &str,
-) -> Option<AgentRoleConfig> {
+pub(crate) fn resolve_role_config(config: &Config, role_name: &str) -> Option<AgentRoleConfig> {
     let mut role = config
         .agent_roles
         .get(role_name)

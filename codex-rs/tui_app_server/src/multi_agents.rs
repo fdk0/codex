@@ -9,6 +9,7 @@ use crate::render::line_utils::prefix_lines;
 use crate::text_formatting::truncate_text;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
+use codex_protocol::protocol::AgentSpawnMode;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::CollabAgentInteractionEndEvent;
 use codex_protocol::protocol::CollabAgentRef;
@@ -182,13 +183,20 @@ pub(crate) fn spawn_end(
         new_agent_nickname,
         new_agent_role,
         prompt,
+        spawn_mode,
         status: _,
         ..
     } = ev;
 
+    let (success_title, failure_title) = match spawn_mode {
+        AgentSpawnMode::Spawn => ("Spawned", "Agent spawn failed"),
+        AgentSpawnMode::Fork => ("Forked", "Agent fork failed"),
+        AgentSpawnMode::Watchdog => ("Started watchdog", "Watchdog start failed"),
+    };
+
     let title = match new_thread_id {
         Some(thread_id) => title_with_agent(
-            "Spawned",
+            success_title,
             AgentLabel {
                 thread_id: Some(thread_id),
                 nickname: new_agent_nickname.as_deref(),
@@ -196,7 +204,7 @@ pub(crate) fn spawn_end(
             },
             spawn_request,
         ),
-        None => title_text("Agent spawn failed"),
+        None => title_text(failure_title),
     };
 
     let mut details = Vec::new();
@@ -611,6 +619,7 @@ mod tests {
                 prompt: "Compute 11! and reply with just the integer result.".to_string(),
                 model: "gpt-5".to_string(),
                 reasoning_effort: ReasoningEffortConfig::High,
+                spawn_mode: AgentSpawnMode::Spawn,
                 status: AgentStatus::PendingInit,
             },
             Some(&SpawnRequestSummary {
@@ -749,6 +758,7 @@ mod tests {
                 prompt: String::new(),
                 model: "gpt-5".to_string(),
                 reasoning_effort: ReasoningEffortConfig::High,
+                spawn_mode: AgentSpawnMode::Spawn,
                 status: AgentStatus::PendingInit,
             },
             Some(&SpawnRequestSummary {
@@ -767,6 +777,54 @@ mod tests {
         assert!(!title.spans[4].style.add_modifier.contains(Modifier::DIM));
         assert_eq!(title.spans[6].content.as_ref(), "(gpt-5 high)");
         assert_eq!(title.spans[6].style.fg, Some(Color::Magenta));
+    }
+
+    #[test]
+    fn spawn_end_uses_spawn_mode_in_title() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000001")
+            .expect("valid sender thread id");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000002").expect("valid thread id");
+
+        let forked = spawn_end(
+            CollabAgentSpawnEndEvent {
+                call_id: "call-fork".to_string(),
+                sender_thread_id,
+                new_thread_id: Some(thread_id),
+                new_agent_nickname: Some("Robie".to_string()),
+                new_agent_role: Some("explorer".to_string()),
+                prompt: "Continue from parent context".to_string(),
+                model: "gpt-5".to_string(),
+                reasoning_effort: ReasoningEffortConfig::High,
+                spawn_mode: AgentSpawnMode::Fork,
+                status: AgentStatus::PendingInit,
+            },
+            None,
+        );
+        let watchdog_failed = spawn_end(
+            CollabAgentSpawnEndEvent {
+                call_id: "call-watchdog".to_string(),
+                sender_thread_id,
+                new_thread_id: None,
+                new_agent_nickname: None,
+                new_agent_role: Some("watchdog".to_string()),
+                prompt: "Monitor the parent".to_string(),
+                model: "gpt-5".to_string(),
+                reasoning_effort: ReasoningEffortConfig::High,
+                spawn_mode: AgentSpawnMode::Watchdog,
+                status: AgentStatus::Errored("disabled".to_string()),
+            },
+            None,
+        );
+
+        assert_eq!(
+            cell_to_text(&forked),
+            "Forked Robie [explorer]\n  Continue from parent context"
+        );
+        assert_eq!(
+            cell_to_text(&watchdog_failed),
+            "Watchdog start failed\n  Monitor the parent"
+        );
     }
 
     #[test]
