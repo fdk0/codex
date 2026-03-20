@@ -12,6 +12,7 @@
       "enum": [
         "PreToolUse",
         "SessionStart",
+        "AfterCompaction",
         "UserPromptSubmit",
         "Stop"
       ],

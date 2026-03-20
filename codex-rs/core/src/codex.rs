@@ -6152,6 +6152,7 @@ pub(crate) async fn run_turn(
                         &sess,
                         &turn_context,
                         InitialContextInjection::BeforeLastUserMessage,
+                        codex_hooks::AfterCompactionSource::Auto,
                     )
                     .await
                     .is_err()
@@ -6334,7 +6335,13 @@ async fn run_pre_sampling_compact(
         .unwrap_or(i64::MAX);
     // Compact if the total usage tokens are greater than the auto compact limit
     if total_usage_tokens >= auto_compact_limit {
-        run_auto_compact(sess, turn_context, InitialContextInjection::DoNotInject).await?;
+        run_auto_compact(
+            sess,
+            turn_context,
+            InitialContextInjection::DoNotInject,
+            codex_hooks::AfterCompactionSource::Auto,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -6377,6 +6384,7 @@ async fn maybe_run_previous_model_inline_compact(
             sess,
             &previous_model_turn_context,
             InitialContextInjection::DoNotInject,
+            codex_hooks::AfterCompactionSource::ModelSwitch,
         )
         .await?;
         return Ok(true);
@@ -6388,12 +6396,14 @@ async fn run_auto_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     initial_context_injection: InitialContextInjection,
+    source: codex_hooks::AfterCompactionSource,
 ) -> CodexResult<()> {
     if should_use_remote_compact_task(&turn_context.provider) {
         run_inline_remote_auto_compact_task(
             Arc::clone(sess),
             Arc::clone(turn_context),
             initial_context_injection,
+            source,
         )
         .await?;
     } else {
@@ -6401,6 +6411,7 @@ async fn run_auto_compact(
             Arc::clone(sess),
             Arc::clone(turn_context),
             initial_context_injection,
+            source,
         )
         .await?;
     }

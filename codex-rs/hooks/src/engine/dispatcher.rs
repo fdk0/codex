@@ -143,7 +143,10 @@ pub(crate) fn completed_summary(
 fn scope_for_event(event_name: HookEventName) -> HookScope {
     match event_name {
         HookEventName::SessionStart => HookScope::Thread,
-        HookEventName::PreToolUse | HookEventName::UserPromptSubmit | HookEventName::Stop => {
+        HookEventName::PreToolUse
+        | HookEventName::AfterCompaction
+        | HookEventName::UserPromptSubmit
+        | HookEventName::Stop => {
             HookScope::Turn
         }
     }

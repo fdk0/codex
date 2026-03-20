@@ -1428,6 +1428,7 @@ pub enum EventMsg {
 pub enum HookEventName {
     PreToolUse,
     SessionStart,
+    AfterCompaction,
     UserPromptSubmit,
     Stop,
 }

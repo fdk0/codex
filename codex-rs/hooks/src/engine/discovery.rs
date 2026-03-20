@@ -114,6 +114,21 @@ pub(crate) fn discover_handlers(config_layer_stack: Option<&ConfigLayerStack>) -
             );
         }
 
+        for group in parsed.hooks.after_compaction {
+            append_group_handlers(
+                &mut handlers,
+                &mut warnings,
+                &mut display_order,
+                AppendGroupSpec {
+                    source_path: source_path.as_path(),
+                    event_name: codex_protocol::protocol::HookEventName::AfterCompaction,
+                    matcher: group.matcher.as_deref(),
+                    conditions: group.conditions,
+                },
+                group.hooks,
+            );
+        }
+
         for group in parsed.hooks.user_prompt_submit {
             append_group_handlers(
                 &mut handlers,

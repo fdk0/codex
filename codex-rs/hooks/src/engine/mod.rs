@@ -11,6 +11,8 @@ use codex_config::ConfigLayerStack;
 use codex_protocol::protocol::HookRunSummary;
 
 use crate::engine::config::HookConditions;
+use crate::events::after_compaction::AfterCompactionOutcome;
+use crate::events::after_compaction::AfterCompactionRequest;
 use crate::events::pre_tool_use::PreToolUseOutcome;
 use crate::events::pre_tool_use::PreToolUseRequest;
 use crate::events::session_start::SessionStartOutcome;
@@ -52,6 +54,7 @@ impl ConfiguredHandler {
         match self.event_name {
             codex_protocol::protocol::HookEventName::PreToolUse => "pre-tool-use",
             codex_protocol::protocol::HookEventName::SessionStart => "session-start",
+            codex_protocol::protocol::HookEventName::AfterCompaction => "after-compaction",
             codex_protocol::protocol::HookEventName::UserPromptSubmit => "user-prompt-submit",
             codex_protocol::protocol::HookEventName::Stop => "stop",
         }
@@ -110,6 +113,13 @@ impl ClaudeHooksEngine {
         crate::events::session_start::preview(&self.handlers, request)
     }
 
+    pub(crate) fn preview_after_compaction(
+        &self,
+        request: &AfterCompactionRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::after_compaction::preview(&self.handlers, request)
+    }
+
     pub(crate) fn preview_pre_tool_use(&self, request: &PreToolUseRequest) -> Vec<HookRunSummary> {
         crate::events::pre_tool_use::preview(&self.handlers, request)
     }
@@ -120,6 +130,13 @@ impl ClaudeHooksEngine {
         turn_id: Option<String>,
     ) -> SessionStartOutcome {
         crate::events::session_start::run(&self.handlers, &self.shell, request, turn_id).await
+    }
+
+    pub(crate) async fn run_after_compaction(
+        &self,
+        request: AfterCompactionRequest,
+    ) -> AfterCompactionOutcome {
+        crate::events::after_compaction::run(&self.handlers, &self.shell, request).await
     }
 
     pub(crate) async fn run_pre_tool_use(&self, request: PreToolUseRequest) -> PreToolUseOutcome {

@@ -8,6 +8,8 @@ pub(crate) struct GeneratedHookSchemas {
     pub pre_tool_use_command_output: Value,
     pub session_start_command_input: Value,
     pub session_start_command_output: Value,
+    pub after_compaction_command_input: Value,
+    pub after_compaction_command_output: Value,
     pub user_prompt_submit_command_input: Value,
     pub user_prompt_submit_command_output: Value,
     pub stop_command_input: Value,
@@ -32,6 +34,14 @@ pub(crate) fn generated_hook_schemas() -> &'static GeneratedHookSchemas {
         session_start_command_output: parse_json_schema(
             "session-start.command.output",
             include_str!("../../schema/generated/session-start.command.output.schema.json"),
+        ),
+        after_compaction_command_input: parse_json_schema(
+            "after-compaction.command.input",
+            include_str!("../../schema/generated/after-compaction.command.input.schema.json"),
+        ),
+        after_compaction_command_output: parse_json_schema(
+            "after-compaction.command.output",
+            include_str!("../../schema/generated/after-compaction.command.output.schema.json"),
         ),
         user_prompt_submit_command_input: parse_json_schema(
             "user-prompt-submit.command.input",
@@ -70,6 +80,8 @@ mod tests {
         assert_eq!(schemas.pre_tool_use_command_output["type"], "object");
         assert_eq!(schemas.session_start_command_input["type"], "object");
         assert_eq!(schemas.session_start_command_output["type"], "object");
+        assert_eq!(schemas.after_compaction_command_input["type"], "object");
+        assert_eq!(schemas.after_compaction_command_output["type"], "object");
         assert_eq!(schemas.user_prompt_submit_command_input["type"], "object");
         assert_eq!(schemas.user_prompt_submit_command_output["type"], "object");
         assert_eq!(schemas.stop_command_input["type"], "object");

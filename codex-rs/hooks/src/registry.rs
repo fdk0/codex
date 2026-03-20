@@ -3,6 +3,8 @@ use tokio::process::Command;
 
 use crate::engine::ClaudeHooksEngine;
 use crate::engine::CommandShell;
+use crate::events::after_compaction::AfterCompactionOutcome;
+use crate::events::after_compaction::AfterCompactionRequest;
 use crate::events::pre_tool_use::PreToolUseOutcome;
 use crate::events::pre_tool_use::PreToolUseRequest;
 use crate::events::session_start::SessionStartOutcome;
@@ -94,6 +96,13 @@ impl Hooks {
         self.engine.preview_session_start(request)
     }
 
+    pub fn preview_after_compaction(
+        &self,
+        request: &AfterCompactionRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_after_compaction(request)
+    }
+
     pub fn preview_pre_tool_use(
         &self,
         request: &PreToolUseRequest,
@@ -107,6 +116,13 @@ impl Hooks {
         turn_id: Option<String>,
     ) -> SessionStartOutcome {
         self.engine.run_session_start(request, turn_id).await
+    }
+
+    pub async fn run_after_compaction(
+        &self,
+        request: AfterCompactionRequest,
+    ) -> AfterCompactionOutcome {
+        self.engine.run_after_compaction(request).await
     }
 
     pub async fn run_pre_tool_use(&self, request: PreToolUseRequest) -> PreToolUseOutcome {

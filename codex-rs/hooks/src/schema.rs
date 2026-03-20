@@ -69,6 +69,8 @@ pub(crate) enum HookEventNameWire {
     PreToolUse,
     #[serde(rename = "SessionStart")]
     SessionStart,
+    #[serde(rename = "AfterCompaction")]
+    AfterCompaction,
     #[serde(rename = "UserPromptSubmit")]
     UserPromptSubmit,
     #[serde(rename = "Stop")]
@@ -173,6 +175,26 @@ pub(crate) struct SessionStartHookSpecificOutputWire {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "after-compaction.command.output")]
+pub(crate) struct AfterCompactionCommandOutputWire {
+    #[serde(flatten)]
+    pub universal: HookUniversalOutputWire,
+    #[serde(default)]
+    pub hook_specific_output: Option<AfterCompactionHookSpecificOutputWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AfterCompactionHookSpecificOutputWire {
+    pub hook_event_name: HookEventNameWire,
+    #[serde(default)]
+    pub additional_context: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 #[schemars(rename = "user-prompt-submit.command.output")]
 pub(crate) struct UserPromptSubmitCommandOutputWire {
     #[serde(flatten)]
@@ -249,6 +271,44 @@ impl SessionStartCommandInput {
             transcript_path: NullableString::from_path(context.transcript_path),
             cwd: context.cwd,
             hook_event_name: "SessionStart".to_string(),
+            active_profile: NullableString::from_string(context.active_profile),
+            model: context.model,
+            permission_mode: context.permission_mode,
+            source: source.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "after-compaction.command.input")]
+pub(crate) struct AfterCompactionCommandInput {
+    pub session_id: String,
+    pub turn_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "after_compaction_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub active_profile: NullableString,
+    pub model: String,
+    #[schemars(schema_with = "permission_mode_schema")]
+    pub permission_mode: String,
+    #[schemars(schema_with = "after_compaction_source_schema")]
+    pub source: String,
+}
+
+impl AfterCompactionCommandInput {
+    pub(crate) fn from_context(
+        context: CommandInputContext,
+        turn_id: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_id: context.session_id,
+            turn_id: turn_id.into(),
+            transcript_path: NullableString::from_path(context.transcript_path),
+            cwd: context.cwd,
+            hook_event_name: "AfterCompaction".to_string(),
             active_profile: NullableString::from_string(context.active_profile),
             model: context.model,
             permission_mode: context.permission_mode,
@@ -353,6 +413,14 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
     write_schema(
         &generated_dir.join(SESSION_START_OUTPUT_FIXTURE),
         schema_json::<SessionStartCommandOutputWire>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(AFTER_COMPACTION_INPUT_FIXTURE),
+        schema_json::<AfterCompactionCommandInput>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(AFTER_COMPACTION_OUTPUT_FIXTURE),
+        schema_json::<AfterCompactionCommandOutputWire>()?,
     )?;
     write_schema(
         &generated_dir.join(USER_PROMPT_SUBMIT_INPUT_FIXTURE),
@@ -519,6 +587,12 @@ mod tests {
             SESSION_START_OUTPUT_FIXTURE => {
                 include_str!("../schema/generated/session-start.command.output.schema.json")
             }
+            AFTER_COMPACTION_INPUT_FIXTURE => {
+                include_str!("../schema/generated/after-compaction.command.input.schema.json")
+            }
+            AFTER_COMPACTION_OUTPUT_FIXTURE => {
+                include_str!("../schema/generated/after-compaction.command.output.schema.json")
+            }
             USER_PROMPT_SUBMIT_INPUT_FIXTURE => {
                 include_str!("../schema/generated/user-prompt-submit.command.input.schema.json")
             }
@@ -550,6 +624,8 @@ mod tests {
             PRE_TOOL_USE_OUTPUT_FIXTURE,
             SESSION_START_INPUT_FIXTURE,
             SESSION_START_OUTPUT_FIXTURE,
+            AFTER_COMPACTION_INPUT_FIXTURE,
+            AFTER_COMPACTION_OUTPUT_FIXTURE,
             USER_PROMPT_SUBMIT_INPUT_FIXTURE,
             USER_PROMPT_SUBMIT_OUTPUT_FIXTURE,
             STOP_INPUT_FIXTURE,
@@ -571,6 +647,11 @@ mod tests {
             &schema_json::<PreToolUseCommandInput>().expect("serialize pre tool use input schema"),
         )
         .expect("parse pre tool use input schema");
+        let after_compaction: Value = serde_json::from_slice(
+            &schema_json::<AfterCompactionCommandInput>()
+                .expect("serialize after compaction input schema"),
+        )
+        .expect("parse after compaction input schema");
         let user_prompt_submit: Value = serde_json::from_slice(
             &schema_json::<UserPromptSubmitCommandInput>()
                 .expect("serialize user prompt submit input schema"),
@@ -581,7 +662,7 @@ mod tests {
         )
         .expect("parse stop input schema");
 
-        for schema in [&pre_tool_use, &user_prompt_submit, &stop] {
+        for schema in [&pre_tool_use, &after_compaction, &user_prompt_submit, &stop] {
             assert_eq!(schema["properties"]["turn_id"]["type"], "string");
             assert!(
                 schema["required"]

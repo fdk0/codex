@@ -19,6 +19,7 @@ use crate::truncate::TruncationPolicy;
 use crate::truncate::approx_token_count;
 use crate::truncate::truncate_text;
 use crate::util::backoff;
+use codex_hooks::AfterCompactionSource;
 use codex_protocol::items::ContextCompactionItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
@@ -55,6 +56,7 @@ pub(crate) async fn run_inline_auto_compact_task(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
     initial_context_injection: InitialContextInjection,
+    source: AfterCompactionSource,
 ) -> CodexResult<()> {
     let prompt = turn_context.compact_prompt().to_string();
     let input = vec![UserInput::Text {
@@ -63,7 +65,7 @@ pub(crate) async fn run_inline_auto_compact_task(
         text_elements: Vec::new(),
     }];
 
-    run_compact_task_inner(sess, turn_context, input, initial_context_injection).await?;
+    run_compact_task_inner(sess, turn_context, input, initial_context_injection, source).await?;
     Ok(())
 }
 
@@ -83,6 +85,7 @@ pub(crate) async fn run_compact_task(
         turn_context,
         input,
         InitialContextInjection::DoNotInject,
+        AfterCompactionSource::Manual,
     )
     .await
 }
@@ -92,6 +95,7 @@ async fn run_compact_task_inner(
     turn_context: Arc<TurnContext>,
     input: Vec<UserInput>,
     initial_context_injection: InitialContextInjection,
+    source: AfterCompactionSource,
 ) -> CodexResult<()> {
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
     sess.emit_turn_item_started(&turn_context, &compaction_item)
@@ -220,6 +224,7 @@ async fn run_compact_task_inner(
     };
     sess.replace_compacted_history(new_history, reference_context_item, compacted_item)
         .await;
+    crate::hook_runtime::run_after_compaction_hooks(&sess, &turn_context, source).await;
     sess.recompute_token_usage(&turn_context).await;
 
     sess.emit_turn_item_completed(&turn_context, compaction_item)

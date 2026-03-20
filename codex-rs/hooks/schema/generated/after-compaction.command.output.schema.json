@@ -2,17 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
-    "HookEventNameWire": {
-      "enum": [
-        "PreToolUse",
-        "SessionStart",
-        "AfterCompaction",
-        "UserPromptSubmit",
-        "Stop"
-      ],
-      "type": "string"
-    },
-    "SessionStartHookSpecificOutputWire": {
+    "AfterCompactionHookSpecificOutputWire": {
       "additionalProperties": false,
       "properties": {
         "additionalContext": {
@@ -27,6 +17,15 @@
         "hookEventName"
       ],
       "type": "object"
+    },
+    "HookEventNameWire": {
+      "enum": [
+        "SessionStart",
+        "AfterCompaction",
+        "UserPromptSubmit",
+        "Stop"
+      ],
+      "type": "string"
     }
   },
   "properties": {
@@ -37,7 +36,7 @@
     "hookSpecificOutput": {
       "allOf": [
         {
-          "$ref": "#/definitions/SessionStartHookSpecificOutputWire"
+          "$ref": "#/definitions/AfterCompactionHookSpecificOutputWire"
         }
       ],
       "default": null
@@ -55,6 +54,6 @@
       "type": "string"
     }
   },
-  "title": "session-start.command.output",
+  "title": "after-compaction.command.output",
   "type": "object"
 }

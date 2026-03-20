@@ -3,6 +3,9 @@ use std::path::Path;
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_core::ModelProviderInfo;
+use codex_core::built_in_model_providers;
+use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_features::Feature;
 use codex_protocol::items::parse_hook_prompt_fragment;
 use codex_protocol::models::ContentItem;
@@ -31,6 +34,7 @@ use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
+use wiremock::MockServer;
 
 const FIRST_CONTINUATION_PROMPT: &str = "Retry with exactly the phrase meow meow meow.";
 const SECOND_CONTINUATION_PROMPT: &str = "Now tighten it to just: meow.";
@@ -322,6 +326,57 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
     fs::write(&script_path, script).context("write session start hook script")?;
     fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
     Ok(())
+}
+
+fn write_after_compaction_hook(home: &Path, additional_context: &str) -> Result<()> {
+    let script_path = home.join("after_compaction_hook.py");
+    let log_path = home.join("after_compaction_hook_log.jsonl");
+    let additional_context_json = serde_json::to_string(additional_context)
+        .context("serialize after compaction additional context for test")?;
+    let script = format!(
+        r#"import json
+from pathlib import Path
+import sys
+
+payload = json.load(sys.stdin)
+with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload) + "\n")
+
+print(json.dumps({{
+    "hookSpecificOutput": {{
+        "hookEventName": "AfterCompaction",
+        "additionalContext": {additional_context_json}
+    }}
+}}))
+"#,
+        log_path = log_path.display(),
+    );
+    let hooks = serde_json::json!({
+        "hooks": {
+            "AfterCompaction": [{
+                "conditions": {
+                    "profiles": ["bd-worker"]
+                },
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("python3 {}", script_path.display()),
+                    "statusMessage": "running after compaction hook",
+                }]
+            }]
+        }
+    });
+
+    fs::write(&script_path, script).context("write after compaction hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
+    Ok(())
+}
+
+fn non_openai_model_provider(server: &MockServer) -> ModelProviderInfo {
+    let mut provider = built_in_model_providers(/* openai_base_url */ None)["openai"].clone();
+    provider.name = "OpenAI (test)".into();
+    provider.base_url = Some(format!("{}/v1", server.uri()));
+    provider.supports_websockets = false;
+    provider
 }
 
 fn rollout_hook_prompt_texts(text: &str) -> Result<Vec<String>> {
@@ -1376,6 +1431,80 @@ async fn user_prompt_submit_hooks_support_general_and_profile_scoped_handlers() 
     assert_eq!(
         scoped_inputs[0].get("active_profile").and_then(Value::as_str),
         Some("bd-worker")
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_compaction_hooks_can_inject_profile_scoped_context() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_assistant_message("msg-1", "before compact"),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-2", "compacted summary"),
+                ev_completed("resp-2"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-3"),
+                ev_assistant_message("msg-3", "after compact"),
+                ev_completed("resp-3"),
+            ]),
+        ],
+    )
+    .await;
+
+    let model_provider = non_openai_model_provider(&server);
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            if let Err(error) =
+                write_after_compaction_hook(home, "Remember this post-compaction lighthouse note.")
+            {
+                panic!("failed to write after compaction hook fixture: {error}");
+            }
+        })
+        .with_config(move |config| {
+            config.active_profile = Some("bd-worker".to_string());
+            config.model_provider = model_provider;
+            config.compact_prompt = Some(SUMMARIZATION_PROMPT.to_string());
+            config
+                .features
+                .enable(Feature::CodexHooks)
+                .expect("test config should allow feature update");
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("hello before compact").await?;
+    test.codex.submit(Op::Compact).await?;
+    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    test.submit_turn("after compact").await?;
+
+    let hook_inputs = read_hook_log(test.codex_home_path(), "after_compaction_hook_log.jsonl")?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(
+        hook_inputs[0].get("active_profile").and_then(Value::as_str),
+        Some("bd-worker")
+    );
+    assert_eq!(
+        hook_inputs[0].get("source").and_then(Value::as_str),
+        Some("manual")
+    );
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 3);
+    let after_compact_body = requests[2].body_json().to_string();
+    assert!(
+        after_compact_body.contains("Remember this post-compaction lighthouse note."),
+        "post-compaction follow-up request should include injected developer context",
     );
 
     Ok(())

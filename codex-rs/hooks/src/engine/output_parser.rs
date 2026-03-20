@@ -13,6 +13,12 @@ pub(crate) struct SessionStartOutput {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct AfterCompactionOutput {
+    pub universal: UniversalOutput,
+    pub additional_context: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct PreToolUseOutput {
     pub universal: UniversalOutput,
     pub block_reason: Option<String>,
@@ -36,6 +42,7 @@ pub(crate) struct StopOutput {
     pub invalid_block_reason: Option<String>,
 }
 
+use crate::schema::AfterCompactionCommandOutputWire;
 use crate::schema::BlockDecisionWire;
 use crate::schema::HookUniversalOutputWire;
 use crate::schema::PreToolUseCommandOutputWire;
@@ -51,6 +58,17 @@ pub(crate) fn parse_session_start(stdout: &str) -> Option<SessionStartOutput> {
         .hook_specific_output
         .and_then(|output| output.additional_context);
     Some(SessionStartOutput {
+        universal: UniversalOutput::from(wire.universal),
+        additional_context,
+    })
+}
+
+pub(crate) fn parse_after_compaction(stdout: &str) -> Option<AfterCompactionOutput> {
+    let wire: AfterCompactionCommandOutputWire = parse_json(stdout)?;
+    let additional_context = wire
+        .hook_specific_output
+        .and_then(|output| output.additional_context);
+    Some(AfterCompactionOutput {
         universal: UniversalOutput::from(wire.universal),
         additional_context,
     })

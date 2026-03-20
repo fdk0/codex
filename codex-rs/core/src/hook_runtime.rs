@@ -1,6 +1,9 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use codex_hooks::AfterCompactionOutcome;
+use codex_hooks::AfterCompactionRequest;
+use codex_hooks::AfterCompactionSource;
 use codex_hooks::PreToolUseOutcome;
 use codex_hooks::PreToolUseRequest;
 use codex_hooks::SessionStartOutcome;
@@ -58,6 +61,22 @@ impl From<SessionStartOutcome> for ContextInjectingHookOutcome {
             hook_events,
             outcome: HookRuntimeOutcome {
                 should_stop,
+                additional_contexts,
+            },
+        }
+    }
+}
+
+impl From<AfterCompactionOutcome> for ContextInjectingHookOutcome {
+    fn from(value: AfterCompactionOutcome) -> Self {
+        let AfterCompactionOutcome {
+            hook_events,
+            additional_contexts,
+        } = value;
+        Self {
+            hook_events,
+            outcome: HookRuntimeOutcome {
+                should_stop: false,
                 additional_contexts,
             },
         }
@@ -165,6 +184,33 @@ pub(crate) async fn run_user_prompt_submit_hooks(
         sess.hooks().run_user_prompt_submit(request),
     )
     .await
+}
+
+pub(crate) async fn run_after_compaction_hooks(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    source: AfterCompactionSource,
+) {
+    let request = AfterCompactionRequest {
+        session_id: sess.conversation_id,
+        turn_id: turn_context.sub_id.clone(),
+        cwd: turn_context.cwd.clone(),
+        transcript_path: sess.hook_transcript_path().await,
+        active_profile: hook_active_profile(turn_context),
+        model: turn_context.model_info.slug.clone(),
+        permission_mode: hook_permission_mode(turn_context),
+        source,
+    };
+    let preview_runs = sess.hooks().preview_after_compaction(&request);
+    let _ = run_context_injecting_hook(
+        sess,
+        turn_context,
+        preview_runs,
+        sess.hooks().run_after_compaction(request),
+    )
+    .await
+    .record_additional_contexts(sess, turn_context)
+    .await;
 }
 
 pub(crate) async fn inspect_pending_input(

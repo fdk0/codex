@@ -5,6 +5,9 @@ mod registry;
 mod schema;
 mod types;
 
+pub use events::after_compaction::AfterCompactionOutcome;
+pub use events::after_compaction::AfterCompactionRequest;
+pub use events::after_compaction::AfterCompactionSource;
 pub use events::pre_tool_use::PreToolUseOutcome;
 pub use events::pre_tool_use::PreToolUseRequest;
 pub use events::session_start::SessionStartOutcome;
