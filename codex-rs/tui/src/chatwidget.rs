@@ -3207,7 +3207,15 @@ impl ChatWidget {
                 codex_protocol::protocol::HookOutputEntryKind::Context => "hook context: ",
                 codex_protocol::protocol::HookOutputEntryKind::Error => "error: ",
             };
-            lines.push(format!("  {prefix}{}", entry.text).into());
+            let continuation_prefix = " ".repeat(prefix.len());
+            for (idx, line) in entry.text.split('\n').enumerate() {
+                let rendered = if idx == 0 {
+                    format!("  {prefix}{line}")
+                } else {
+                    format!("  {continuation_prefix}{line}")
+                };
+                lines.push(rendered.into());
+            }
         }
         self.add_to_history(PlainHistoryCell::new(lines));
         self.request_redraw();

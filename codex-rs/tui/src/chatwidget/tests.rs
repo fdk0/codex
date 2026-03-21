@@ -12267,7 +12267,8 @@ async fn assert_hook_events_snapshot(
                     },
                     codex_protocol::protocol::HookOutputEntry {
                         kind: codex_protocol::protocol::HookOutputEntryKind::Context,
-                        text: "Remember the startup checklist.".to_string(),
+                        text: "BD_SESSION_CONTEXT v1\nRepoRoot: /tmp/repo\nQueue: open=12"
+                            .to_string(),
                     },
                 ],
             },

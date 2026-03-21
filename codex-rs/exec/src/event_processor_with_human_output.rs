@@ -970,7 +970,14 @@ impl EventProcessorWithHumanOutput {
 
         for entry in event.run.entries {
             let prefix = Self::hook_entry_prefix(entry.kind);
-            eprintln!("  {prefix} {}", entry.text);
+            let continuation_prefix = " ".repeat(prefix.len());
+            for (idx, line) in entry.text.split('\n').enumerate() {
+                if idx == 0 {
+                    eprintln!("  {prefix} {line}");
+                } else {
+                    eprintln!("  {continuation_prefix} {line}");
+                }
+            }
         }
     }
 
