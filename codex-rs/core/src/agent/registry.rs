@@ -71,6 +71,11 @@ pub(crate) fn next_thread_spawn_depth(session_source: &SessionSource) -> i32 {
     session_depth(session_source).saturating_add(1)
 }
 
+pub(crate) fn exceeds_thread_spawn_depth_limit(depth: i32, max_depth: i32) -> bool {
+    depth > max_depth
+}
+
+impl AgentRegistry {
     pub(crate) fn tracked_thread_ids(&self) -> Vec<ThreadId> {
         let active_agents = self
             .active_agents
@@ -83,11 +88,6 @@ pub(crate) fn next_thread_spawn_depth(session_source: &SessionSource) -> i32 {
             .collect()
     }
 
-pub(crate) fn exceeds_thread_spawn_depth_limit(depth: i32, max_depth: i32) -> bool {
-    depth > max_depth
-}
-
-impl AgentRegistry {
     pub(crate) fn reserve_spawn_slot(
         self: &Arc<Self>,
         max_threads: Option<usize>,

@@ -3,6 +3,7 @@ use crate::agent::control::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
+use codex_protocol::protocol::AgentSpawnMode;
 
 pub(crate) struct Handler;
 
@@ -38,6 +39,7 @@ impl ToolHandler for Handler {
         let session_source = turn.session_source.clone();
         let child_depth = next_thread_spawn_depth(&session_source);
         let max_depth = turn.config.agent_max_depth;
+        let wake_parent_on_completion = turn.config.agent_wake_parent_on_completion_default;
         if exceeds_thread_spawn_depth_limit(child_depth, max_depth) {
             return Err(FunctionCallError::RespondToModel(
                 "Agent depth limit reached. Solve the task yourself.".to_string(),
@@ -87,6 +89,8 @@ impl ToolHandler for Handler {
                 )?),
                 SpawnAgentOptions {
                     fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
+                    wake_parent_on_completion,
+                    notify_parent_on_completion: true,
                 },
             )
             .await
@@ -145,6 +149,7 @@ impl ToolHandler for Handler {
                     prompt,
                     model: effective_model,
                     reasoning_effort: effective_reasoning_effort,
+                    spawn_mode: AgentSpawnMode::Spawn,
                     status,
                 }
                 .into(),

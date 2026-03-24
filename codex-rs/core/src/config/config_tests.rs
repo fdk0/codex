@@ -1687,7 +1687,7 @@ fn feature_table_enables_agent_function_call_inbox() -> std::io::Result<()> {
     let mut entries = BTreeMap::new();
     entries.insert("agent_function_call_inbox".to_string(), true);
     let cfg = ConfigToml {
-        features: Some(crate::features::FeaturesToml { entries }),
+        features: Some(FeaturesToml { entries }),
         ..Default::default()
     };
 

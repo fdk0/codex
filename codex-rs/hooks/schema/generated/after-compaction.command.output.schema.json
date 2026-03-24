@@ -20,6 +20,7 @@
     },
     "HookEventNameWire": {
       "enum": [
+        "PreToolUse",
         "SessionStart",
         "AfterCompaction",
         "UserPromptSubmit",

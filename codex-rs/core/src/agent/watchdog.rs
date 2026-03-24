@@ -7,8 +7,8 @@ use crate::codex::load_watchdog_prompt;
 use crate::config::Config;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
-use crate::features::Feature;
 use crate::thread_manager::ThreadManagerState;
+use codex_features::Feature;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::SessionSource;
@@ -312,6 +312,7 @@ impl WatchdogManager {
         let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: snapshot.owner_thread_id,
             depth: snapshot.child_depth,
+            agent_path: None,
             agent_nickname: None,
             agent_role: None,
         });
@@ -584,7 +585,7 @@ async fn watchdog_helper_prompt(
 mod tests {
     use super::watchdog_helper_prompt;
     use crate::config::ConfigBuilder;
-    use crate::features::Feature;
+    use codex_features::Feature;
     use codex_protocol::ThreadId;
 
     #[tokio::test]

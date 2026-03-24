@@ -240,6 +240,7 @@ fn thread_spawn_source(parent_thread_id: ThreadId) -> SessionSource {
     SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id,
         depth: 1,
+        agent_path: None,
         agent_nickname: None,
         agent_role: Some("explorer".to_string()),
     })
@@ -1230,8 +1231,6 @@ async fn completion_watcher_notifies_parent_when_child_is_missing() {
             agent_nickname: None,
             agent_role: Some("explorer".to_string()),
         })),
-        child_thread_id.to_string(),
-        None,
     );
 
     assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);

@@ -146,9 +146,7 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
         HookEventName::PreToolUse
         | HookEventName::AfterCompaction
         | HookEventName::UserPromptSubmit
-        | HookEventName::Stop => {
-            HookScope::Turn
-        }
+        | HookEventName::Stop => HookScope::Turn,
     }
 }
 

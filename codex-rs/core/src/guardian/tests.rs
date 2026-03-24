@@ -914,8 +914,7 @@ fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() {
             skip_if_no_network!(Ok(()));
 
             let server = start_mock_server().await;
-            let error_message =
-                "Item 'rs_test' of type 'reasoning' was provided without its required following item.";
+            let error_message = "Item 'rs_test' of type 'reasoning' was provided without its required following item.";
             let _request_log = mount_response_once(
                 &server,
                 wiremock::ResponseTemplate::new(400).set_body_json(serde_json::json!({
@@ -928,7 +927,8 @@ fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() {
             )
             .await;
 
-            let (mut session, mut turn, rx) = crate::codex::make_session_and_context_with_rx().await;
+            let (mut session, mut turn, rx) =
+                crate::codex::make_session_and_context_with_rx().await;
             let mut config = (*turn.config).clone();
             config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
             config.user_instructions = None;

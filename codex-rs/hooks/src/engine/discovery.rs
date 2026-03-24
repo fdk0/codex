@@ -273,20 +273,10 @@ mod tests {
             }],
         );
 
-        assert_eq!(warnings, Vec::<String>::new());
-        assert_eq!(
-            handlers,
-            vec![ConfiguredHandler {
-                event_name: HookEventName::UserPromptSubmit,
-                matcher: Some("[".to_string()),
-                conditions: HookConditions::default(),
-                command: "echo hello".to_string(),
-                timeout_sec: 600,
-                status_message: None,
-                source_path: PathBuf::from("/tmp/hooks.json"),
-                display_order: 0,
-            }]
-        );
+        assert_eq!(handlers, Vec::<ConfiguredHandler>::new());
+        assert_eq!(display_order, 0);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("invalid matcher"));
     }
 
     #[test]

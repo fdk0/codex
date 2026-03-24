@@ -6,8 +6,6 @@
 //! then optionally layer role-specific config on top.
 
 use crate::agent::AgentStatus;
-use crate::agent::agent_resolver::resolve_agent_target;
-use crate::agent::agent_resolver::resolve_agent_targets;
 use crate::agent::RemovedWatchdog;
 use crate::agent::WatchdogParentCompactionResult;
 use crate::agent::WatchdogRegistration;
@@ -19,17 +17,17 @@ use crate::codex::TurnContext;
 use crate::config::Config;
 use crate::config::types::AgentWaitOnWakeEnabledBehavior;
 use crate::error::CodexErr;
-use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
+use crate::models_manager::manager::RefreshStrategy;
+use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
-pub(crate) use crate::tools::handlers::multi_agents_common::*;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 use async_trait::async_trait;
+use codex_features::Feature;
 use codex_protocol::ThreadId;
-use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
@@ -39,16 +37,18 @@ use codex_protocol::protocol::CollabAgentInteractionEndEvent;
 use codex_protocol::protocol::CollabAgentRef;
 use codex_protocol::protocol::CollabAgentSpawnBeginEvent;
 use codex_protocol::protocol::CollabAgentSpawnEndEvent;
+use codex_protocol::protocol::CollabAgentStatusEntry;
 use codex_protocol::protocol::CollabCloseBeginEvent;
 use codex_protocol::protocol::CollabCloseEndEvent;
 use codex_protocol::protocol::CollabResumeBeginEvent;
 use codex_protocol::protocol::CollabResumeEndEvent;
 use codex_protocol::protocol::CollabWaitingBeginEvent;
 use codex_protocol::protocol::CollabWaitingEndEvent;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 
 /// Function-tool handler for the multi-agent collaboration API.
@@ -1512,6 +1512,7 @@ fn thread_spawn_source(
     SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id,
         depth,
+        agent_path: None,
         agent_nickname: None,
         agent_role: agent_role.map(str::to_string),
     })
@@ -2142,6 +2143,7 @@ mod tests {
         turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: session.conversation_id,
             depth: max_depth,
+            agent_path: None,
             agent_nickname: None,
             agent_role: None,
         });
@@ -2181,6 +2183,7 @@ mod tests {
         turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: session.conversation_id,
             depth: DEFAULT_AGENT_MAX_DEPTH,
+            agent_path: None,
             agent_nickname: None,
             agent_role: None,
         });
@@ -2739,6 +2742,7 @@ mod tests {
         turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: session.conversation_id,
             depth: max_depth,
+            agent_path: None,
             agent_nickname: None,
             agent_role: None,
         });

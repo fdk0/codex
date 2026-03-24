@@ -76,6 +76,7 @@ pub(crate) fn matcher_pattern_for_event(
     match event_name {
         HookEventName::PreToolUse
         | HookEventName::SessionStart
+        | HookEventName::AfterCompaction
         | HookEventName::UserPromptSubmit
         | HookEventName::Stop => matcher,
     }

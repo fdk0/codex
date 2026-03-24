@@ -225,17 +225,6 @@ pub(crate) fn build_agent_spawn_config(
     Ok(config)
 }
 
-pub(crate) fn build_agent_resume_config(
-    turn: &TurnContext,
-    child_depth: i32,
-) -> Result<Config, FunctionCallError> {
-    let mut config = build_agent_shared_config(turn)?;
-    apply_spawn_agent_overrides(&mut config, child_depth);
-    // For resume, keep base instructions sourced from rollout/session metadata.
-    config.base_instructions = None;
-    Ok(config)
-}
-
 fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, FunctionCallError> {
     let base_config = turn.config.clone();
     let mut config = (*base_config).clone();

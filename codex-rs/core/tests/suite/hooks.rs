@@ -448,6 +448,15 @@ fn read_user_prompt_submit_hook_inputs(home: &Path) -> Result<Vec<serde_json::Va
         .collect()
 }
 
+fn read_hook_log(home: &Path, filename: &str) -> Result<Vec<serde_json::Value>> {
+    fs::read_to_string(home.join(filename))
+        .with_context(|| format!("read hook log {filename}"))?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).context("parse hook log line"))
+        .collect()
+}
+
 fn ev_message_item_done(id: &str, text: &str) -> Value {
     serde_json::json!({
         "type": "response.output_item.done",
@@ -1425,11 +1434,15 @@ async fn user_prompt_submit_hooks_support_general_and_profile_scoped_handlers() 
     assert_eq!(general_inputs.len(), 1);
     assert_eq!(scoped_inputs.len(), 1);
     assert_eq!(
-        general_inputs[0].get("active_profile").and_then(Value::as_str),
+        general_inputs[0]
+            .get("active_profile")
+            .and_then(Value::as_str),
         Some("bd-worker")
     );
     assert_eq!(
-        scoped_inputs[0].get("active_profile").and_then(Value::as_str),
+        scoped_inputs[0]
+            .get("active_profile")
+            .and_then(Value::as_str),
         Some("bd-worker")
     );
 

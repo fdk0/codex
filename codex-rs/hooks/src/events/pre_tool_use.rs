@@ -252,6 +252,7 @@ mod tests {
     use super::parse_completed;
     use crate::engine::ConfiguredHandler;
     use crate::engine::command_runner::CommandRunResult;
+    use crate::engine::config::HookConditions;
 
     #[test]
     fn permission_decision_deny_blocks_processing() {
@@ -467,6 +468,7 @@ mod tests {
         ConfiguredHandler {
             event_name: HookEventName::PreToolUse,
             matcher: Some("^Bash$".to_string()),
+            conditions: HookConditions::default(),
             command: "echo hook".to_string(),
             timeout_sec: 5,
             status_message: None,

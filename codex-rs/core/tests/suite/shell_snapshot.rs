@@ -594,6 +594,7 @@ fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
                 final_output_json_schema: None,
                 cwd: cwd.clone(),
                 approval_policy: AskForApproval::Never,
+                approvals_reviewer: None,
                 sandbox_policy: SandboxPolicy::DangerFullAccess,
                 model,
                 effort: None,

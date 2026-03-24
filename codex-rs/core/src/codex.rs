@@ -2830,10 +2830,16 @@ impl Session {
         if let Some(status) = agent_status_from_event(&event.msg) {
             self.agent_status.send_replace(status);
         }
-        self.services
-            .agent_control
-            .maybe_wake_parent_for_event(self.conversation_id, &event)
-            .await;
+        // Wake delivery can inject session-prefix response items back into a parent thread,
+        // which eventually emits more events. Box this await edge so the indirect event ->
+        // wake -> injected message -> raw response item -> event cycle does not produce an
+        // infinitely sized future.
+        Box::pin(
+            self.services
+                .agent_control
+                .maybe_wake_parent_for_event(self.conversation_id, &event),
+        )
+        .await;
         if let Err(e) = self.tx_event.send(event).await {
             debug!("dropping event because channel is closed: {e}");
         }

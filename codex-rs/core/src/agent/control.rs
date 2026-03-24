@@ -8,6 +8,7 @@ use crate::agent::registry::AgentMetadata;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::resolve_role_config;
 use crate::agent::status::is_final;
+use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::Config;
 use crate::config::types::AgentWakeDescendantPolicy;
 use crate::error::CodexErr;
@@ -202,6 +203,19 @@ impl AgentControl {
             .thread_id)
     }
 
+    pub(crate) async fn spawn_agent_with_options(
+        &self,
+        config: Config,
+        items: Vec<UserInput>,
+        session_source: Option<SessionSource>,
+        options: SpawnAgentOptions,
+    ) -> CodexResult<ThreadId> {
+        Ok(self
+            .spawn_agent_internal(config, items, session_source, options)
+            .await?
+            .thread_id)
+    }
+
     pub(crate) async fn spawn_agent_with_metadata(
         &self,
         config: Config,
@@ -374,7 +388,7 @@ impl AgentControl {
         session_source: Option<SessionSource>,
     ) -> CodexResult<ThreadId> {
         let state = self.upgrade()?;
-        let reservation = self
+        let mut reservation = self
             .reserve_spawn_slot_with_reconcile(&state, config.agent_max_threads)
             .await?;
         let inherited_shell_snapshot = self
@@ -383,6 +397,27 @@ impl AgentControl {
         let inherited_exec_policy = self
             .inherited_exec_policy_for_source(&state, session_source.as_ref(), &config)
             .await;
+        let (session_source, mut agent_metadata) = match session_source {
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth,
+                agent_path,
+                agent_role,
+                ..
+            })) => {
+                let (session_source, agent_metadata) = self.prepare_thread_spawn(
+                    &mut reservation,
+                    &config,
+                    parent_thread_id,
+                    depth,
+                    agent_path,
+                    agent_role,
+                    /*preferred_agent_nickname*/ None,
+                )?;
+                (Some(session_source), agent_metadata)
+            }
+            other => (other, AgentMetadata::default()),
+        };
 
         let new_thread = match session_source {
             Some(session_source) => {
@@ -400,7 +435,8 @@ impl AgentControl {
             }
             None => state.spawn_new_thread(config, self.clone()).await?,
         };
-        reservation.commit(new_thread.thread_id);
+        agent_metadata.agent_id = Some(new_thread.thread_id);
+        reservation.commit(agent_metadata);
         state.notify_thread_created(new_thread.thread_id);
         Ok(new_thread.thread_id)
     }
@@ -435,9 +471,30 @@ impl AgentControl {
         options: SpawnAgentOptions,
     ) -> CodexResult<ThreadId> {
         let state = self.upgrade()?;
-        let reservation = self
+        let mut reservation = self
             .reserve_spawn_slot_with_reconcile(&state, config.agent_max_threads)
             .await?;
+        let (session_source, mut agent_metadata) = match session_source {
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth,
+                agent_path,
+                agent_role,
+                ..
+            }) => {
+                let (session_source, agent_metadata) = self.prepare_thread_spawn(
+                    &mut reservation,
+                    &config,
+                    parent_thread_id,
+                    depth,
+                    agent_path,
+                    agent_role,
+                    /*preferred_agent_nickname*/ None,
+                )?;
+                (session_source, agent_metadata)
+            }
+            other => (other, AgentMetadata::default()),
+        };
         let inherited_shell_snapshot = self
             .inherited_shell_snapshot_for_source(&state, Some(&session_source))
             .await;
@@ -482,7 +539,8 @@ impl AgentControl {
                 inherited_exec_policy,
             )
             .await?;
-        reservation.commit(new_thread.thread_id);
+        agent_metadata.agent_id = Some(new_thread.thread_id);
+        reservation.commit(agent_metadata);
         state.notify_thread_created(new_thread.thread_id);
         if options.notify_parent_on_completion {
             self.register_parent_wake_subscription(
@@ -942,6 +1000,23 @@ impl AgentControl {
             return AgentStatus::NotFound;
         };
         thread.agent_status().await
+    }
+
+    pub(crate) async fn get_agent_nickname_and_role(
+        &self,
+        agent_id: ThreadId,
+    ) -> Option<(Option<String>, Option<String>)> {
+        let Ok(state) = self.upgrade() else {
+            return None;
+        };
+        let Ok(thread) = state.get_thread(agent_id).await else {
+            return None;
+        };
+        let session_source = thread.config_snapshot().await.session_source;
+        Some((
+            session_source.get_nickname(),
+            session_source.get_agent_role(),
+        ))
     }
 
     pub(crate) fn register_session_root(
@@ -1880,9 +1955,9 @@ mod inbox_tests {
     use crate::config::ConfigBuilder;
     use crate::config_loader::LoaderOverrides;
     use crate::contextual_user_message::SUBAGENT_NOTIFICATION_OPEN_TAG;
-    use crate::features::Feature;
     use crate::rollout::recorder::RolloutRecorder;
     use assert_matches::assert_matches;
+    use codex_features::Feature;
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::ResponseInputItem;
@@ -1937,6 +2012,7 @@ mod inbox_tests {
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: None,
             agent_role: None,
         })
@@ -2505,6 +2581,7 @@ mod inbox_tests {
                 Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                     parent_thread_id,
                     depth: 1,
+                    agent_path: None,
                     agent_nickname: None,
                     agent_role: None,
                 })),
@@ -2589,6 +2666,7 @@ mod inbox_tests {
                 Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                     parent_thread_id,
                     depth: 1,
+                    agent_path: None,
                     agent_nickname: None,
                     agent_role: None,
                 })),
@@ -2660,6 +2738,7 @@ mod inbox_tests {
                 Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                     parent_thread_id,
                     depth: 1,
+                    agent_path: None,
                     agent_nickname: None,
                     agent_role: None,
                 })),
@@ -2749,6 +2828,7 @@ mod inbox_tests {
                 SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                     parent_thread_id,
                     depth: 1,
+                    agent_path: None,
                     agent_nickname: None,
                     agent_role: None,
                 }),
@@ -2991,6 +3071,7 @@ mod inbox_tests {
                 Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                     parent_thread_id,
                     depth: 1,
+                    agent_path: None,
                     agent_nickname: None,
                     agent_role: Some("explorer".to_string()),
                 })),
@@ -3042,6 +3123,7 @@ mod inbox_tests {
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
                 depth: 1,
+                agent_path: None,
                 agent_nickname: None,
                 agent_role: Some("explorer".to_string()),
             })),
@@ -3082,6 +3164,7 @@ mod inbox_tests {
                 Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                     parent_thread_id,
                     depth: 1,
+                    agent_path: None,
                     agent_nickname: None,
                     agent_role: Some("explorer".to_string()),
                 })),
@@ -3101,6 +3184,7 @@ mod inbox_tests {
             depth,
             agent_nickname,
             agent_role,
+            ..
         }) = snapshot.session_source
         else {
             panic!("expected thread-spawn sub-agent source");
@@ -3134,6 +3218,7 @@ mod inbox_tests {
                 Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                     parent_thread_id,
                     depth: 1,
+                    agent_path: None,
                     agent_nickname: None,
                     agent_role: Some("researcher".to_string()),
                 })),
@@ -3186,6 +3271,7 @@ mod inbox_tests {
                     Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                         parent_thread_id,
                         depth: 1,
+                        agent_path: None,
                         agent_nickname: None,
                         agent_role: Some("explorer".to_string()),
                     })),
@@ -3254,6 +3340,7 @@ mod inbox_tests {
                     SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                         parent_thread_id,
                         depth: 1,
+                        agent_path: None,
                         agent_nickname: None,
                         agent_role: None,
                     }),
@@ -3274,6 +3361,7 @@ mod inbox_tests {
                 depth: resumed_depth,
                 agent_nickname: resumed_nickname,
                 agent_role: resumed_role,
+                ..
             }) = resumed_snapshot.session_source
             else {
                 panic!("expected thread-spawn sub-agent source");

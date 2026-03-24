@@ -17,6 +17,8 @@ const PRE_TOOL_USE_INPUT_FIXTURE: &str = "pre-tool-use.command.input.schema.json
 const PRE_TOOL_USE_OUTPUT_FIXTURE: &str = "pre-tool-use.command.output.schema.json";
 const SESSION_START_INPUT_FIXTURE: &str = "session-start.command.input.schema.json";
 const SESSION_START_OUTPUT_FIXTURE: &str = "session-start.command.output.schema.json";
+const AFTER_COMPACTION_INPUT_FIXTURE: &str = "after-compaction.command.input.schema.json";
+const AFTER_COMPACTION_OUTPUT_FIXTURE: &str = "after-compaction.command.output.schema.json";
 const USER_PROMPT_SUBMIT_INPUT_FIXTURE: &str = "user-prompt-submit.command.input.schema.json";
 const USER_PROMPT_SUBMIT_OUTPUT_FIXTURE: &str = "user-prompt-submit.command.output.schema.json";
 const STOP_INPUT_FIXTURE: &str = "stop.command.input.schema.json";
@@ -497,6 +499,10 @@ fn session_start_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_const_schema("SessionStart")
 }
 
+fn after_compaction_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("AfterCompaction")
+}
+
 fn pre_tool_use_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_const_schema("PreToolUse")
 }
@@ -525,6 +531,10 @@ fn permission_mode_schema(_gen: &mut SchemaGenerator) -> Schema {
 
 fn session_start_source_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_enum_schema(&["startup", "resume", "clear"])
+}
+
+fn after_compaction_source_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_enum_schema(&["manual", "auto", "modelSwitch"])
 }
 
 fn string_const_schema(value: &str) -> Schema {
@@ -556,6 +566,9 @@ fn default_continue() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::AFTER_COMPACTION_INPUT_FIXTURE;
+    use super::AFTER_COMPACTION_OUTPUT_FIXTURE;
+    use super::AfterCompactionCommandInput;
     use super::PRE_TOOL_USE_INPUT_FIXTURE;
     use super::PRE_TOOL_USE_OUTPUT_FIXTURE;
     use super::PreToolUseCommandInput;

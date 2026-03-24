@@ -6,4 +6,6 @@ expression: combined
 
 PreToolUse hook (completed)
   warning: Heads up from the hook
-  hook context: Remember the startup checklist.
+  hook context: BD_SESSION_CONTEXT v1
+                RepoRoot: /tmp/repo
+                Queue: open=12
