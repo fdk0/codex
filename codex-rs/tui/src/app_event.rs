@@ -81,8 +81,6 @@ pub(crate) enum AppEvent {
     OpenAgentPicker,
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
-    /// Enable or disable session-local auto-follow of live agent threads.
-    SetFollowLatestThread(bool),
 
     /// Submit an op to the specified thread, regardless of current focus.
     SubmitThreadOp {

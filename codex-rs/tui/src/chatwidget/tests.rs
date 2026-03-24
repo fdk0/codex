@@ -2162,7 +2162,6 @@ async fn make_chatwidget_manual(
         current_rollout_path: None,
         current_cwd: None,
         session_network_proxy: None,
-        follow_latest_thread: false,
         status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         last_terminal_title: None,
@@ -9326,45 +9325,6 @@ async fn fast_status_indicator_requires_chatgpt_auth() {
     set_chatgpt_auth(&mut chat);
 
     assert!(chat.should_show_fast_status(chat.current_model(), chat.current_service_tier(),));
-}
-
-#[tokio::test]
-async fn follow_thread_slash_command_updates_session_toggle() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
-
-    chat.dispatch_command_with_args(SlashCommand::FollowThread, "on".to_string(), Vec::new());
-
-    assert!(chat.follow_latest_thread_enabled());
-    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, AppEvent::SetFollowLatestThread(true))),
-        "expected follow-thread toggle event; events: {events:?}"
-    );
-}
-
-#[tokio::test]
-async fn follow_thread_status_reports_current_setting() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
-    chat.set_follow_latest_thread(true);
-
-    chat.dispatch_command_with_args(SlashCommand::FollowThread, "status".to_string(), Vec::new());
-
-    let cells = drain_insert_history(&mut rx);
-    let blob = lines_to_single_string(cells.last().expect("status message history cell"));
-    assert!(blob.contains("Follow latest session thread is on."));
-}
-
-#[tokio::test]
-async fn follow_thread_invalid_args_show_usage() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
-
-    chat.dispatch_command_with_args(SlashCommand::FollowThread, "later".to_string(), Vec::new());
-
-    let cells = drain_insert_history(&mut rx);
-    let blob = lines_to_single_string(cells.last().expect("usage error history cell"));
-    assert!(blob.contains("Usage: /follow-thread [on|off|status]"));
 }
 
 #[tokio::test]

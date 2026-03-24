@@ -865,8 +865,6 @@ pub(crate) struct ChatWidget {
     current_cwd: Option<PathBuf>,
     // Runtime network proxy bind addresses from SessionConfigured.
     session_network_proxy: Option<codex_protocol::protocol::SessionNetworkProxyRuntime>,
-    // Session-local toggle for auto-following the latest live agent thread.
-    follow_latest_thread: bool,
     // Shared latch so we only warn once about invalid status-line item IDs.
     status_line_invalid_items_warned: Arc<AtomicBool>,
     // Shared latch so we only warn once about invalid terminal-title item IDs.
@@ -3860,7 +3858,6 @@ impl ChatWidget {
             current_rollout_path: None,
             current_cwd,
             session_network_proxy: None,
-            follow_latest_thread: false,
             status_line_invalid_items_warned,
             terminal_title_invalid_items_warned,
             last_terminal_title: None,
@@ -4065,7 +4062,6 @@ impl ChatWidget {
             current_rollout_path: None,
             current_cwd,
             session_network_proxy: None,
-            follow_latest_thread: false,
             status_line_invalid_items_warned,
             terminal_title_invalid_items_warned,
             last_terminal_title: None,
@@ -4262,7 +4258,6 @@ impl ChatWidget {
             current_rollout_path: None,
             current_cwd,
             session_network_proxy: None,
-            follow_latest_thread: false,
             status_line_invalid_items_warned,
             terminal_title_invalid_items_warned,
             last_terminal_title: None,
@@ -4645,20 +4640,6 @@ impl ChatWidget {
                 }
                 self.open_realtime_audio_popup();
             }
-            SlashCommand::FollowThread => {
-                let enabled = !self.follow_latest_thread_enabled();
-                self.set_follow_latest_thread(enabled);
-                self.app_event_tx
-                    .send(AppEvent::SetFollowLatestThread(enabled));
-                let status = if enabled { "on" } else { "off" };
-                self.add_info_message(
-                    format!("Follow latest session thread is {status}."),
-                    Some(
-                        "This only auto-switches between threads in the current Codex session."
-                            .to_string(),
-                    ),
-                );
-            }
             SlashCommand::Personality => {
                 self.open_personality_popup();
             }
@@ -4956,52 +4937,6 @@ impl ChatWidget {
                     }
                     _ => {
                         self.add_error_message("Usage: /fast [on|off|status]".to_string());
-                    }
-                }
-            }
-            SlashCommand::FollowThread => {
-                if trimmed.is_empty() {
-                    self.dispatch_command(cmd);
-                    return;
-                }
-                match trimmed.to_ascii_lowercase().as_str() {
-                    "on" => {
-                        self.set_follow_latest_thread(true);
-                        self.app_event_tx
-                            .send(AppEvent::SetFollowLatestThread(true));
-                        self.add_info_message(
-                            "Follow latest session thread is on.".to_string(),
-                            Some(
-                                "This only auto-switches between threads in the current Codex session."
-                                    .to_string(),
-                            ),
-                        );
-                    }
-                    "off" => {
-                        self.set_follow_latest_thread(false);
-                        self.app_event_tx
-                            .send(AppEvent::SetFollowLatestThread(false));
-                        self.add_info_message(
-                            "Follow latest session thread is off.".to_string(),
-                            None,
-                        );
-                    }
-                    "status" => {
-                        let status = if self.follow_latest_thread_enabled() {
-                            "on"
-                        } else {
-                            "off"
-                        };
-                        self.add_info_message(
-                            format!("Follow latest session thread is {status}."),
-                            Some(
-                                "This only auto-switches between threads in the current Codex session."
-                                    .to_string(),
-                            ),
-                        );
-                    }
-                    _ => {
-                        self.add_error_message("Usage: /follow-thread [on|off|status]".to_string());
                     }
                 }
             }
@@ -8155,14 +8090,6 @@ impl ChatWidget {
 
     pub(crate) fn current_service_tier(&self) -> Option<ServiceTier> {
         self.config.service_tier
-    }
-
-    pub(crate) fn set_follow_latest_thread(&mut self, enabled: bool) {
-        self.follow_latest_thread = enabled;
-    }
-
-    pub(crate) fn follow_latest_thread_enabled(&self) -> bool {
-        self.follow_latest_thread
     }
 
     pub(crate) fn should_show_fast_status(
