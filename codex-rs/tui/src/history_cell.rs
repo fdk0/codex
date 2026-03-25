@@ -1979,7 +1979,8 @@ const SUBAGENT_NOTIFICATION_CLOSE_TAG: &str = "</subagent_notification>";
 
 #[derive(serde::Deserialize)]
 struct SubagentNotificationPayload {
-    agent_id: String,
+    #[serde(alias = "agent_id", alias = "agent_path")]
+    agent_reference: String,
     status: AgentStatus,
 }
 
@@ -2014,8 +2015,11 @@ pub(crate) fn format_subagent_notification_for_display(message: &str) -> Option<
     };
 
     Some(match detail {
-        Some(detail) => format!("{title}\nAgent: {}\n\n{detail}", notification.agent_id),
-        None => format!("{title}\nAgent: {}", notification.agent_id),
+        Some(detail) => format!(
+            "{title}\nAgent: {}\n\n{detail}",
+            notification.agent_reference
+        ),
+        None => format!("{title}\nAgent: {}", notification.agent_reference),
     })
 }
 
@@ -2618,6 +2622,15 @@ mod tests {
         assert_eq!(
             format_subagent_notification_for_display(message),
             Some("Subagent completed\nAgent: child-1\n\ndone".to_string())
+        );
+    }
+
+    #[test]
+    fn format_subagent_notification_for_display_accepts_agent_path_payload() {
+        let message = r#"<subagent_notification>{"agent_path":"worker/child-1","status":{"completed":"done"}}</subagent_notification>"#;
+        assert_eq!(
+            format_subagent_notification_for_display(message),
+            Some("Subagent completed\nAgent: worker/child-1\n\ndone".to_string())
         );
     }
 

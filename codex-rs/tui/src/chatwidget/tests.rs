@@ -1810,6 +1810,20 @@ async fn committed_user_message_subagent_notification_renders_formatted_info_cel
     );
 }
 
+#[tokio::test]
+async fn committed_user_message_subagent_notification_accepts_agent_path_payload() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+    let notification = "<subagent_notification>\n{\"agent_path\":\"worker/child-1\",\"status\":{\"completed\":\"done\"}}\n</subagent_notification>";
+
+    complete_user_message(&mut chat, "user-subagent-notification-path", notification);
+
+    let inserted = drain_insert_history(&mut rx);
+    assert_eq!(inserted.len(), 1);
+    let rendered = lines_to_single_string(&inserted[0]);
+    assert!(rendered.contains("Subagent completed"));
+    assert!(rendered.contains("Agent: worker/child-1"));
+}
+
 /// Exiting review restores the pre-review context window indicator.
 #[tokio::test]
 async fn review_restores_context_window_indicator() {
