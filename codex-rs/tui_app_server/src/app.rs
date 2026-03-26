@@ -3381,17 +3381,7 @@ impl App {
                     {
                         return Ok(AppRunControl::Continue);
                     }
-                    // Allow widgets to process any pending timers before rendering.
-                    self.chat_widget.pre_draw_tick();
-                    tui.draw(
-                        self.chat_widget.desired_height(tui.terminal.size()?.width),
-                        |frame| {
-                            self.chat_widget.render(frame.area(), frame.buffer);
-                            if let Some((x, y)) = self.chat_widget.cursor_pos(frame.area()) {
-                                frame.set_cursor_position((x, y));
-                            }
-                        },
-                    )?;
+                    self.draw_chat_widget(tui)?;
                     if self.chat_widget.external_editor_state() == ExternalEditorState::Requested {
                         self.chat_widget
                             .set_external_editor_state(ExternalEditorState::Active);
@@ -3401,6 +3391,28 @@ impl App {
             }
         }
         Ok(AppRunControl::Continue)
+    }
+
+    fn draw_chat_widget(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        // Allow widgets to process any pending timers before rendering.
+        self.chat_widget.pre_draw_tick();
+        tui.draw(
+            self.chat_widget.desired_height(tui.terminal.size()?.width),
+            |frame| {
+                self.chat_widget.render(frame.area(), frame.buffer);
+                if let Some((x, y)) = self.chat_widget.cursor_pos(frame.area()) {
+                    frame.set_cursor_position((x, y));
+                }
+            },
+        )?;
+        Ok(())
+    }
+
+    fn should_flush_remote_draw_before_submitting_op(
+        is_remote_app_server: bool,
+        op: &AppCommand,
+    ) -> bool {
+        is_remote_app_server && matches!(op.view(), AppCommandView::UserTurn { .. })
     }
 
     async fn handle_event(
@@ -3657,7 +3669,12 @@ impl App {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }
             AppEvent::CodexOp(op) => {
-                self.submit_active_thread_op(app_server, op.into()).await?;
+                let op: AppCommand = op.into();
+                if Self::should_flush_remote_draw_before_submitting_op(app_server.is_remote(), &op)
+                {
+                    self.draw_chat_widget(tui)?;
+                }
+                self.submit_active_thread_op(app_server, op).await?;
             }
             AppEvent::SubmitThreadOp { thread_id, op } => {
                 self.submit_thread_op(app_server, thread_id, op.into())
@@ -6778,6 +6795,42 @@ mod tests {
             ),
             AgentThreadAvailability::ReplayOnly
         );
+    }
+
+    #[test]
+    fn remote_user_turn_flushes_draw_before_submit() {
+        let op = AppCommand::user_turn(
+            vec![UserInput::Text {
+                text: "hello".to_string(),
+                text_elements: Vec::new(),
+            }],
+            PathBuf::from("/tmp"),
+            AskForApproval::Never,
+            SandboxPolicy::DangerFullAccess,
+            "gpt-5.4".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(App::should_flush_remote_draw_before_submitting_op(
+            /*is_remote_app_server*/ true, &op,
+        ));
+        assert!(!App::should_flush_remote_draw_before_submitting_op(
+            /*is_remote_app_server*/ false, &op,
+        ));
+    }
+
+    #[test]
+    fn remote_non_turn_ops_do_not_force_draw_flush() {
+        let op = AppCommand::interrupt();
+
+        assert!(!App::should_flush_remote_draw_before_submitting_op(
+            /*is_remote_app_server*/ true, &op,
+        ));
     }
 
     #[tokio::test]
