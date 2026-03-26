@@ -179,7 +179,11 @@ impl DashboardApp {
     }
 
     async fn refresh(&mut self, client: &DashboardClient) {
-        match client.load_threads(/*include_turns*/ true).await {
+        // Refresh from lightweight thread summaries only. The dashboard keeps
+        // live previews from streaming deltas, so re-reading every loaded
+        // thread with full turns on each poll just burns CPU/RAM and can bloat
+        // the app-server connection under larger sessions.
+        match client.load_threads(/*include_turns*/ false).await {
             Ok(threads) => {
                 self.apply_refresh(threads);
             }
