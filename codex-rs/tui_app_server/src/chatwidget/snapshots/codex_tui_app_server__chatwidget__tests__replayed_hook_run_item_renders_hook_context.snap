@@ -1,0 +1,8 @@
+---
+source: tui_app_server/src/chatwidget/tests.rs
+expression: rendered
+---
+SessionStart hook (completed)
+  hook context: SESSION_CONTEXT v1
+                RepoRoot: /tmp/repo
+                Queue: open=12

@@ -860,6 +860,7 @@ Today both notifications carry an empty `items` array even when item events were
 `ThreadItem` is the tagged union carried in turn responses and `item/*` notifications. Currently we support events for the following items:
 
 - `userMessage` — `{id, content}` where `content` is a list of user inputs (`text`, `image`, or `localImage`).
+- `hookRun` — `{run}` for replayable hook visibility. `run` matches `HookRunSummary`, including `eventName`, `status`, and hook output `entries` such as context, warnings, feedback, stop reasons, or errors.
 - `agentMessage` — `{id, text}` containing the accumulated agent reply.
 - `plan` — `{id, text}` emitted for plan-mode turns; plan text can stream via `item/plan/delta` (experimental).
 - `reasoning` — `{id, summary, content}` where `summary` holds streamed reasoning summaries (applicable for most OpenAI models) and `content` holds raw reasoning blocks (applicable for e.g. open source models).
@@ -884,6 +885,11 @@ All items emit shared lifecycle events:
 `review` is [UNSTABLE] and currently has `{status, riskScore?, riskLevel?, rationale?}`, where `status` is one of `inProgress`, `approved`, `denied`, or `aborted`. `action` is the guardian action summary payload from core when available and is intended to support temporary standalone pending-review UI. These notifications are separate from the target item's own `item/completed` lifecycle and are intentionally temporary while the guardian app protocol is still being designed.
 
 There are additional item-specific events:
+
+#### hookRun
+
+- `hook/started` — live notification for hook execution start.
+- `hook/completed` — live notification for hook completion. Historical thread responses may also include replayable `hookRun` items so clients can render hook output after reconnect/resume.
 
 #### agentMessage
 

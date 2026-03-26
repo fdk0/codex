@@ -1,0 +1,9 @@
+---
+source: tui_app_server/src/bottom_pane/mod.rs
+assertion_line: 1770
+expression: "render_snapshot(&pane, area)"
+---
+                                                        
+› Ask Codex to do anything                              
+                                                        
+  Robie [explorer] • 2 open agents

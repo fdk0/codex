@@ -472,6 +472,23 @@ fn rollout_hook_prompt_texts(text: &str) -> Result<Vec<String>> {
     Ok(texts)
 }
 
+fn rollout_hook_completed_events(
+    text: &str,
+) -> Result<Vec<codex_protocol::protocol::HookCompletedEvent>> {
+    let mut events = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let rollout: RolloutLine = serde_json::from_str(trimmed).context("parse rollout line")?;
+        if let RolloutItem::EventMsg(EventMsg::HookCompleted(event)) = rollout.item {
+            events.push(event);
+        }
+    }
+    Ok(events)
+}
+
 fn request_hook_prompt_texts(
     request: &core_test_support::responses::ResponsesRequest,
 ) -> Vec<String> {
@@ -797,6 +814,25 @@ async fn session_start_hooks_support_general_and_profile_scoped_handlers() -> Re
         request_body.contains(scoped_context),
         "startup request should include profile-scoped session-start context",
     );
+
+    let rollout_path = test.codex.rollout_path().expect("rollout path");
+    let rollout_text = fs::read_to_string(&rollout_path)?;
+    let hook_events = rollout_hook_completed_events(&rollout_text)?;
+    let session_start_events = hook_events
+        .iter()
+        .filter(|event| {
+            event.run.event_name == codex_protocol::protocol::HookEventName::SessionStart
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(session_start_events.len(), 2);
+    let hook_contexts = session_start_events
+        .iter()
+        .flat_map(|event| event.run.entries.iter())
+        .filter(|entry| entry.kind == codex_protocol::protocol::HookOutputEntryKind::Context)
+        .map(|entry| entry.text.as_str())
+        .collect::<Vec<_>>();
+    assert!(hook_contexts.contains(&general_context));
+    assert!(hook_contexts.contains(&scoped_context));
 
     Ok(())
 }

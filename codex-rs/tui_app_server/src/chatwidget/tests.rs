@@ -30,6 +30,14 @@ use codex_app_server_protocol::FileUpdateChange;
 use codex_app_server_protocol::GuardianApprovalReview;
 use codex_app_server_protocol::GuardianApprovalReviewStatus;
 use codex_app_server_protocol::GuardianRiskLevel as AppServerGuardianRiskLevel;
+use codex_app_server_protocol::HookEventName as AppServerHookEventName;
+use codex_app_server_protocol::HookExecutionMode as AppServerHookExecutionMode;
+use codex_app_server_protocol::HookHandlerType as AppServerHookHandlerType;
+use codex_app_server_protocol::HookOutputEntry as AppServerHookOutputEntry;
+use codex_app_server_protocol::HookOutputEntryKind as AppServerHookOutputEntryKind;
+use codex_app_server_protocol::HookRunStatus as AppServerHookRunStatus;
+use codex_app_server_protocol::HookRunSummary as AppServerHookRunSummary;
+use codex_app_server_protocol::HookScope as AppServerHookScope;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemGuardianApprovalReviewCompletedNotification;
 use codex_app_server_protocol::ItemGuardianApprovalReviewStartedNotification;
@@ -5163,6 +5171,44 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
         other => panic!("expected InsertHistoryCell, got {other:?}"),
     };
     assert!(rendered.contains("Raw reasoning"));
+}
+
+#[tokio::test]
+async fn replayed_hook_run_item_renders_hook_context() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let _ = drain_insert_history(&mut rx);
+
+    chat.replay_thread_item(
+        AppServerThreadItem::HookRun {
+            run: AppServerHookRunSummary {
+                id: "session-start:0:/tmp/hooks.json".to_string(),
+                event_name: AppServerHookEventName::SessionStart,
+                handler_type: AppServerHookHandlerType::Command,
+                execution_mode: AppServerHookExecutionMode::Sync,
+                scope: AppServerHookScope::Turn,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 0,
+                status: AppServerHookRunStatus::Completed,
+                status_message: Some("warming the shell".to_string()),
+                started_at: 1,
+                completed_at: Some(11),
+                duration_ms: Some(10),
+                entries: vec![AppServerHookOutputEntry {
+                    kind: AppServerHookOutputEntryKind::Context,
+                    text: "SESSION_CONTEXT v1\nRepoRoot: /tmp/repo\nQueue: open=12".to_string(),
+                }],
+            },
+        },
+        "turn-1".to_string(),
+        ReplayKind::ThreadSnapshot,
+    );
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .find(|rendered| rendered.contains("SessionStart hook (completed)"))
+        .expect("expected replayed hook history cell");
+    assert_snapshot!("replayed_hook_run_item_renders_hook_context", rendered);
 }
 
 #[test]

@@ -428,6 +428,15 @@ impl From<CoreHookOutputEntry> for HookOutputEntry {
     }
 }
 
+impl From<HookOutputEntry> for CoreHookOutputEntry {
+    fn from(value: HookOutputEntry) -> Self {
+        Self {
+            kind: value.kind.to_core(),
+            text: value.text,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -458,6 +467,26 @@ impl From<CoreHookRunSummary> for HookRunSummary {
             source_path: value.source_path,
             display_order: value.display_order,
             status: value.status.into(),
+            status_message: value.status_message,
+            started_at: value.started_at,
+            completed_at: value.completed_at,
+            duration_ms: value.duration_ms,
+            entries: value.entries.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<HookRunSummary> for CoreHookRunSummary {
+    fn from(value: HookRunSummary) -> Self {
+        Self {
+            id: value.id,
+            event_name: value.event_name.to_core(),
+            handler_type: value.handler_type.to_core(),
+            execution_mode: value.execution_mode.to_core(),
+            scope: value.scope.to_core(),
+            source_path: value.source_path,
+            display_order: value.display_order,
+            status: value.status.to_core(),
             status_message: value.status_message,
             started_at: value.started_at,
             completed_at: value.completed_at,
@@ -4184,6 +4213,9 @@ pub enum ThreadItem {
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
+    HookRun { run: HookRunSummary },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
     AgentMessage {
         id: String,
         text: String,
@@ -4336,6 +4368,9 @@ impl ThreadItem {
         match self {
             ThreadItem::UserMessage { id, .. }
             | ThreadItem::HookPrompt { id, .. }
+            | ThreadItem::HookRun {
+                run: HookRunSummary { id, .. },
+            }
             | ThreadItem::AgentMessage { id, .. }
             | ThreadItem::Plan { id, .. }
             | ThreadItem::Reasoning { id, .. }

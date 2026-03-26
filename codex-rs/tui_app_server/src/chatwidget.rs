@@ -282,6 +282,7 @@ use crate::app_event::ExitMode;
 #[cfg(target_os = "windows")]
 use crate::app_event::WindowsSandboxEnableMode;
 use crate::app_event_sender::AppEventSender;
+use crate::bottom_pane::ActiveAgentStatusSummary;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
@@ -1638,6 +1639,11 @@ impl ChatWidget {
     /// user actually looking at?" and the footer stack remains a pure renderer of that decision.
     pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) {
         self.bottom_pane.set_active_agent_label(active_agent_label);
+    }
+
+    /// Forwards the active-agent/open-agent summary into the composer/footer status line.
+    pub(crate) fn set_active_agent_summary(&mut self, summary: Option<ActiveAgentStatusSummary>) {
+        self.bottom_pane.set_active_agent_summary(summary);
     }
 
     /// Recomputes footer status-line content from config and current runtime state.
@@ -5891,6 +5897,23 @@ impl ChatWidget {
             ThreadItem::ContextCompaction { .. } => {
                 self.on_agent_message("Context compacted".to_owned());
             }
+            ThreadItem::HookRun { run } => {
+                let core_run: codex_protocol::protocol::HookRunSummary = run.into();
+                if matches!(
+                    core_run.status,
+                    codex_protocol::protocol::HookRunStatus::Running
+                ) {
+                    self.on_hook_started(codex_protocol::protocol::HookStartedEvent {
+                        turn_id: Some(turn_id.clone()),
+                        run: core_run,
+                    });
+                } else {
+                    self.on_hook_completed(codex_protocol::protocol::HookCompletedEvent {
+                        turn_id: Some(turn_id.clone()),
+                        run: core_run,
+                    });
+                }
+            }
             ThreadItem::HookPrompt { .. } => {}
             ThreadItem::CollabAgentToolCall {
                 id,
@@ -6069,20 +6092,16 @@ impl ChatWidget {
                 })
             }
             ServerNotification::HookStarted(notification) => {
-                if let Some(run) = convert_via_json(notification.run) {
-                    self.on_hook_started(codex_protocol::protocol::HookStartedEvent {
-                        turn_id: notification.turn_id,
-                        run,
-                    });
-                }
+                self.on_hook_started(codex_protocol::protocol::HookStartedEvent {
+                    turn_id: notification.turn_id,
+                    run: notification.run.into(),
+                });
             }
             ServerNotification::HookCompleted(notification) => {
-                if let Some(run) = convert_via_json(notification.run) {
-                    self.on_hook_completed(codex_protocol::protocol::HookCompletedEvent {
-                        turn_id: notification.turn_id,
-                        run,
-                    });
-                }
+                self.on_hook_completed(codex_protocol::protocol::HookCompletedEvent {
+                    turn_id: notification.turn_id,
+                    run: notification.run.into(),
+                });
             }
             ServerNotification::Error(notification) => {
                 if notification.will_retry {

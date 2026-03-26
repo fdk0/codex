@@ -106,6 +106,7 @@ fn event_msg_persistence_mode(ev: &EventMsg) -> Option<EventPersistenceMode> {
         | EventMsg::TurnAborted(_)
         | EventMsg::TurnStarted(_)
         | EventMsg::TurnComplete(_)
+        | EventMsg::HookCompleted(_)
         | EventMsg::ImageGenerationEnd(_) => Some(EventPersistenceMode::Limited),
         EventMsg::ItemCompleted(event) => {
             // Plan items are derived from streaming tags and are not part of the
@@ -169,7 +170,6 @@ fn event_msg_persistence_mode(ev: &EventMsg) -> Option<EventPersistenceMode> {
         | EventMsg::DeprecationNotice(_)
         | EventMsg::ItemStarted(_)
         | EventMsg::HookStarted(_)
-        | EventMsg::HookCompleted(_)
         | EventMsg::AgentMessageContentDelta(_)
         | EventMsg::PlanDelta(_)
         | EventMsg::ReasoningContentDelta(_)
@@ -189,7 +189,15 @@ mod tests {
     use super::EventPersistenceMode;
     use super::should_persist_event_msg;
     use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::HookCompletedEvent;
+    use codex_protocol::protocol::HookEventName;
+    use codex_protocol::protocol::HookExecutionMode;
+    use codex_protocol::protocol::HookHandlerType;
+    use codex_protocol::protocol::HookRunStatus;
+    use codex_protocol::protocol::HookRunSummary;
+    use codex_protocol::protocol::HookScope;
     use codex_protocol::protocol::ImageGenerationEndEvent;
+    use std::path::PathBuf;
 
     #[test]
     fn persists_image_generation_end_events_in_limited_mode() {
@@ -199,6 +207,33 @@ mod tests {
             revised_prompt: Some("final prompt".into()),
             result: "Zm9v".into(),
             saved_path: None,
+        });
+
+        assert!(should_persist_event_msg(
+            &event,
+            EventPersistenceMode::Limited
+        ));
+    }
+
+    #[test]
+    fn persists_hook_completed_events_in_limited_mode() {
+        let event = EventMsg::HookCompleted(HookCompletedEvent {
+            turn_id: Some("turn-1".into()),
+            run: HookRunSummary {
+                id: "session-start:0:/tmp/hooks.json".into(),
+                event_name: HookEventName::SessionStart,
+                handler_type: HookHandlerType::Command,
+                execution_mode: HookExecutionMode::Sync,
+                scope: HookScope::Turn,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 0,
+                status: HookRunStatus::Completed,
+                status_message: Some("warming the shell".into()),
+                started_at: 1,
+                completed_at: Some(11),
+                duration_ms: Some(10),
+                entries: Vec::new(),
+            },
         });
 
         assert!(should_persist_event_msg(

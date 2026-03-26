@@ -664,6 +664,27 @@ fn turn_snapshot_events(
     }];
 
     for item in &turn.items {
+        if let ThreadItem::HookRun { run } = item {
+            let run: codex_protocol::protocol::HookRunSummary = run.clone().into();
+            let msg = match run.status {
+                codex_protocol::protocol::HookRunStatus::Running => {
+                    EventMsg::HookStarted(codex_protocol::protocol::HookStartedEvent {
+                        turn_id: Some(turn.id.clone()),
+                        run,
+                    })
+                }
+                _ => EventMsg::HookCompleted(codex_protocol::protocol::HookCompletedEvent {
+                    turn_id: Some(turn.id.clone()),
+                    run,
+                }),
+            };
+            events.push(Event {
+                id: String::new(),
+                msg,
+            });
+            continue;
+        }
+
         if let Some(command_events) = command_execution_snapshot_events(&turn.id, item) {
             events.extend(command_events);
             continue;
@@ -704,7 +725,6 @@ fn turn_snapshot_events(
 
     events
 }
-
 /// Append the terminal event(s) for a turn based on its `TurnStatus`.
 ///
 /// This function is shared between the live notification bridge
@@ -838,6 +858,7 @@ fn thread_item_to_core(item: &ThreadItem) -> Option<TurnItem> {
         | ThreadItem::McpToolCall { .. }
         | ThreadItem::DynamicToolCall { .. }
         | ThreadItem::CollabAgentToolCall { .. }
+        | ThreadItem::HookRun { .. }
         | ThreadItem::HookPrompt { .. }
         | ThreadItem::ImageView { .. }
         | ThreadItem::EnteredReviewMode { .. }

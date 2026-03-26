@@ -10,6 +10,7 @@ use crate::app_event_sender::AppEventSender;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::AppServerStartedThread;
 use crate::app_server_session::ThreadSessionState;
+use crate::bottom_pane::ActiveAgentStatusSummary;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::FeedbackAudience;
 use crate::bottom_pane::McpServerElicitationFormRequest;
@@ -70,6 +71,7 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::ThreadRollbackResponse;
+use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnError as AppServerTurnError;
 use codex_app_server_protocol::TurnStatus;
@@ -1610,6 +1612,24 @@ impl App {
         self.chat_widget.thread_id().or(self.active_thread_id)
     }
 
+    fn open_agent_count(&self) -> usize {
+        self.agent_navigation
+            .open_agent_count(self.primary_thread_id)
+    }
+
+    fn active_agent_status_summary(&self) -> Option<ActiveAgentStatusSummary> {
+        let thread_id = self.current_displayed_thread_id()?;
+        Some(ActiveAgentStatusSummary {
+            label: self.thread_label(thread_id),
+            active_agents: self.open_agent_count(),
+        })
+    }
+
+    fn sync_active_agent_status_summary(&mut self) {
+        self.chat_widget
+            .set_active_agent_summary(self.active_agent_status_summary());
+    }
+
     /// Mirrors the visible thread into the contextual footer row.
     ///
     /// The footer sometimes shows ambient context instead of an instructional hint. In multi-agent
@@ -1623,6 +1643,20 @@ impl App {
             self.active_profile.as_deref(),
         );
         self.chat_widget.set_active_agent_label(label);
+    }
+
+    fn sync_active_agent_footer_context(&mut self) {
+        self.sync_active_agent_label();
+        self.sync_active_agent_status_summary();
+    }
+
+    fn availability_for_thread_status(status: &ThreadStatus) -> AgentThreadAvailability {
+        match status {
+            ThreadStatus::Idle | ThreadStatus::Active { .. } => AgentThreadAvailability::Live,
+            ThreadStatus::NotLoaded | ThreadStatus::SystemError => {
+                AgentThreadAvailability::ReplayOnly
+            }
+        }
     }
 
     async fn thread_cwd(&self, thread_id: ThreadId) -> Option<PathBuf> {
@@ -2233,7 +2267,7 @@ impl App {
         };
 
         if should_send {
-            match sender.try_send(ThreadBufferedEvent::Notification(notification)) {
+            match sender.try_send(ThreadBufferedEvent::Notification(notification.clone())) {
                 Ok(()) => {}
                 Err(TrySendError::Full(event)) => {
                     tokio::spawn(async move {
@@ -2246,6 +2280,11 @@ impl App {
                     tracing::warn!("thread {thread_id} event channel closed");
                 }
             }
+        }
+        if matches!(notification, ServerNotification::ThreadClosed(_))
+            && Some(thread_id) != self.primary_thread_id
+        {
+            self.mark_agent_picker_thread_closed(thread_id);
         }
         self.refresh_pending_thread_approvals().await;
         Ok(())
@@ -2523,16 +2562,12 @@ impl App {
         );
         let thread_ids: Vec<ThreadId> = thread_ids.into_iter().collect();
         for thread_id in thread_ids {
-            let availability = if self.thread_event_listener_tasks.contains_key(&thread_id) {
-                AgentThreadAvailability::Live
-            } else {
-                AgentThreadAvailability::ReplayOnly
-            };
             match app_server
                 .thread_read(thread_id, /*include_turns*/ false)
                 .await
             {
                 Ok(thread) => {
+                    let availability = Self::availability_for_thread_status(&thread.status);
                     self.upsert_agent_picker_thread(
                         thread_id,
                         thread.agent_nickname.clone(),
@@ -2547,6 +2582,12 @@ impl App {
                         error = %err,
                         "failed to refresh thread metadata for agent picker"
                     );
+                    let availability = self
+                        .agent_navigation
+                        .get(&thread_id)
+                        .map_or(AgentThreadAvailability::ReplayOnly, |entry| {
+                            entry.availability
+                        });
                     if self.agent_navigation.get(&thread_id).is_none() {
                         self.upsert_agent_picker_thread(
                             thread_id,
@@ -2640,7 +2681,7 @@ impl App {
             availability,
             last_status,
         );
-        self.sync_active_agent_label();
+        self.sync_active_agent_footer_context();
     }
 
     /// Marks a cached picker thread closed and recomputes the contextual footer label.
@@ -2649,7 +2690,7 @@ impl App {
     /// transcripts, and the stable next/previous traversal order should not collapse around them.
     fn mark_agent_picker_thread_closed(&mut self, thread_id: ThreadId) {
         self.agent_navigation.mark_closed(thread_id);
-        self.sync_active_agent_label();
+        self.sync_active_agent_footer_context();
     }
 
     async fn select_agent_thread(
@@ -2698,7 +2739,7 @@ impl App {
 
         let init = self.chatwidget_init_for_forked_or_resumed_thread(tui, self.config.clone());
         self.chat_widget = ChatWidget::new_with_app_event(init);
-        self.sync_active_agent_label();
+        self.sync_active_agent_footer_context();
 
         self.reset_for_thread_switch(tui)?;
         self.replay_thread_snapshot(snapshot, !is_replay_only);
@@ -2737,7 +2778,7 @@ impl App {
         self.pending_primary_events.clear();
         self.pending_app_server_requests.clear();
         self.chat_widget.set_pending_thread_approvals(Vec::new());
-        self.sync_active_agent_label();
+        self.sync_active_agent_footer_context();
     }
 
     async fn start_fresh_session_with_summary_hint(
@@ -6565,6 +6606,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_agent_status_summary_tracks_displayed_thread_label() {
+        let mut app = make_test_app().await;
+        let main_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000001").expect("valid thread");
+        let agent_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000002").expect("valid thread");
+
+        app.primary_thread_id = Some(main_thread_id);
+        app.active_thread_id = Some(main_thread_id);
+        app.upsert_agent_picker_thread(
+            agent_thread_id,
+            Some("Robie".to_string()),
+            Some("explorer".to_string()),
+            AgentThreadAvailability::Live,
+            None,
+        );
+        app.sync_active_agent_status_summary();
+
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 1 open agent".to_string())
+        );
+
+        app.active_thread_id = Some(agent_thread_id);
+        app.sync_active_agent_status_summary();
+
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Robie [explorer] • 1 open agent".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_start_and_stop_refresh_open_agent_count_in_status_summary() {
+        let mut app = make_test_app().await;
+        let main_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000011").expect("valid thread");
+        let first_agent_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000022").expect("valid thread");
+        let second_agent_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000033").expect("valid thread");
+
+        app.primary_thread_id = Some(main_thread_id);
+        app.active_thread_id = Some(main_thread_id);
+        app.sync_active_agent_status_summary();
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default]".to_string())
+        );
+
+        app.upsert_agent_picker_thread(
+            first_agent_id,
+            Some("Robie".to_string()),
+            Some("explorer".to_string()),
+            AgentThreadAvailability::Live,
+            None,
+        );
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 1 open agent".to_string())
+        );
+
+        app.upsert_agent_picker_thread(
+            second_agent_id,
+            None,
+            Some("worker".to_string()),
+            AgentThreadAvailability::Live,
+            None,
+        );
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 2 open agents".to_string())
+        );
+
+        app.mark_agent_picker_thread_closed(first_agent_id);
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 1 open agent".to_string())
+        );
+
+        app.mark_agent_picker_thread_closed(second_agent_id);
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default]".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_closed_notification_immediately_reduces_open_agent_count() -> Result<()> {
+        let mut app = make_test_app().await;
+        let main_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000041").expect("valid thread");
+        let agent_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000042").expect("valid thread");
+
+        app.primary_thread_id = Some(main_thread_id);
+        app.active_thread_id = Some(main_thread_id);
+        app.upsert_agent_picker_thread(
+            agent_thread_id,
+            Some("Robie".to_string()),
+            Some("explorer".to_string()),
+            AgentThreadAvailability::Live,
+            None,
+        );
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default] • 1 open agent".to_string())
+        );
+
+        app.enqueue_thread_notification(
+            agent_thread_id,
+            ServerNotification::ThreadClosed(ThreadClosedNotification {
+                thread_id: agent_thread_id.to_string(),
+            }),
+        )
+        .await?;
+
+        assert_eq!(
+            app.chat_widget.status_line_text(),
+            Some("Main [default]".to_string())
+        );
+        assert_eq!(
+            app.agent_navigation
+                .get(&agent_thread_id)
+                .map(|entry| entry.availability),
+            Some(AgentThreadAvailability::ReplayOnly)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn open_agent_picker_keeps_missing_threads_for_replay() -> Result<()> {
         let mut app = make_test_app().await;
         let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
@@ -6588,6 +6760,26 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn thread_status_idle_counts_as_live_availability() {
+        assert_eq!(
+            App::availability_for_thread_status(&codex_app_server_protocol::ThreadStatus::Idle),
+            AgentThreadAvailability::Live
+        );
+        assert_eq!(
+            App::availability_for_thread_status(&codex_app_server_protocol::ThreadStatus::Active {
+                active_flags: Vec::new(),
+            }),
+            AgentThreadAvailability::Live
+        );
+        assert_eq!(
+            App::availability_for_thread_status(
+                &codex_app_server_protocol::ThreadStatus::NotLoaded
+            ),
+            AgentThreadAvailability::ReplayOnly
+        );
+    }
+
     #[tokio::test]
     async fn open_agent_picker_keeps_cached_closed_threads() -> Result<()> {
         let mut app = make_test_app().await;
@@ -6602,6 +6794,7 @@ mod tests {
             AgentThreadAvailability::Live,
             None,
         );
+        app.mark_agent_picker_thread_closed(thread_id);
 
         app.open_agent_picker(&mut app_server).await;
 

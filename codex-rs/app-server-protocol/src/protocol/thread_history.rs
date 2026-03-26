@@ -32,6 +32,8 @@ use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandBeginEvent;
 use codex_protocol::protocol::ExecCommandEndEvent;
+use codex_protocol::protocol::HookCompletedEvent;
+use codex_protocol::protocol::HookStartedEvent;
 use codex_protocol::protocol::ImageGenerationBeginEvent;
 use codex_protocol::protocol::ImageGenerationEndEvent;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -187,7 +189,8 @@ impl ThreadHistoryBuilder {
             EventMsg::ExitedReviewMode(payload) => self.handle_exited_review_mode(payload),
             EventMsg::ItemStarted(payload) => self.handle_item_started(payload),
             EventMsg::ItemCompleted(payload) => self.handle_item_completed(payload),
-            EventMsg::HookStarted(_) | EventMsg::HookCompleted(_) => {}
+            EventMsg::HookStarted(payload) => self.handle_hook_started(payload),
+            EventMsg::HookCompleted(payload) => self.handle_hook_completed(payload),
             EventMsg::Error(payload) => self.handle_error(payload),
             EventMsg::TokenCount(_) => {}
             EventMsg::ThreadRolledBack(payload) => self.handle_thread_rollback(payload),
@@ -234,6 +237,28 @@ impl ThreadHistoryBuilder {
                 .map(crate::protocol::v2::HookPromptFragment::from)
                 .collect(),
         });
+    }
+
+    fn handle_hook_started(&mut self, payload: &HookStartedEvent) {
+        let item = ThreadItem::HookRun {
+            run: payload.run.clone().into(),
+        };
+        if let Some(turn_id) = payload.turn_id.as_deref() {
+            self.upsert_item_in_turn_id(turn_id, item);
+        } else {
+            self.upsert_item_in_current_turn(item);
+        }
+    }
+
+    fn handle_hook_completed(&mut self, payload: &HookCompletedEvent) {
+        let item = ThreadItem::HookRun {
+            run: payload.run.clone().into(),
+        };
+        if let Some(turn_id) = payload.turn_id.as_deref() {
+            self.upsert_item_in_turn_id(turn_id, item);
+        } else {
+            self.upsert_item_in_current_turn(item);
+        }
     }
 
     fn handle_user_message(&mut self, payload: &UserMessageEvent) {
@@ -1269,6 +1294,16 @@ mod tests {
     use codex_protocol::protocol::DynamicToolCallResponseEvent;
     use codex_protocol::protocol::ExecCommandEndEvent;
     use codex_protocol::protocol::ExecCommandSource;
+    use codex_protocol::protocol::HookCompletedEvent;
+    use codex_protocol::protocol::HookEventName;
+    use codex_protocol::protocol::HookExecutionMode;
+    use codex_protocol::protocol::HookHandlerType;
+    use codex_protocol::protocol::HookOutputEntry;
+    use codex_protocol::protocol::HookOutputEntryKind;
+    use codex_protocol::protocol::HookRunStatus;
+    use codex_protocol::protocol::HookRunSummary;
+    use codex_protocol::protocol::HookScope;
+    use codex_protocol::protocol::HookStartedEvent;
     use codex_protocol::protocol::ItemStartedEvent;
     use codex_protocol::protocol::McpInvocation;
     use codex_protocol::protocol::McpToolCallEndEvent;
@@ -2867,6 +2902,123 @@ mod tests {
                         hook_run_id: "hook-run-2".into(),
                     },
                 ],
+            }
+        );
+    }
+
+    #[test]
+    fn rebuilds_hook_run_items_from_rollout_events() {
+        let hook_run = HookRunSummary {
+            id: "session-start:0:/tmp/hooks.json".into(),
+            event_name: HookEventName::SessionStart,
+            handler_type: HookHandlerType::Command,
+            execution_mode: HookExecutionMode::Sync,
+            scope: HookScope::Turn,
+            source_path: PathBuf::from("/tmp/hooks.json"),
+            display_order: 0,
+            status: HookRunStatus::Completed,
+            status_message: Some("warming the shell".into()),
+            started_at: 1,
+            completed_at: Some(11),
+            duration_ms: Some(10),
+            entries: vec![HookOutputEntry {
+                kind: HookOutputEntryKind::Context,
+                text: "SESSION_CONTEXT v1\nRepoRoot: /tmp/repo".into(),
+            }],
+        };
+        let items = vec![
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-a".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::HookCompleted(HookCompletedEvent {
+                turn_id: Some("turn-a".into()),
+                run: hook_run.clone(),
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-a".into(),
+                last_agent_message: None,
+            })),
+        ];
+
+        let turns = build_turns_from_rollout_items(&items);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].items,
+            vec![ThreadItem::HookRun {
+                run: crate::protocol::v2::HookRunSummary::from(hook_run),
+            }]
+        );
+    }
+
+    #[test]
+    fn upserts_hook_run_items_when_status_changes() {
+        let running = HookRunSummary {
+            id: "hook-run-1".into(),
+            event_name: HookEventName::AfterCompaction,
+            handler_type: HookHandlerType::Command,
+            execution_mode: HookExecutionMode::Async,
+            scope: HookScope::Turn,
+            source_path: PathBuf::from("/tmp/hooks.json"),
+            display_order: 0,
+            status: HookRunStatus::Running,
+            status_message: Some("post-compaction context".into()),
+            started_at: 100,
+            completed_at: None,
+            duration_ms: None,
+            entries: Vec::new(),
+        };
+        let mut builder = ThreadHistoryBuilder::new();
+        builder.handle_event(&EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-a".into(),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        }));
+        builder.handle_event(&EventMsg::HookStarted(HookStartedEvent {
+            turn_id: Some("turn-a".into()),
+            run: running.clone(),
+        }));
+        builder.handle_event(&EventMsg::HookCompleted(HookCompletedEvent {
+            turn_id: Some("turn-a".into()),
+            run: HookRunSummary {
+                status: HookRunStatus::Completed,
+                completed_at: Some(115),
+                duration_ms: Some(15),
+                entries: vec![HookOutputEntry {
+                    kind: HookOutputEntryKind::Context,
+                    text: "Post-compaction reminder".into(),
+                }],
+                ..running
+            },
+        }));
+
+        let snapshot = builder
+            .active_turn_snapshot()
+            .expect("active turn snapshot");
+        assert_eq!(snapshot.items.len(), 1);
+        assert_eq!(
+            snapshot.items[0],
+            ThreadItem::HookRun {
+                run: crate::protocol::v2::HookRunSummary {
+                    id: "hook-run-1".into(),
+                    event_name: crate::protocol::v2::HookEventName::AfterCompaction,
+                    handler_type: crate::protocol::v2::HookHandlerType::Command,
+                    execution_mode: crate::protocol::v2::HookExecutionMode::Async,
+                    scope: crate::protocol::v2::HookScope::Turn,
+                    source_path: PathBuf::from("/tmp/hooks.json"),
+                    display_order: 0,
+                    status: crate::protocol::v2::HookRunStatus::Completed,
+                    status_message: Some("post-compaction context".into()),
+                    started_at: 100,
+                    completed_at: Some(115),
+                    duration_ms: Some(15),
+                    entries: vec![crate::protocol::v2::HookOutputEntry {
+                        kind: crate::protocol::v2::HookOutputEntryKind::Context,
+                        text: "Post-compaction reminder".into(),
+                    }],
+                },
             }
         );
     }

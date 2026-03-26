@@ -154,7 +154,6 @@ impl AgentNavigationState {
     }
 
     /// Returns the number of tracked non-primary threads that are still live.
-    #[cfg(test)]
     pub(crate) fn open_agent_count(&self, primary_thread_id: Option<ThreadId>) -> usize {
         self.threads
             .iter()

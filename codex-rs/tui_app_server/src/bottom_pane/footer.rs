@@ -647,11 +647,21 @@ pub(crate) fn passive_footer_status_line(props: &FooterProps) -> Option<Line<'st
     };
 
     if let Some(active_agent_label) = props.active_agent_label.as_ref() {
-        if let Some(existing) = line.as_mut() {
-            existing.spans.push(" · ".into());
-            existing.spans.push(active_agent_label.clone().into());
-        } else {
-            line = Some(Line::from(active_agent_label.clone()));
+        let status_line_already_starts_with_active_agent = line.as_ref().is_some_and(|existing| {
+            existing
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .starts_with(active_agent_label)
+        });
+        if !status_line_already_starts_with_active_agent {
+            if let Some(existing) = line.as_mut() {
+                existing.spans.push(" · ".into());
+                existing.spans.push(active_agent_label.clone().into());
+            } else {
+                line = Some(Line::from(active_agent_label.clone()));
+            }
         }
     }
 
