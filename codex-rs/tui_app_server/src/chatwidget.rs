@@ -61,6 +61,7 @@ use crate::text_formatting::proper_join;
 use crate::version::CODEX_CLI_VERSION;
 use codex_app_server_protocol::AppSummary;
 use codex_app_server_protocol::CodexErrorInfo as AppServerCodexErrorInfo;
+use codex_app_server_protocol::CollabAgentRef as AppServerCollabAgentRef;
 use codex_app_server_protocol::CollabAgentState as AppServerCollabAgentState;
 use codex_app_server_protocol::CollabAgentStatus as AppServerCollabAgentStatus;
 use codex_app_server_protocol::CollabAgentTool;
@@ -138,6 +139,7 @@ use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::BackgroundEventEvent;
 #[cfg(test)]
 use codex_protocol::protocol::CodexErrorInfo as CoreCodexErrorInfo;
+use codex_protocol::protocol::CollabAgentRef;
 #[cfg(test)]
 use codex_protocol::protocol::CollabAgentSpawnBeginEvent;
 use codex_protocol::protocol::CollabAgentStatusEntry;
@@ -1376,8 +1378,17 @@ fn app_server_collab_state_to_core(state: &AppServerCollabAgentState) -> AgentSt
     }
 }
 
+fn app_server_collab_agent_ref_to_core(agent: &AppServerCollabAgentRef) -> Option<CollabAgentRef> {
+    Some(CollabAgentRef {
+        thread_id: app_server_collab_thread_id_to_core(&agent.thread_id)?,
+        agent_nickname: agent.agent_nickname.clone(),
+        agent_role: agent.agent_role.clone(),
+    })
+}
+
 fn app_server_collab_agent_statuses_to_core(
     receiver_thread_ids: &[String],
+    receiver_agents: &[AppServerCollabAgentRef],
     agents_states: &HashMap<String, AppServerCollabAgentState>,
 ) -> (Vec<CollabAgentStatusEntry>, HashMap<ThreadId, AgentStatus>) {
     let mut agent_statuses = Vec::new();
@@ -1391,10 +1402,13 @@ fn app_server_collab_agent_statuses_to_core(
             continue;
         };
         let status = app_server_collab_state_to_core(agent_state);
+        let receiver_agent = receiver_agents
+            .iter()
+            .find(|agent| agent.thread_id == *receiver_thread_id);
         agent_statuses.push(CollabAgentStatusEntry {
             thread_id,
-            agent_nickname: None,
-            agent_role: None,
+            agent_nickname: receiver_agent.and_then(|agent| agent.agent_nickname.clone()),
+            agent_role: receiver_agent.and_then(|agent| agent.agent_role.clone()),
             status: status.clone(),
         });
         statuses.insert(thread_id, status);
@@ -1836,7 +1850,7 @@ impl ChatWidget {
             self.replay_initial_messages(messages);
         }
         self.submit_op(AppCommand::list_skills(
-            Vec::new(),
+            vec![self.config.cwd.clone()],
             /*force_reload*/ true,
         ));
         if self.connectors_enabled() {
@@ -3421,6 +3435,7 @@ impl ChatWidget {
             status,
             sender_thread_id,
             receiver_thread_ids,
+            receiver_agents,
             prompt,
             model,
             reasoning_effort,
@@ -3435,6 +3450,7 @@ impl ChatWidget {
         let first_receiver = receiver_thread_ids
             .first()
             .and_then(|thread_id| app_server_collab_thread_id_to_core(thread_id));
+        let first_receiver_agent = receiver_agents.first();
 
         match tool {
             CollabAgentTool::SpawnAgent => {
@@ -3465,8 +3481,10 @@ impl ChatWidget {
                             call_id: id,
                             sender_thread_id,
                             new_thread_id: first_receiver,
-                            new_agent_nickname: None,
-                            new_agent_role: None,
+                            new_agent_nickname: first_receiver_agent
+                                .and_then(|agent| agent.agent_nickname.clone()),
+                            new_agent_role: first_receiver_agent
+                                .and_then(|agent| agent.agent_role.clone()),
                             prompt: prompt.unwrap_or_default(),
                             model: String::new(),
                             reasoning_effort: ReasoningEffortConfig::Medium,
@@ -3492,8 +3510,10 @@ impl ChatWidget {
                             call_id: id,
                             sender_thread_id,
                             receiver_thread_id,
-                            receiver_agent_nickname: None,
-                            receiver_agent_role: None,
+                            receiver_agent_nickname: first_receiver_agent
+                                .and_then(|agent| agent.agent_nickname.clone()),
+                            receiver_agent_role: first_receiver_agent
+                                .and_then(|agent| agent.agent_role.clone()),
                             prompt: prompt.unwrap_or_default(),
                             status: receiver_thread_ids
                                 .iter()
@@ -3514,8 +3534,10 @@ impl ChatWidget {
                                 call_id: id,
                                 sender_thread_id,
                                 receiver_thread_id,
-                                receiver_agent_nickname: None,
-                                receiver_agent_role: None,
+                                receiver_agent_nickname: first_receiver_agent
+                                    .and_then(|agent| agent.agent_nickname.clone()),
+                                receiver_agent_role: first_receiver_agent
+                                    .and_then(|agent| agent.agent_role.clone()),
                             },
                         ));
                     } else {
@@ -3524,8 +3546,10 @@ impl ChatWidget {
                                 call_id: id,
                                 sender_thread_id,
                                 receiver_thread_id,
-                                receiver_agent_nickname: None,
-                                receiver_agent_role: None,
+                                receiver_agent_nickname: first_receiver_agent
+                                    .and_then(|agent| agent.agent_nickname.clone()),
+                                receiver_agent_role: first_receiver_agent
+                                    .and_then(|agent| agent.agent_role.clone()),
                                 status: receiver_thread_ids
                                     .iter()
                                     .find_map(|thread_id| agents_states.get(thread_id))
@@ -3549,13 +3573,17 @@ impl ChatWidget {
                                     app_server_collab_thread_id_to_core(thread_id)
                                 })
                                 .collect(),
-                            receiver_agents: Vec::new(),
+                            receiver_agents: receiver_agents
+                                .iter()
+                                .filter_map(app_server_collab_agent_ref_to_core)
+                                .collect(),
                             call_id: id,
                         },
                     ));
                 } else {
                     let (agent_statuses, statuses) = app_server_collab_agent_statuses_to_core(
                         &receiver_thread_ids,
+                        &receiver_agents,
                         &agents_states,
                     );
                     self.on_collab_event(multi_agents::waiting_end(
@@ -3577,8 +3605,10 @@ impl ChatWidget {
                             call_id: id,
                             sender_thread_id,
                             receiver_thread_id,
-                            receiver_agent_nickname: None,
-                            receiver_agent_role: None,
+                            receiver_agent_nickname: first_receiver_agent
+                                .and_then(|agent| agent.agent_nickname.clone()),
+                            receiver_agent_role: first_receiver_agent
+                                .and_then(|agent| agent.agent_role.clone()),
                             status: receiver_thread_ids
                                 .iter()
                                 .find_map(|thread_id| agents_states.get(thread_id))
@@ -5868,6 +5898,7 @@ impl ChatWidget {
                 status,
                 sender_thread_id,
                 receiver_thread_ids,
+                receiver_agents,
                 prompt,
                 model,
                 reasoning_effort,
@@ -5878,6 +5909,7 @@ impl ChatWidget {
                 status,
                 sender_thread_id,
                 receiver_thread_ids,
+                receiver_agents,
                 prompt,
                 model,
                 reasoning_effort,
@@ -6073,7 +6105,7 @@ impl ChatWidget {
             }
             ServerNotification::SkillsChanged(_) => {
                 self.submit_op(AppCommand::list_skills(
-                    Vec::new(),
+                    vec![self.config.cwd.clone()],
                     /*force_reload*/ true,
                 ));
             }
@@ -6325,6 +6357,7 @@ impl ChatWidget {
                 status,
                 sender_thread_id,
                 receiver_thread_ids,
+                receiver_agents,
                 prompt,
                 model,
                 reasoning_effort,
@@ -6335,6 +6368,7 @@ impl ChatWidget {
                 status,
                 sender_thread_id,
                 receiver_thread_ids,
+                receiver_agents,
                 prompt,
                 model,
                 reasoning_effort,
@@ -6596,7 +6630,7 @@ impl ChatWidget {
             EventMsg::ListSkillsResponse(ev) => self.on_list_skills(ev),
             EventMsg::SkillsUpdateAvailable => {
                 self.submit_op(AppCommand::list_skills(
-                    Vec::new(),
+                    vec![self.config.cwd.clone()],
                     /*force_reload*/ true,
                 ));
             }

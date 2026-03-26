@@ -7,6 +7,7 @@ members = [
     "app-server-client",
     "app-server-protocol",
     "app-server-test-client",
+    "agent-dashboard",
     "debug-client",
     "apply-patch",
     "arg0",

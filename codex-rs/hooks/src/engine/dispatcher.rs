@@ -457,7 +457,7 @@ mod tests {
                 HookEventName::UserPromptSubmit,
                 None,
                 HookConditions {
-                    profile: Some("bd-worker".to_string()),
+                    profile: Some("worker-profile".to_string()),
                     ..HookConditions::default()
                 },
                 "scoped",
@@ -470,7 +470,7 @@ mod tests {
             HookSelectionContext {
                 event_name: HookEventName::UserPromptSubmit,
                 matcher_input: Some("check this"),
-                active_profile: Some("bd-worker"),
+                active_profile: Some("worker-profile"),
                 model: None,
                 permission_mode: None,
             },
@@ -491,7 +491,7 @@ mod tests {
             HookEventName::Stop,
             None,
             HookConditions {
-                profiles: vec!["review".to_string(), "bd-worker".to_string()],
+                profiles: vec!["review".to_string(), "worker-profile".to_string()],
                 ..HookConditions::default()
             },
             "scoped",

@@ -2570,6 +2570,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
+            parent_thread_id: None,
             agent_nickname: None,
             agent_role: None,
             git_info: None,

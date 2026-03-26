@@ -33,6 +33,7 @@ use crate::model_catalog::ModelCatalog;
 use crate::model_migration::ModelMigrationOutcome;
 use crate::model_migration::migration_copy_for_models;
 use crate::model_migration::run_model_migration_prompt;
+use crate::multi_agents::AgentThreadAvailability;
 use crate::multi_agents::agent_picker_status_dot_spans;
 use crate::multi_agents::format_agent_picker_item_name;
 use crate::multi_agents::next_agent_shortcut_matches;
@@ -42,6 +43,7 @@ use crate::read_session_model;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::Renderable;
 use crate::resume_picker::SessionSelection;
+use crate::skills_cwd::skills_entry_for_cwd;
 use crate::tui;
 use crate::tui::TuiEvent;
 use crate::update_action::UpdateAction;
@@ -96,6 +98,7 @@ use codex_protocol::openai_models::ModelAvailabilityNux;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ModelUpgrade;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::FinalOutput;
 use codex_protocol::protocol::GetHistoryEntryResponseEvent;
@@ -120,6 +123,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
@@ -299,10 +303,7 @@ fn session_summary(
 }
 
 fn errors_for_cwd(cwd: &Path, response: &ListSkillsResponseEvent) -> Vec<SkillErrorInfo> {
-    response
-        .skills
-        .iter()
-        .find(|entry| entry.cwd.as_path() == cwd)
+    skills_entry_for_cwd(cwd, &response.skills)
         .map(|entry| entry.errors.clone())
         .unwrap_or_default()
 }
@@ -1569,7 +1570,12 @@ impl App {
     fn thread_label(&self, thread_id: ThreadId) -> String {
         let is_primary = self.primary_thread_id == Some(thread_id);
         let fallback_label = if is_primary {
-            "Main [default]".to_string()
+            format_agent_picker_item_name(
+                /*agent_nickname*/ None,
+                /*agent_role*/ None,
+                is_primary,
+                self.active_profile.as_deref(),
+            )
         } else {
             let thread_id = thread_id.to_string();
             let short_id: String = thread_id.chars().take(8).collect();
@@ -1580,6 +1586,7 @@ impl App {
                 entry.agent_nickname.as_deref(),
                 entry.agent_role.as_deref(),
                 is_primary,
+                self.active_profile.as_deref(),
             );
             if label == "Agent" {
                 let thread_id = thread_id.to_string();
@@ -1600,7 +1607,7 @@ impl App {
     /// navigation both follow what the user is actually looking at, not whichever thread most
     /// recently began switching.
     fn current_displayed_thread_id(&self) -> Option<ThreadId> {
-        self.active_thread_id.or(self.chat_widget.thread_id())
+        self.chat_widget.thread_id().or(self.active_thread_id)
     }
 
     /// Mirrors the visible thread into the contextual footer row.
@@ -1610,9 +1617,11 @@ impl App {
     /// intentionally hidden until there is more than one known thread so single-thread sessions do
     /// not spend footer space restating that the user is already on the main conversation.
     fn sync_active_agent_label(&mut self) {
-        let label = self
-            .agent_navigation
-            .active_agent_label(self.current_displayed_thread_id(), self.primary_thread_id);
+        let label = self.agent_navigation.active_agent_label(
+            self.current_displayed_thread_id(),
+            self.primary_thread_id,
+            self.active_profile.as_deref(),
+        );
         self.chat_widget.set_active_agent_label(label);
     }
 
@@ -2270,7 +2279,8 @@ impl App {
             thread_id,
             notification.thread.agent_nickname.clone(),
             notification.thread.agent_role.clone(),
-            /*is_closed*/ false,
+            AgentThreadAvailability::Live,
+            None,
         );
         Some(session)
     }
@@ -2379,8 +2389,11 @@ impl App {
         self.primary_thread_id = Some(thread_id);
         self.primary_session_configured = Some(session.clone());
         self.upsert_agent_picker_thread(
-            thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
-            /*is_closed*/ false,
+            thread_id,
+            /*agent_nickname*/ None,
+            /*agent_role*/ None,
+            AgentThreadAvailability::Live,
+            None,
         );
         let channel = self.ensure_thread_channel(thread_id);
         {
@@ -2496,18 +2509,56 @@ impl App {
     /// refreshes from the backend. Refresh failures are treated as "thread is only inspectable by
     /// historical id now" and converted into closed picker entries instead of deleting them, so
     /// the stable traversal order remains intact for review and keyboard navigation.
-    async fn open_agent_picker(&mut self) {
-        let thread_ids: Vec<ThreadId> = self.thread_event_channels.keys().cloned().collect();
+    async fn open_agent_picker(&mut self, app_server: &mut AppServerSession) {
+        let mut thread_ids = self
+            .thread_event_channels
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        thread_ids.extend(
+            self.agent_navigation
+                .ordered_threads()
+                .into_iter()
+                .map(|(thread_id, _)| thread_id),
+        );
+        let thread_ids: Vec<ThreadId> = thread_ids.into_iter().collect();
         for thread_id in thread_ids {
-            if self.thread_event_listener_tasks.contains_key(&thread_id) {
-                if self.agent_navigation.get(&thread_id).is_none() {
+            let availability = if self.thread_event_listener_tasks.contains_key(&thread_id) {
+                AgentThreadAvailability::Live
+            } else {
+                AgentThreadAvailability::ReplayOnly
+            };
+            match app_server
+                .thread_read(thread_id, /*include_turns*/ false)
+                .await
+            {
+                Ok(thread) => {
                     self.upsert_agent_picker_thread(
-                        thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
-                        /*is_closed*/ false,
+                        thread_id,
+                        thread.agent_nickname.clone(),
+                        thread.agent_role.clone(),
+                        availability,
+                        None,
                     );
                 }
-            } else {
-                self.mark_agent_picker_thread_closed(thread_id);
+                Err(err) => {
+                    tracing::debug!(
+                        thread_id = %thread_id,
+                        error = %err,
+                        "failed to refresh thread metadata for agent picker"
+                    );
+                    if self.agent_navigation.get(&thread_id).is_none() {
+                        self.upsert_agent_picker_thread(
+                            thread_id,
+                            /*agent_nickname*/ None,
+                            /*agent_role*/ None,
+                            availability,
+                            None,
+                        );
+                    } else if availability == AgentThreadAvailability::ReplayOnly {
+                        self.mark_agent_picker_thread_closed(thread_id);
+                    }
+                }
             }
         }
 
@@ -2525,6 +2576,7 @@ impl App {
             return;
         }
 
+        let displayed_thread_id = self.current_displayed_thread_id();
         let mut initial_selected_idx = None;
         let items: Vec<SelectionItem> = self
             .agent_navigation
@@ -2532,7 +2584,7 @@ impl App {
             .iter()
             .enumerate()
             .map(|(idx, (thread_id, entry))| {
-                if self.active_thread_id == Some(*thread_id) {
+                if displayed_thread_id == Some(*thread_id) {
                     initial_selected_idx = Some(idx);
                 }
                 let id = *thread_id;
@@ -2541,13 +2593,14 @@ impl App {
                     entry.agent_nickname.as_deref(),
                     entry.agent_role.as_deref(),
                     is_primary,
+                    self.active_profile.as_deref(),
                 );
                 let uuid = thread_id.to_string();
                 SelectionItem {
                     name: name.clone(),
-                    name_prefix_spans: agent_picker_status_dot_spans(entry.is_closed),
+                    name_prefix_spans: agent_picker_status_dot_spans(entry.availability),
                     description: Some(uuid.clone()),
-                    is_current: self.active_thread_id == Some(*thread_id),
+                    is_current: displayed_thread_id == Some(*thread_id),
                     actions: vec![Box::new(move |tx| {
                         tx.send(AppEvent::SelectAgentThread(id));
                     })],
@@ -2577,10 +2630,16 @@ impl App {
         thread_id: ThreadId,
         agent_nickname: Option<String>,
         agent_role: Option<String>,
-        is_closed: bool,
+        availability: AgentThreadAvailability,
+        last_status: Option<AgentStatus>,
     ) {
-        self.agent_navigation
-            .upsert(thread_id, agent_nickname, agent_role, is_closed);
+        self.agent_navigation.upsert(
+            thread_id,
+            agent_nickname,
+            agent_role,
+            availability,
+            last_status,
+        );
         self.sync_active_agent_label();
     }
 
@@ -2611,7 +2670,7 @@ impl App {
         let is_replay_only = self
             .agent_navigation
             .get(&thread_id)
-            .is_some_and(|entry| entry.is_closed);
+            .is_some_and(|entry| entry.availability == AgentThreadAvailability::ReplayOnly);
 
         let previous_thread_id = self.active_thread_id;
         self.store_active_thread_receiver().await;
@@ -4520,7 +4579,7 @@ impl App {
                 self.chat_widget.open_approvals_popup();
             }
             AppEvent::OpenAgentPicker => {
-                self.open_agent_picker().await;
+                self.open_agent_picker(app_server).await;
             }
             AppEvent::SelectAgentThread(thread_id) => {
                 self.select_agent_thread(tui, app_server, thread_id).await?;
@@ -6508,11 +6567,12 @@ mod tests {
     #[tokio::test]
     async fn open_agent_picker_keeps_missing_threads_for_replay() -> Result<()> {
         let mut app = make_test_app().await;
+        let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
         let thread_id = ThreadId::new();
         app.thread_event_channels
             .insert(thread_id, ThreadEventChannel::new(1));
 
-        app.open_agent_picker().await;
+        app.open_agent_picker(&mut app_server).await;
 
         assert_eq!(app.thread_event_channels.contains_key(&thread_id), true);
         assert_eq!(
@@ -6520,7 +6580,8 @@ mod tests {
             Some(&AgentPickerThreadEntry {
                 agent_nickname: None,
                 agent_role: None,
-                is_closed: true,
+                availability: AgentThreadAvailability::ReplayOnly,
+                last_status: None,
             })
         );
         assert_eq!(app.agent_navigation.ordered_thread_ids(), vec![thread_id]);
@@ -6530,6 +6591,7 @@ mod tests {
     #[tokio::test]
     async fn open_agent_picker_keeps_cached_closed_threads() -> Result<()> {
         let mut app = make_test_app().await;
+        let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
         let thread_id = ThreadId::new();
         app.thread_event_channels
             .insert(thread_id, ThreadEventChannel::new(1));
@@ -6537,10 +6599,11 @@ mod tests {
             thread_id,
             Some("Robie".to_string()),
             Some("explorer".to_string()),
-            false,
+            AgentThreadAvailability::Live,
+            None,
         );
 
-        app.open_agent_picker().await;
+        app.open_agent_picker(&mut app_server).await;
 
         assert_eq!(app.thread_event_channels.contains_key(&thread_id), true);
         assert_eq!(
@@ -6548,7 +6611,8 @@ mod tests {
             Some(&AgentPickerThreadEntry {
                 agent_nickname: Some("Robie".to_string()),
                 agent_role: Some("explorer".to_string()),
-                is_closed: true,
+                availability: AgentThreadAvailability::ReplayOnly,
+                last_status: Some(AgentStatus::Shutdown),
             })
         );
         Ok(())
@@ -6557,9 +6621,10 @@ mod tests {
     #[tokio::test]
     async fn open_agent_picker_prompts_to_enable_multi_agent_when_disabled() -> Result<()> {
         let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
         let _ = app.config.features.disable(Feature::Collab);
 
-        app.open_agent_picker().await;
+        app.open_agent_picker(&mut app_server).await;
         app.chat_widget
             .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -7114,11 +7179,12 @@ guardian_approval = true
     async fn open_agent_picker_allows_existing_agent_threads_when_feature_is_disabled() -> Result<()>
     {
         let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
         let thread_id = ThreadId::new();
         app.thread_event_channels
             .insert(thread_id, ThreadEventChannel::new(1));
 
-        app.open_agent_picker().await;
+        app.open_agent_picker(&mut app_server).await;
         app.chat_widget
             .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -7158,7 +7224,8 @@ guardian_approval = true
             agent_thread_id,
             Some("Robie".to_string()),
             Some("explorer".to_string()),
-            false,
+            AgentThreadAvailability::Live,
+            None,
         );
 
         app.refresh_pending_thread_approvals().await;
@@ -7201,7 +7268,8 @@ guardian_approval = true
             agent_thread_id,
             Some("Robie".to_string()),
             Some("explorer".to_string()),
-            false,
+            AgentThreadAvailability::Live,
+            None,
         );
 
         app.enqueue_thread_request(
@@ -7318,7 +7386,8 @@ guardian_approval = true
             agent_thread_id,
             Some("Robie".to_string()),
             Some("explorer".to_string()),
-            false,
+            AgentThreadAvailability::Live,
+            None,
         );
 
         app.enqueue_thread_request(
@@ -7411,6 +7480,7 @@ guardian_approval = true
                     cwd: PathBuf::from("/tmp/agent"),
                     cli_version: "0.0.0".to_string(),
                     source: codex_app_server_protocol::SessionSource::Unknown,
+                    parent_thread_id: Some(main_thread_id.to_string()),
                     agent_nickname: Some("Robie".to_string()),
                     agent_role: Some("explorer".to_string()),
                     git_info: None,
@@ -7443,7 +7513,8 @@ guardian_approval = true
             Some(&AgentPickerThreadEntry {
                 agent_nickname: Some("Robie".to_string()),
                 agent_role: Some("explorer".to_string()),
-                is_closed: false,
+                availability: AgentThreadAvailability::Live,
+                last_status: None,
             })
         );
 
@@ -7487,6 +7558,7 @@ guardian_approval = true
                     cwd: PathBuf::from("/tmp/agent"),
                     cli_version: "0.0.0".to_string(),
                     source: codex_app_server_protocol::SessionSource::Unknown,
+                    parent_thread_id: Some(main_thread_id.to_string()),
                     agent_nickname: Some("Robie".to_string()),
                     agent_role: Some("explorer".to_string()),
                     git_info: None,
@@ -7518,27 +7590,47 @@ guardian_approval = true
         let snapshot = [
             format!(
                 "{} | {}",
-                format_agent_picker_item_name(Some("Robie"), Some("explorer"), true),
+                format_agent_picker_item_name(
+                    Some("Robie"),
+                    Some("explorer"),
+                    true,
+                    Some("plan-deep"),
+                ),
                 thread_id
             ),
             format!(
                 "{} | {}",
-                format_agent_picker_item_name(Some("Robie"), Some("explorer"), false),
+                format_agent_picker_item_name(
+                    Some("Robie"),
+                    Some("explorer"),
+                    false,
+                    /*active_profile*/ None,
+                ),
                 thread_id
             ),
             format!(
                 "{} | {}",
-                format_agent_picker_item_name(Some("Robie"), None, false),
+                format_agent_picker_item_name(
+                    Some("Robie"),
+                    None,
+                    false,
+                    /*active_profile*/ None,
+                ),
                 thread_id
             ),
             format!(
                 "{} | {}",
-                format_agent_picker_item_name(None, Some("explorer"), false),
+                format_agent_picker_item_name(
+                    None,
+                    Some("explorer"),
+                    false,
+                    /*active_profile*/ None,
+                ),
                 thread_id
             ),
             format!(
                 "{} | {}",
-                format_agent_picker_item_name(None, None, false),
+                format_agent_picker_item_name(None, None, false, /*active_profile*/ None,),
                 thread_id
             ),
         ]
@@ -9073,6 +9165,7 @@ guardian_approval = true
                     cwd: PathBuf::from("/tmp/project"),
                     cli_version: "0.0.0".to_string(),
                     source: SessionSource::Cli.into(),
+                    parent_thread_id: None,
                     agent_nickname: None,
                     agent_role: None,
                     git_info: None,

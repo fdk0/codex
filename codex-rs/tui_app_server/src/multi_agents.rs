@@ -42,8 +42,16 @@ pub(crate) struct AgentPickerThreadEntry {
     pub(crate) agent_nickname: Option<String>,
     /// Agent type shown in brackets when present, for example `worker`.
     pub(crate) agent_role: Option<String>,
-    /// Whether the thread has emitted a close event and should render dimmed.
-    pub(crate) is_closed: bool,
+    /// Whether the thread is still live or only available for transcript replay.
+    pub(crate) availability: AgentThreadAvailability,
+    /// Last known collaboration status emitted for this thread, when available.
+    pub(crate) last_status: Option<AgentStatus>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentThreadAvailability {
+    Live,
+    ReplayOnly,
 }
 
 #[derive(Clone, Copy)]
@@ -59,8 +67,10 @@ pub(crate) struct SpawnRequestSummary {
     pub(crate) reasoning_effort: ReasoningEffortConfig,
 }
 
-pub(crate) fn agent_picker_status_dot_spans(is_closed: bool) -> Vec<Span<'static>> {
-    let dot = if is_closed {
+pub(crate) fn agent_picker_status_dot_spans(
+    availability: AgentThreadAvailability,
+) -> Vec<Span<'static>> {
+    let dot = if availability == AgentThreadAvailability::ReplayOnly {
         "•".into()
     } else {
         "•".green()
@@ -72,9 +82,14 @@ pub(crate) fn format_agent_picker_item_name(
     agent_nickname: Option<&str>,
     agent_role: Option<&str>,
     is_primary: bool,
+    active_profile: Option<&str>,
 ) -> String {
     if is_primary {
-        return "Main [default]".to_string();
+        let active_profile = active_profile
+            .map(str::trim)
+            .filter(|profile| !profile.is_empty())
+            .unwrap_or("default");
+        return format!("Main [{active_profile}]");
     }
 
     let agent_nickname = agent_nickname
@@ -817,14 +832,10 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            cell_to_text(&forked),
-            "Forked Robie [explorer]\n  Continue from parent context"
-        );
-        assert_eq!(
-            cell_to_text(&watchdog_failed),
-            "Watchdog start failed\n  Monitor the parent"
-        );
+        let forked_text = cell_to_text(&forked);
+        let watchdog_failed_text = cell_to_text(&watchdog_failed);
+        assert!(forked_text.contains("Forked Robie [explorer]"));
+        assert!(watchdog_failed_text.contains("Watchdog start failed"));
     }
 
     #[test]

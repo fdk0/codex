@@ -159,6 +159,29 @@
         }
       ]
     },
+    "CollabAgentRef": {
+      "properties": {
+        "agentNickname": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agentRole": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
     "CollabAgentState": {
       "properties": {
         "message": {
@@ -825,6 +848,13 @@
             "null"
           ]
         },
+        "parentThreadId": {
+          "description": "Direct parent thread id for AgentControl-spawned child threads.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "path": {
           "description": "[UNSTABLE] Path to the thread on disk.",
           "type": [
@@ -1314,6 +1344,14 @@
                 }
               ],
               "description": "Reasoning effort requested for the spawned agent, when applicable."
+            },
+            "receiverAgents": {
+              "default": [],
+              "description": "Optional nickname/role metadata for receiving agents when available.",
+              "items": {
+                "$ref": "#/definitions/CollabAgentRef"
+              },
+              "type": "array"
             },
             "receiverThreadIds": {
               "description": "Thread ID of the receiving agent, when applicable. In case of spawn operation, this corresponds to the newly spawned agent.",

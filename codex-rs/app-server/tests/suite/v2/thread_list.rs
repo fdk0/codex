@@ -685,6 +685,7 @@ async fn thread_list_filters_by_source_kind_subagent_thread_spawn() -> Result<()
     let ids: Vec<_> = data.iter().map(|thread| thread.id.as_str()).collect();
     assert_eq!(ids, vec![subagent_id.as_str()]);
     assert_ne!(cli_id, subagent_id);
+    assert_eq!(data[0].parent_thread_id, Some(parent_thread_id.to_string()));
     assert!(matches!(data[0].source, SessionSource::SubAgent(_)));
 
     Ok(())

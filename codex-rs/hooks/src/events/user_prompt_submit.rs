@@ -444,7 +444,7 @@ mod tests {
                 event_name: HookEventName::UserPromptSubmit,
                 matcher: Some("^deploy".to_string()),
                 conditions: HookConditions {
-                    profiles: vec!["bd-worker".to_string()],
+                    profiles: vec!["worker-profile".to_string()],
                     ..HookConditions::default()
                 },
                 command: "echo scoped".to_string(),
@@ -459,7 +459,7 @@ mod tests {
             turn_id: "turn-1".to_string(),
             cwd: PathBuf::from("/tmp"),
             transcript_path: None,
-            active_profile: Some("bd-worker".to_string()),
+            active_profile: Some("worker-profile".to_string()),
             model: "gpt-5".to_string(),
             permission_mode: "default".to_string(),
             prompt: "deploy now".to_string(),

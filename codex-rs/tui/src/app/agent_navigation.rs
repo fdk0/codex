@@ -219,6 +219,7 @@ impl AgentNavigationState {
         &self,
         current_displayed_thread_id: Option<ThreadId>,
         primary_thread_id: Option<ThreadId>,
+        active_profile: Option<&str>,
     ) -> Option<String> {
         if self.threads.len() <= 1 {
             return None;
@@ -234,11 +235,15 @@ impl AgentNavigationState {
                         entry.agent_nickname.as_deref(),
                         entry.agent_role.as_deref(),
                         is_primary,
+                        active_profile,
                     )
                 })
                 .unwrap_or_else(|| {
                     format_agent_picker_item_name(
-                        /*agent_nickname*/ None, /*agent_role*/ None, is_primary,
+                        /*agent_nickname*/ None,
+                        /*agent_role*/ None,
+                        is_primary,
+                        active_profile,
                     )
                 }),
         )
@@ -362,11 +367,27 @@ mod tests {
         let (state, main_thread_id, first_agent_id, _) = populated_state();
 
         assert_eq!(
-            state.active_agent_label(Some(first_agent_id), Some(main_thread_id)),
+            state.active_agent_label(
+                Some(first_agent_id),
+                Some(main_thread_id),
+                /*active_profile*/ None,
+            ),
             Some("Robie [explorer]".to_string())
         );
         assert_eq!(
-            state.active_agent_label(Some(main_thread_id), Some(main_thread_id)),
+            state.active_agent_label(
+                Some(main_thread_id),
+                Some(main_thread_id),
+                Some("plan-deep"),
+            ),
+            Some("Main [plan-deep]".to_string())
+        );
+        assert_eq!(
+            state.active_agent_label(
+                Some(main_thread_id),
+                Some(main_thread_id),
+                /*active_profile*/ None,
+            ),
             Some("Main [default]".to_string())
         );
     }

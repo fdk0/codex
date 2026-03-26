@@ -1701,7 +1701,12 @@ impl App {
     fn thread_label(&self, thread_id: ThreadId) -> String {
         let is_primary = self.primary_thread_id == Some(thread_id);
         let fallback_label = if is_primary {
-            "Main [default]".to_string()
+            format_agent_picker_item_name(
+                /*agent_nickname*/ None,
+                /*agent_role*/ None,
+                is_primary,
+                self.active_profile.as_deref(),
+            )
         } else {
             let thread_id = thread_id.to_string();
             let short_id: String = thread_id.chars().take(8).collect();
@@ -1712,6 +1717,7 @@ impl App {
                 entry.agent_nickname.as_deref(),
                 entry.agent_role.as_deref(),
                 is_primary,
+                self.active_profile.as_deref(),
             );
             if label == "Agent" {
                 let thread_id = thread_id.to_string();
@@ -1863,9 +1869,11 @@ impl App {
     /// intentionally hidden until there is more than one known thread so single-thread sessions do
     /// not spend footer space restating that the user is already on the main conversation.
     fn sync_active_agent_label(&mut self) {
-        let label = self
-            .agent_navigation
-            .active_agent_label(self.current_displayed_thread_id(), self.primary_thread_id);
+        let label = self.agent_navigation.active_agent_label(
+            self.current_displayed_thread_id(),
+            self.primary_thread_id,
+            self.active_profile.as_deref(),
+        );
         self.chat_widget.set_active_agent_label(label);
     }
 
@@ -2183,6 +2191,7 @@ impl App {
                     entry.agent_nickname.as_deref(),
                     entry.agent_role.as_deref(),
                     is_primary,
+                    self.active_profile.as_deref(),
                 );
                 let uuid = thread_id.to_string();
                 SelectionItem {
@@ -7088,27 +7097,47 @@ guardian_approval = true
         let snapshot = [
             format!(
                 "{} | {}",
-                format_agent_picker_item_name(Some("Robie"), Some("explorer"), true),
+                format_agent_picker_item_name(
+                    Some("Robie"),
+                    Some("explorer"),
+                    true,
+                    Some("plan-deep"),
+                ),
                 thread_id
             ),
             format!(
                 "{} | {}",
-                format_agent_picker_item_name(Some("Robie"), Some("explorer"), false),
+                format_agent_picker_item_name(
+                    Some("Robie"),
+                    Some("explorer"),
+                    false,
+                    /*active_profile*/ None,
+                ),
                 thread_id
             ),
             format!(
                 "{} | {}",
-                format_agent_picker_item_name(Some("Robie"), None, false),
+                format_agent_picker_item_name(
+                    Some("Robie"),
+                    None,
+                    false,
+                    /*active_profile*/ None,
+                ),
                 thread_id
             ),
             format!(
                 "{} | {}",
-                format_agent_picker_item_name(None, Some("explorer"), false),
+                format_agent_picker_item_name(
+                    None,
+                    Some("explorer"),
+                    false,
+                    /*active_profile*/ None,
+                ),
                 thread_id
             ),
             format!(
                 "{} | {}",
-                format_agent_picker_item_name(None, None, false),
+                format_agent_picker_item_name(None, None, false, /*active_profile*/ None,),
                 thread_id
             ),
         ]

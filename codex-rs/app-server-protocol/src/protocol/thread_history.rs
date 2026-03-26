@@ -1,3 +1,4 @@
+use crate::protocol::v2::CollabAgentRef;
 use crate::protocol::v2::CollabAgentState;
 use crate::protocol::v2::CollabAgentTool;
 use crate::protocol::v2::CollabAgentToolCallStatus;
@@ -614,6 +615,7 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: Vec::new(),
+            receiver_agents: Vec::new(),
             prompt: Some(payload.prompt.clone()),
             model: Some(payload.model.clone()),
             reasoning_effort: Some(payload.reasoning_effort),
@@ -649,6 +651,16 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids,
+            receiver_agents: payload
+                .new_thread_id
+                .map(|thread_id| {
+                    vec![CollabAgentRef {
+                        thread_id: thread_id.to_string(),
+                        agent_nickname: payload.new_agent_nickname.clone(),
+                        agent_role: payload.new_agent_role.clone(),
+                    }]
+                })
+                .unwrap_or_default(),
             prompt: Some(payload.prompt.clone()),
             model: Some(payload.model.clone()),
             reasoning_effort: Some(payload.reasoning_effort),
@@ -666,6 +678,7 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![payload.receiver_thread_id.to_string()],
+            receiver_agents: Vec::new(),
             prompt: Some(payload.prompt.clone()),
             model: None,
             reasoning_effort: None,
@@ -690,6 +703,11 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id.clone()],
+            receiver_agents: vec![CollabAgentRef {
+                thread_id: payload.receiver_thread_id.to_string(),
+                agent_nickname: payload.receiver_agent_nickname.clone(),
+                agent_role: payload.receiver_agent_role.clone(),
+            }],
             prompt: Some(payload.prompt.clone()),
             model: None,
             reasoning_effort: None,
@@ -710,6 +728,15 @@ impl ThreadHistoryBuilder {
                 .receiver_thread_ids
                 .iter()
                 .map(ToString::to_string)
+                .collect(),
+            receiver_agents: payload
+                .receiver_agents
+                .iter()
+                .map(|agent| CollabAgentRef {
+                    thread_id: agent.thread_id.to_string(),
+                    agent_nickname: agent.agent_nickname.clone(),
+                    agent_role: agent.agent_role.clone(),
+                })
                 .collect(),
             prompt: None,
             model: None,
@@ -746,6 +773,15 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids,
+            receiver_agents: payload
+                .agent_statuses
+                .iter()
+                .map(|agent| CollabAgentRef {
+                    thread_id: agent.thread_id.to_string(),
+                    agent_nickname: agent.agent_nickname.clone(),
+                    agent_role: agent.agent_role.clone(),
+                })
+                .collect(),
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -763,6 +799,7 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![payload.receiver_thread_id.to_string()],
+            receiver_agents: Vec::new(),
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -789,6 +826,11 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id],
+            receiver_agents: vec![CollabAgentRef {
+                thread_id: payload.receiver_thread_id.to_string(),
+                agent_nickname: payload.receiver_agent_nickname.clone(),
+                agent_role: payload.receiver_agent_role.clone(),
+            }],
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -806,6 +848,11 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![payload.receiver_thread_id.to_string()],
+            receiver_agents: vec![CollabAgentRef {
+                thread_id: payload.receiver_thread_id.to_string(),
+                agent_nickname: payload.receiver_agent_nickname.clone(),
+                agent_role: payload.receiver_agent_role.clone(),
+            }],
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -835,6 +882,11 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id],
+            receiver_agents: vec![CollabAgentRef {
+                thread_id: payload.receiver_thread_id.to_string(),
+                agent_nickname: payload.receiver_agent_nickname.clone(),
+                agent_role: payload.receiver_agent_role.clone(),
+            }],
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -2489,6 +2541,11 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: "00000000-0000-0000-0000-000000000001".into(),
                 receiver_thread_ids: vec!["00000000-0000-0000-0000-000000000002".into()],
+                receiver_agents: vec![CollabAgentRef {
+                    thread_id: "00000000-0000-0000-0000-000000000002".into(),
+                    agent_nickname: None,
+                    agent_role: None,
+                }],
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -2547,6 +2604,11 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: "00000000-0000-0000-0000-000000000001".into(),
                 receiver_thread_ids: vec!["00000000-0000-0000-0000-000000000002".into()],
+                receiver_agents: vec![CollabAgentRef {
+                    thread_id: "00000000-0000-0000-0000-000000000002".into(),
+                    agent_nickname: Some("Scout".into()),
+                    agent_role: Some("explorer".into()),
+                }],
                 prompt: Some("inspect the repo".into()),
                 model: Some("gpt-5.4-mini".into()),
                 reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
@@ -2615,6 +2677,11 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender.to_string(),
                 receiver_thread_ids: vec![receiver.to_string()],
+                receiver_agents: vec![CollabAgentRef {
+                    thread_id: receiver.to_string(),
+                    agent_nickname: None,
+                    agent_role: None,
+                }],
                 prompt: Some("new task".into()),
                 model: None,
                 reasoning_effort: None,

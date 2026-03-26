@@ -82,9 +82,14 @@ pub(crate) fn format_agent_picker_item_name(
     agent_nickname: Option<&str>,
     agent_role: Option<&str>,
     is_primary: bool,
+    active_profile: Option<&str>,
 ) -> String {
     if is_primary {
-        return "Main [default]".to_string();
+        let active_profile = active_profile
+            .map(str::trim)
+            .filter(|profile| !profile.is_empty())
+            .unwrap_or("default");
+        return format!("Main [{active_profile}]");
     }
 
     let agent_nickname = agent_nickname

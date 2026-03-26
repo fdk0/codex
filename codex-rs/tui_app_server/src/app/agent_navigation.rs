@@ -19,10 +19,12 @@
 //! updated or marked closed.
 
 use crate::multi_agents::AgentPickerThreadEntry;
+use crate::multi_agents::AgentThreadAvailability;
 use crate::multi_agents::format_agent_picker_item_name;
 use crate::multi_agents::next_agent_shortcut;
 use crate::multi_agents::previous_agent_shortcut;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::AgentStatus;
 use ratatui::text::Span;
 use std::collections::HashMap;
 
@@ -81,17 +83,31 @@ impl AgentNavigationState {
         thread_id: ThreadId,
         agent_nickname: Option<String>,
         agent_role: Option<String>,
-        is_closed: bool,
+        availability: AgentThreadAvailability,
+        last_status: Option<AgentStatus>,
     ) {
+        let existing = self.threads.get(&thread_id);
         if !self.threads.contains_key(&thread_id) {
             self.order.push(thread_id);
         }
         self.threads.insert(
             thread_id,
             AgentPickerThreadEntry {
-                agent_nickname,
-                agent_role,
-                is_closed,
+                agent_nickname: agent_nickname
+                    .or_else(|| existing.and_then(|entry| entry.agent_nickname.clone())),
+                agent_role: agent_role
+                    .or_else(|| existing.and_then(|entry| entry.agent_role.clone())),
+                availability,
+                last_status: match (
+                    last_status,
+                    availability,
+                    existing.and_then(|entry| entry.last_status.clone()),
+                ) {
+                    (Some(status), _, _) => Some(status),
+                    (None, AgentThreadAvailability::Live, Some(AgentStatus::Shutdown)) => None,
+                    (None, AgentThreadAvailability::Live, Some(AgentStatus::NotFound)) => None,
+                    (None, _, existing_status) => existing_status,
+                },
             },
         );
     }
@@ -104,11 +120,15 @@ impl AgentNavigationState {
     /// mid-session.
     pub(crate) fn mark_closed(&mut self, thread_id: ThreadId) {
         if let Some(entry) = self.threads.get_mut(&thread_id) {
-            entry.is_closed = true;
+            entry.availability = AgentThreadAvailability::ReplayOnly;
+            entry.last_status = Some(AgentStatus::Shutdown);
         } else {
             self.upsert(
-                thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
-                /*is_closed*/ true,
+                thread_id,
+                None,
+                None,
+                AgentThreadAvailability::ReplayOnly,
+                Some(AgentStatus::Shutdown),
             );
         }
     }
@@ -131,6 +151,18 @@ impl AgentNavigationState {
         self.threads
             .keys()
             .any(|thread_id| Some(*thread_id) != primary_thread_id)
+    }
+
+    /// Returns the number of tracked non-primary threads that are still live.
+    #[cfg(test)]
+    pub(crate) fn open_agent_count(&self, primary_thread_id: Option<ThreadId>) -> usize {
+        self.threads
+            .iter()
+            .filter(|(thread_id, entry)| {
+                Some(**thread_id) != primary_thread_id
+                    && entry.availability == AgentThreadAvailability::Live
+            })
+            .count()
     }
 
     /// Returns live picker rows in the same order users cycle through them.
@@ -188,6 +220,7 @@ impl AgentNavigationState {
         &self,
         current_displayed_thread_id: Option<ThreadId>,
         primary_thread_id: Option<ThreadId>,
+        active_profile: Option<&str>,
     ) -> Option<String> {
         if self.threads.len() <= 1 {
             return None;
@@ -203,11 +236,15 @@ impl AgentNavigationState {
                         entry.agent_nickname.as_deref(),
                         entry.agent_role.as_deref(),
                         is_primary,
+                        active_profile,
                     )
                 })
                 .unwrap_or_else(|| {
                     format_agent_picker_item_name(
-                        /*agent_nickname*/ None, /*agent_role*/ None, is_primary,
+                        /*agent_nickname*/ None,
+                        /*agent_role*/ None,
+                        is_primary,
+                        active_profile,
                     )
                 }),
         )
@@ -242,6 +279,8 @@ impl AgentNavigationState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::multi_agents::AgentThreadAvailability;
+    use codex_protocol::protocol::AgentStatus;
     use pretty_assertions::assert_eq;
 
     fn populated_state() -> (AgentNavigationState, ThreadId, ThreadId, ThreadId) {
@@ -253,18 +292,26 @@ mod tests {
         let second_agent_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000103").expect("valid thread");
 
-        state.upsert(main_thread_id, None, None, false);
+        state.upsert(
+            main_thread_id,
+            None,
+            None,
+            AgentThreadAvailability::Live,
+            None,
+        );
         state.upsert(
             first_agent_id,
             Some("Robie".to_string()),
             Some("explorer".to_string()),
-            false,
+            AgentThreadAvailability::Live,
+            None,
         );
         state.upsert(
             second_agent_id,
             Some("Bob".to_string()),
             Some("worker".to_string()),
-            false,
+            AgentThreadAvailability::Live,
+            None,
         );
 
         (state, main_thread_id, first_agent_id, second_agent_id)
@@ -278,7 +325,8 @@ mod tests {
             first_agent_id,
             Some("Robie".to_string()),
             Some("worker".to_string()),
-            true,
+            AgentThreadAvailability::ReplayOnly,
+            Some(AgentStatus::Shutdown),
         );
 
         assert_eq!(
@@ -320,12 +368,51 @@ mod tests {
         let (state, main_thread_id, first_agent_id, _) = populated_state();
 
         assert_eq!(
-            state.active_agent_label(Some(first_agent_id), Some(main_thread_id)),
+            state.active_agent_label(
+                Some(first_agent_id),
+                Some(main_thread_id),
+                /*active_profile*/ None,
+            ),
             Some("Robie [explorer]".to_string())
         );
         assert_eq!(
-            state.active_agent_label(Some(main_thread_id), Some(main_thread_id)),
+            state.active_agent_label(
+                Some(main_thread_id),
+                Some(main_thread_id),
+                Some("plan-deep"),
+            ),
+            Some("Main [plan-deep]".to_string())
+        );
+        assert_eq!(
+            state.active_agent_label(
+                Some(main_thread_id),
+                Some(main_thread_id),
+                /*active_profile*/ None,
+            ),
             Some("Main [default]".to_string())
+        );
+    }
+
+    #[test]
+    fn open_agent_count_only_counts_live_non_primary_threads() {
+        let (mut state, main_thread_id, first_agent_id, second_agent_id) = populated_state();
+
+        state.upsert(
+            second_agent_id,
+            Some("Bob".to_string()),
+            Some("worker".to_string()),
+            AgentThreadAvailability::ReplayOnly,
+            Some(AgentStatus::Shutdown),
+        );
+
+        assert_eq!(state.open_agent_count(Some(main_thread_id)), 1);
+        assert_eq!(
+            state.get(&first_agent_id).map(|entry| entry.availability),
+            Some(AgentThreadAvailability::Live)
+        );
+        assert_eq!(
+            state.get(&second_agent_id).map(|entry| entry.availability),
+            Some(AgentThreadAvailability::ReplayOnly)
         );
     }
 }

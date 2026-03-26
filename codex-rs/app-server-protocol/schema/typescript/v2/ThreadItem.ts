@@ -4,6 +4,7 @@
 import type { MessagePhase } from "../MessagePhase";
 import type { ReasoningEffort } from "../ReasoningEffort";
 import type { JsonValue } from "../serde_json/JsonValue";
+import type { CollabAgentRef } from "./CollabAgentRef";
 import type { CollabAgentState } from "./CollabAgentState";
 import type { CollabAgentTool } from "./CollabAgentTool";
 import type { CollabAgentToolCallStatus } from "./CollabAgentToolCallStatus";
@@ -82,6 +83,10 @@ senderThreadId: string,
  * this corresponds to the newly spawned agent.
  */
 receiverThreadIds: Array<string>, 
+/**
+ * Optional nickname/role metadata for receiving agents when available.
+ */
+receiverAgents: Array<CollabAgentRef>, 
 /**
  * Prompt text sent as part of the collab tool call, when available.
  */

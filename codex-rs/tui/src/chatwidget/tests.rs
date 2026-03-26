@@ -12241,8 +12241,7 @@ async fn assert_hook_events_snapshot(
                     },
                     codex_protocol::protocol::HookOutputEntry {
                         kind: codex_protocol::protocol::HookOutputEntryKind::Context,
-                        text: "BD_SESSION_CONTEXT v1\nRepoRoot: /tmp/repo\nQueue: open=12"
-                            .to_string(),
+                        text: "SESSION_CONTEXT v1\nRepoRoot: /tmp/repo\nQueue: open=12".to_string(),
                     },
                 ],
             },

@@ -285,7 +285,7 @@ mod tests {
         let mut warnings = Vec::new();
         let mut display_order = 0;
         let conditions = HookConditions {
-            profile: Some("bd-worker".to_string()),
+            profile: Some("worker-profile".to_string()),
             profiles: vec!["review".to_string()],
             model: Some("gpt-5".to_string()),
             models: Vec::new(),

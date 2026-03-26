@@ -3537,6 +3537,8 @@ pub struct Thread {
     pub cli_version: String,
     /// Origin of the thread (CLI, VSCode, codex exec, codex app-server, etc.).
     pub source: SessionSource,
+    /// Direct parent thread id for AgentControl-spawned child threads.
+    pub parent_thread_id: Option<String>,
     /// Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
     pub agent_nickname: Option<String>,
     /// Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.
@@ -4277,6 +4279,9 @@ pub enum ThreadItem {
         /// Thread ID of the receiving agent, when applicable. In case of spawn operation,
         /// this corresponds to the newly spawned agent.
         receiver_thread_ids: Vec<String>,
+        /// Optional nickname/role metadata for receiving agents when available.
+        #[serde(default)]
+        receiver_agents: Vec<CollabAgentRef>,
         /// Prompt text sent as part of the collab tool call, when available.
         prompt: Option<String>,
         /// Model requested for the spawned agent, when applicable.
@@ -4631,6 +4636,15 @@ pub enum CollabAgentStatus {
     Errored,
     Shutdown,
     NotFound,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct CollabAgentRef {
+    pub thread_id: String,
+    pub agent_nickname: Option<String>,
+    pub agent_role: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -6003,6 +6017,23 @@ mod tests {
                 status: CollabAgentStatus::Interrupted,
                 message: None,
             }
+        );
+    }
+
+    #[test]
+    fn collab_agent_ref_serializes_camel_case() {
+        assert_eq!(
+            serde_json::to_value(CollabAgentRef {
+                thread_id: "thread-1".to_string(),
+                agent_nickname: Some("Robie".to_string()),
+                agent_role: Some("explorer".to_string()),
+            })
+            .expect("collab agent ref should serialize"),
+            json!({
+                "threadId": "thread-1",
+                "agentNickname": "Robie",
+                "agentRole": "explorer"
+            })
         );
     }
 

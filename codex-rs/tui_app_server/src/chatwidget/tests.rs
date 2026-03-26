@@ -20,6 +20,7 @@ use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
 use codex_app_server_protocol::AppSummary;
+use codex_app_server_protocol::CollabAgentRef as AppServerCollabAgentRef;
 use codex_app_server_protocol::CollabAgentState as AppServerCollabAgentState;
 use codex_app_server_protocol::CollabAgentStatus as AppServerCollabAgentStatus;
 use codex_app_server_protocol::CollabAgentTool as AppServerCollabAgentTool;
@@ -4689,6 +4690,18 @@ async fn live_app_server_collab_wait_items_render_history() {
                     receiver_thread_id.to_string(),
                     other_receiver_thread_id.to_string(),
                 ],
+                receiver_agents: vec![
+                    AppServerCollabAgentRef {
+                        thread_id: receiver_thread_id.to_string(),
+                        agent_nickname: Some("Robie".to_string()),
+                        agent_role: Some("explorer".to_string()),
+                    },
+                    AppServerCollabAgentRef {
+                        thread_id: other_receiver_thread_id.to_string(),
+                        agent_nickname: Some("Bob".to_string()),
+                        agent_role: Some("review".to_string()),
+                    },
+                ],
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -4710,6 +4723,18 @@ async fn live_app_server_collab_wait_items_render_history() {
                 receiver_thread_ids: vec![
                     receiver_thread_id.to_string(),
                     other_receiver_thread_id.to_string(),
+                ],
+                receiver_agents: vec![
+                    AppServerCollabAgentRef {
+                        thread_id: receiver_thread_id.to_string(),
+                        agent_nickname: Some("Robie".to_string()),
+                        agent_role: Some("explorer".to_string()),
+                    },
+                    AppServerCollabAgentRef {
+                        thread_id: other_receiver_thread_id.to_string(),
+                        agent_nickname: Some("Bob".to_string()),
+                        agent_role: Some("review".to_string()),
+                    },
                 ],
                 prompt: None,
                 model: None,
@@ -4761,6 +4786,7 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 status: AppServerCollabAgentToolCallStatus::InProgress,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: Vec::new(),
+                receiver_agents: Vec::new(),
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
@@ -4780,6 +4806,11 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 status: AppServerCollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                receiver_agents: vec![AppServerCollabAgentRef {
+                    thread_id: spawned_thread_id.to_string(),
+                    agent_nickname: Some("Robie".to_string()),
+                    agent_role: Some("explorer".to_string()),
+                }],
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
@@ -12544,8 +12575,7 @@ async fn assert_hook_events_snapshot(
                     },
                     codex_protocol::protocol::HookOutputEntry {
                         kind: codex_protocol::protocol::HookOutputEntryKind::Context,
-                        text: "BD_SESSION_CONTEXT v1\nRepoRoot: /tmp/repo\nQueue: open=12"
-                            .to_string(),
+                        text: "SESSION_CONTEXT v1\nRepoRoot: /tmp/repo\nQueue: open=12".to_string(),
                     },
                 ],
             },

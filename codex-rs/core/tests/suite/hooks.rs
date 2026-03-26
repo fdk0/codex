@@ -271,7 +271,7 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
                 },
                 {
                     "conditions": {
-                        "profiles": ["bd-worker"]
+                        "profiles": ["worker-profile"]
                     },
                     "hooks": [{
                         "type": "command",
@@ -328,6 +328,76 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
     Ok(())
 }
 
+fn write_profile_scoped_session_start_hooks(
+    home: &Path,
+    active_profile: &str,
+    general_context: &str,
+    scoped_context: &str,
+) -> Result<()> {
+    let general_script_path = home.join("session_start_general.py");
+    let scoped_script_path = home.join("session_start_scoped.py");
+    let general_log_path = home.join("session_start_general_log.jsonl");
+    let scoped_log_path = home.join("session_start_scoped_log.jsonl");
+    let general_context_json =
+        serde_json::to_string(general_context).context("serialize general hook context")?;
+    let scoped_context_json =
+        serde_json::to_string(scoped_context).context("serialize scoped hook context")?;
+    let make_script = |log_path: &Path, additional_context_json: &str| {
+        format!(
+            r#"import json
+from pathlib import Path
+import sys
+
+payload = json.load(sys.stdin)
+with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload) + "\n")
+
+print({additional_context_json})
+"#,
+            log_path = log_path.display(),
+            additional_context_json = additional_context_json,
+        )
+    };
+    let hooks = serde_json::json!({
+        "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "^(startup)$",
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!("python3 {}", general_script_path.display()),
+                        "statusMessage": "running general session start hook",
+                    }]
+                },
+                {
+                    "matcher": "^(startup|resume)$",
+                    "conditions": {
+                        "profiles": [active_profile]
+                    },
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!("python3 {}", scoped_script_path.display()),
+                        "statusMessage": "running scoped session start hook",
+                    }]
+                }
+            ]
+        }
+    });
+
+    fs::write(
+        &general_script_path,
+        make_script(&general_log_path, &general_context_json),
+    )
+    .context("write general session start hook script")?;
+    fs::write(
+        &scoped_script_path,
+        make_script(&scoped_log_path, &scoped_context_json),
+    )
+    .context("write scoped session start hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
+    Ok(())
+}
+
 fn write_after_compaction_hook(home: &Path, additional_context: &str) -> Result<()> {
     let script_path = home.join("after_compaction_hook.py");
     let log_path = home.join("after_compaction_hook_log.jsonl");
@@ -355,7 +425,7 @@ print(json.dumps({{
         "hooks": {
             "AfterCompaction": [{
                 "conditions": {
-                    "profiles": ["bd-worker"]
+                    "profiles": ["worker-profile"]
                 },
                 "hooks": [{
                     "type": "command",
@@ -646,6 +716,87 @@ async fn session_start_hook_sees_materialized_transcript_path() -> Result<()> {
         Some(false)
     );
     assert_eq!(hook_inputs[0].get("exists"), Some(&Value::Bool(true)));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_start_hooks_support_general_and_profile_scoped_handlers() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let request_log = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "hooked startup response"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+
+    let active_profile = "driver-profile";
+    let general_context = "GLOBAL_SESSION_GUARD v1";
+    let scoped_context = "PROFILE_SESSION_CONTEXT v1";
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            if let Err(error) = write_profile_scoped_session_start_hooks(
+                home,
+                active_profile,
+                general_context,
+                scoped_context,
+            ) {
+                panic!("failed to write scoped session start hook fixture: {error}");
+            }
+        })
+        .with_config(|config| {
+            config.active_profile = Some(active_profile.to_string());
+            config
+                .features
+                .enable(Feature::CodexHooks)
+                .expect("test config should allow feature update");
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("hello startup hooks").await?;
+
+    let general_inputs = read_hook_log(test.codex_home_path(), "session_start_general_log.jsonl")?;
+    let scoped_inputs = read_hook_log(test.codex_home_path(), "session_start_scoped_log.jsonl")?;
+
+    assert_eq!(general_inputs.len(), 1);
+    assert_eq!(scoped_inputs.len(), 1);
+    assert_eq!(
+        general_inputs[0]
+            .get("active_profile")
+            .and_then(Value::as_str),
+        Some(active_profile)
+    );
+    assert_eq!(
+        scoped_inputs[0]
+            .get("active_profile")
+            .and_then(Value::as_str),
+        Some(active_profile)
+    );
+    assert_eq!(
+        general_inputs[0].get("source").and_then(Value::as_str),
+        Some("startup")
+    );
+    assert_eq!(
+        scoped_inputs[0].get("source").and_then(Value::as_str),
+        Some("startup")
+    );
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 1);
+    let request_body = requests[0].body_json().to_string();
+    assert!(
+        request_body.contains(general_context),
+        "startup request should include general session-start context",
+    );
+    assert!(
+        request_body.contains(scoped_context),
+        "startup request should include profile-scoped session-start context",
+    );
 
     Ok(())
 }
@@ -1412,7 +1563,7 @@ async fn user_prompt_submit_hooks_support_general_and_profile_scoped_handlers() 
             }
         })
         .with_config(|config| {
-            config.active_profile = Some("bd-worker".to_string());
+            config.active_profile = Some("worker-profile".to_string());
             config
                 .features
                 .enable(Feature::CodexHooks)
@@ -1437,13 +1588,13 @@ async fn user_prompt_submit_hooks_support_general_and_profile_scoped_handlers() 
         general_inputs[0]
             .get("active_profile")
             .and_then(Value::as_str),
-        Some("bd-worker")
+        Some("worker-profile")
     );
     assert_eq!(
         scoped_inputs[0]
             .get("active_profile")
             .and_then(Value::as_str),
-        Some("bd-worker")
+        Some("worker-profile")
     );
 
     Ok(())
@@ -1486,7 +1637,7 @@ async fn after_compaction_hooks_can_inject_profile_scoped_context() -> Result<()
             }
         })
         .with_config(move |config| {
-            config.active_profile = Some("bd-worker".to_string());
+            config.active_profile = Some("worker-profile".to_string());
             config.model_provider = model_provider;
             config.compact_prompt = Some(SUMMARIZATION_PROMPT.to_string());
             config
@@ -1505,7 +1656,7 @@ async fn after_compaction_hooks_can_inject_profile_scoped_context() -> Result<()
     assert_eq!(hook_inputs.len(), 1);
     assert_eq!(
         hook_inputs[0].get("active_profile").and_then(Value::as_str),
-        Some("bd-worker")
+        Some("worker-profile")
     );
     assert_eq!(
         hook_inputs[0].get("source").and_then(Value::as_str),

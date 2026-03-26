@@ -286,13 +286,13 @@ mod tests {
     #[test]
     fn preview_filters_after_compaction_by_source_and_profile() {
         let handlers = vec![
-            handler(Some("^auto$"), Some("bd-worker")),
-            handler(Some("^manual$"), Some("bd-worker")),
+            handler(Some("^auto$"), Some("worker-profile")),
+            handler(Some("^manual$"), Some("worker-profile")),
         ];
 
         let runs = preview(
             &handlers,
-            &request(AfterCompactionSource::Auto, Some("bd-worker")),
+            &request(AfterCompactionSource::Auto, Some("worker-profile")),
         );
 
         assert_eq!(runs.len(), 1);

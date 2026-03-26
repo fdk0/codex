@@ -797,6 +797,7 @@ mod tests {
             path: None,
             cwd: PathBuf::from("/tmp"),
             cli_version: "test".to_string(),
+            parent_thread_id: None,
             agent_nickname: None,
             agent_role: None,
             source,

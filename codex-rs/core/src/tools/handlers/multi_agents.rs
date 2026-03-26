@@ -545,6 +545,14 @@ mod spawn {
             }
             None => (None, None, None),
         };
+        let effective_model = agent_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.model.clone())
+            .unwrap_or_else(|| model.clone().unwrap_or_default());
+        let effective_reasoning_effort = agent_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.reasoning_effort)
+            .unwrap_or(reasoning_effort.unwrap_or_default());
         let nickname = new_agent_nickname.clone();
         session
             .send_event(
@@ -556,8 +564,8 @@ mod spawn {
                     new_agent_nickname,
                     new_agent_role,
                     prompt,
-                    model: model.clone().unwrap_or_default(),
-                    reasoning_effort: reasoning_effort.unwrap_or_default(),
+                    model: effective_model,
+                    reasoning_effort: effective_reasoning_effort,
                     // Preserve the exact spawn mode. The TUI relies on this to render
                     // watchdog rows distinctly, mark them idle between check-ins, and
                     // prune superseded watchdog registrations. Defaulting this to
