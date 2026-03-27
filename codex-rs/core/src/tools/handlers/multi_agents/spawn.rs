@@ -89,6 +89,7 @@ impl ToolHandler for Handler {
                 )?),
                 SpawnAgentOptions {
                     fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
+                    wake_parent_on_completion: args.wake_parent_on_completion,
                 },
             )
             .await
@@ -173,6 +174,7 @@ struct SpawnAgentArgs {
     agent_type: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
+    wake_parent_on_completion: Option<bool>,
     #[serde(default)]
     fork_context: bool,
 }

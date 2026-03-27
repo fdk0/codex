@@ -1156,6 +1156,15 @@ fn spawn_agent_common_properties(config: &ToolsConfig) -> BTreeMap<String, JsonS
                 ),
             },
         ),
+        (
+            "wake_parent_on_completion".to_string(),
+            JsonSchema::Boolean {
+                description: Some(
+                    "When true, Codex wakes the spawning parent thread after this child reaches a terminal status so the parent can continue without polling. When omitted, Codex uses the configured agents.wake_parent_on_completion_default policy."
+                        .to_string(),
+                ),
+            },
+        ),
     ])
 }
 
@@ -1189,6 +1198,9 @@ fn spawn_agent_tool_description(
 
 ### After you delegate
 - Call wait_agent very sparingly. Only call wait_agent when you need the result immediately for the next critical-path step and you are blocked until it returns.
+- Prefer wake_parent_on_completion=true for long-running or uncertain-duration children, then either continue non-overlapping work or end the turn and resume when the wake arrives.
+- If wake_parent_on_completion is omitted, Codex may still treat the child as wake-enabled depending on agents.wake_parent_on_completion_default.
+- On configurations with agents.wait_on_wake_enabled = "reject", wait_agent against wake-enabled children may fail immediately; use wait_agent only when you explicitly want same-turn polling behavior.
 - Do not redo delegated subagent tasks yourself; focus on integrating results or tackling non-overlapping work.
 - While the subagent is running in the background, do meaningful non-overlapping work immediately.
 - Do not repeatedly wait by reflex.
@@ -1573,7 +1585,7 @@ fn wait_agent_tool_parameters_v1() -> JsonSchema {
         "timeout_ms".to_string(),
         JsonSchema::Number {
             description: Some(format!(
-                "Optional timeout in milliseconds. Defaults to {DEFAULT_WAIT_TIMEOUT_MS}, min {MIN_WAIT_TIMEOUT_MS}, max {MAX_WAIT_TIMEOUT_MS}. Prefer longer waits (minutes) to avoid busy polling."
+                "Optional timeout in milliseconds. Defaults to {DEFAULT_WAIT_TIMEOUT_MS}, min {MIN_WAIT_TIMEOUT_MS}, max {MAX_WAIT_TIMEOUT_MS}. Prefer longer waits (minutes) to avoid busy polling. On configurations with agents.wait_on_wake_enabled = \"reject\", wake-enabled child agent ids may return an immediate correction instead of blocking."
             )),
         },
     );
@@ -1601,7 +1613,7 @@ fn wait_agent_tool_parameters_v2() -> JsonSchema {
         "timeout_ms".to_string(),
         JsonSchema::Number {
             description: Some(format!(
-                "Optional timeout in milliseconds. Defaults to {DEFAULT_WAIT_TIMEOUT_MS}, min {MIN_WAIT_TIMEOUT_MS}, max {MAX_WAIT_TIMEOUT_MS}. Prefer longer waits (minutes) to avoid busy polling."
+                "Optional timeout in milliseconds. Defaults to {DEFAULT_WAIT_TIMEOUT_MS}, min {MIN_WAIT_TIMEOUT_MS}, max {MAX_WAIT_TIMEOUT_MS}. Prefer longer waits (minutes) to avoid busy polling. On configurations with agents.wait_on_wake_enabled = \"reject\", wake-enabled child agent ids may return an immediate correction instead of blocking."
             )),
         },
     );
@@ -1616,7 +1628,7 @@ fn wait_agent_tool_parameters_v2() -> JsonSchema {
 fn create_wait_agent_tool_v1() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
-        description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status."
+        description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Use wait_agent for short, same-turn-needed work only. Wake-enabled child agents may reject wait_agent under the configured agents.wait_on_wake_enabled policy; when that happens, end the turn and rely on the automatic wake path."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -1628,7 +1640,7 @@ fn create_wait_agent_tool_v1() -> ToolSpec {
 fn create_wait_agent_tool_v2() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
-        description: "Wait for agents to reach a final status. Returns a brief wait summary instead of the agent's final content. Returns a timeout summary when no agent reaches a final status before the deadline."
+        description: "Wait for agents to reach a final status. Returns a brief wait summary instead of the agent's final content. Returns a timeout summary when no agent reaches a final status before the deadline. Use wait_agent for short, same-turn-needed work only. Wake-enabled child agents may reject wait_agent under the configured agents.wait_on_wake_enabled policy; when that happens, end the turn and rely on the automatic wake path."
             .to_string(),
         strict: false,
         defer_loading: None,

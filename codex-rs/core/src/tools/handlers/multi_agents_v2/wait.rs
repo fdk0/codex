@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent::status::is_final;
+use crate::config::types::AgentWaitOnWakeEnabledBehavior;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -46,6 +47,38 @@ impl ToolHandler for Handler {
                 agent_nickname: agent_metadata.agent_nickname,
                 agent_role: agent_metadata.agent_role,
             });
+        }
+        let mut wake_enabled_children = session
+            .services
+            .agent_control
+            .wake_enabled_children_for_parent(session.conversation_id, &receiver_thread_ids)
+            .await;
+        let mut active_wake_enabled_children = Vec::with_capacity(wake_enabled_children.len());
+        for child_thread_id in wake_enabled_children.drain(..) {
+            let status = session
+                .services
+                .agent_control
+                .get_status(child_thread_id)
+                .await;
+            if !is_final(&status) {
+                active_wake_enabled_children.push(child_thread_id);
+            }
+        }
+        if !active_wake_enabled_children.is_empty()
+            && matches!(
+                turn.config.agent_wait_on_wake_enabled_behavior,
+                AgentWaitOnWakeEnabledBehavior::Reject
+            )
+        {
+            let ids = active_wake_enabled_children
+                .iter()
+                .map(ThreadId::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(FunctionCallError::RespondToModel(format!(
+                "wait is disabled for wake-enabled child agents by current configuration. These child threads already have wake_parent_on_completion enabled for parent {}: {ids}. End the current turn and rely on the automatic wake path instead, or set agents.wait_on_wake_enabled = \"allow\" / spawn the child with wake_parent_on_completion=false when you explicitly want polling.",
+                session.conversation_id
+            )));
         }
 
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);

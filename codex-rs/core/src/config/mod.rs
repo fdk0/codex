@@ -1,6 +1,8 @@
 use crate::auth::AuthCredentialsStoreMode;
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
+use crate::config::types::AgentWaitOnWakeEnabledBehavior;
+use crate::config::types::AgentWakeDescendantPolicy;
 use crate::config::types::AppsConfigToml;
 use crate::config::types::DEFAULT_OTEL_ENVIRONMENT;
 use crate::config::types::History;
@@ -403,6 +405,12 @@ pub struct Config {
     pub agent_max_threads: Option<usize>,
     /// Maximum runtime in seconds for agent job workers before they are failed.
     pub agent_job_max_runtime_seconds: Option<u64>,
+    /// Default value used when `spawn_agent` omits `wake_parent_on_completion`.
+    pub agent_wake_parent_on_completion_default: bool,
+    /// Whether waiting on wake-enabled child agents is allowed or rejected.
+    pub agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior,
+    /// Whether a child may wake its parent before all descendants finish.
+    pub agent_wake_descendant_policy: AgentWakeDescendantPolicy,
 
     /// Maximum nesting depth allowed for spawned agent threads.
     pub agent_max_depth: i32,
@@ -1548,6 +1556,14 @@ pub struct AgentsToml {
     /// Default maximum runtime in seconds for agent job workers.
     #[schemars(range(min = 1))]
     pub job_max_runtime_seconds: Option<u64>,
+    /// Default value used when `spawn_agent` omits `wake_parent_on_completion`.
+    pub wake_parent_on_completion_default: Option<bool>,
+    /// Whether `wait_agent(...)` is allowed for child agents that already wake their parent.
+    #[serde(default)]
+    pub wait_on_wake_enabled: AgentWaitOnWakeEnabledBehavior,
+    /// Whether a child may wake its parent before all descendants finish.
+    #[serde(default)]
+    pub wake_descendant_policy: AgentWakeDescendantPolicy,
 
     /// User-defined role declarations keyed by role name.
     ///
@@ -2315,6 +2331,23 @@ impl Config {
                 "agents.job_max_runtime_seconds must be at least 1",
             ));
         }
+        let agent_wake_parent_on_completion_default = cfg
+            .agents
+            .as_ref()
+            .and_then(|agents| agents.wake_parent_on_completion_default)
+            .unwrap_or(false);
+        let agent_wait_on_wake_enabled_behavior = cfg
+            .agents
+            .as_ref()
+            .map_or_else(AgentWaitOnWakeEnabledBehavior::default, |agents| {
+                agents.wait_on_wake_enabled
+            });
+        let agent_wake_descendant_policy = cfg
+            .agents
+            .as_ref()
+            .map_or_else(AgentWakeDescendantPolicy::default, |agents| {
+                agents.wake_descendant_policy
+            });
         if let Some(max_runtime_seconds) = agent_job_max_runtime_seconds
             && max_runtime_seconds > i64::MAX as u64
         {
@@ -2593,10 +2626,13 @@ impl Config {
                 .collect(),
             tool_output_token_limit: cfg.tool_output_token_limit,
             agent_max_threads,
+            agent_job_max_runtime_seconds,
+            agent_wake_parent_on_completion_default,
+            agent_wait_on_wake_enabled_behavior,
+            agent_wake_descendant_policy,
             agent_max_depth,
             agent_roles,
             memories: cfg.memories.unwrap_or_default().into(),
-            agent_job_max_runtime_seconds,
             codex_home,
             sqlite_home,
             log_dir,

@@ -5,6 +5,7 @@ use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::resolve_role_config;
 use crate::agent::status::is_final;
 use crate::codex_thread::ThreadConfigSnapshot;
+use crate::config::types::AgentWakeDescendantPolicy;
 use crate::context_manager::is_user_turn_boundary;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
@@ -39,8 +40,10 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Weak;
+use tokio::sync::Mutex;
 use tokio::sync::watch;
 use tracing::warn;
+use uuid::Uuid;
 
 const AGENT_NAMES: &str = include_str!("agent_names.txt");
 const FORKED_SPAWN_AGENT_OUTPUT_MESSAGE: &str = "You are the newly spawned agent. The prior conversation history was forked from your parent agent. Treat the next user message as your new task, and use the forked history only as background context.";
@@ -49,6 +52,18 @@ const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_parent_spawn_call_id: Option<String>,
+    pub(crate) wake_parent_on_completion: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct ParentWakeSubscription {
+    parent_thread_id: ThreadId,
+    wake_parent_on_completion: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ParentWakePreference {
+    wake_parent_on_completion: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +118,8 @@ pub(crate) struct AgentControl {
     /// `ThreadManagerState -> CodexThread -> Session -> SessionServices -> ThreadManagerState`.
     manager: Weak<ThreadManagerState>,
     state: Arc<AgentRegistry>,
+    parent_wake_subscriptions: Arc<Mutex<HashMap<ThreadId, ParentWakeSubscription>>>,
+    parent_wake_preferences: Arc<Mutex<HashMap<ThreadId, ParentWakePreference>>>,
 }
 
 impl AgentControl {
@@ -110,7 +127,9 @@ impl AgentControl {
     pub(crate) fn new(manager: Weak<ThreadManagerState>) -> Self {
         Self {
             manager,
-            ..Default::default()
+            state: Arc::new(AgentRegistry::default()),
+            parent_wake_subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            parent_wake_preferences: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -147,6 +166,9 @@ impl AgentControl {
     ) -> CodexResult<LiveAgent> {
         let state = self.upgrade()?;
         let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
+        let wake_parent_on_completion = options
+            .wake_parent_on_completion
+            .unwrap_or(config.agent_wake_parent_on_completion_default);
         let inherited_shell_snapshot = self
             .inherited_shell_snapshot_for_source(&state, session_source.as_ref())
             .await;
@@ -269,8 +291,17 @@ impl AgentControl {
             notification_source.as_ref(),
         )
         .await;
+        self.register_parent_wake_subscription(
+            new_thread.thread_id,
+            notification_source.as_ref(),
+            wake_parent_on_completion,
+        )
+        .await;
 
-        self.send_input(new_thread.thread_id, items).await?;
+        if let Err(err) = self.send_input(new_thread.thread_id, items).await {
+            self.clear_parent_wake_state(new_thread.thread_id).await;
+            return Err(err);
+        }
         let child_reference = agent_metadata
             .agent_path
             .as_ref()
@@ -443,6 +474,20 @@ impl AgentControl {
         // Resumed threads are re-registered in-memory and need the same listener
         // attachment path as freshly spawned threads.
         state.notify_thread_created(resumed_thread.thread_id);
+        let resumed_snapshot = resumed_thread.thread.config_snapshot().await;
+        let wake_parent_on_completion = self
+            .wake_parent_on_completion_for_thread(
+                resumed_thread.thread_id,
+                Some(&notification_source),
+                resumed_snapshot.agent_wake_parent_on_completion_default,
+            )
+            .await;
+        self.register_parent_wake_subscription(
+            resumed_thread.thread_id,
+            Some(&notification_source),
+            wake_parent_on_completion,
+        )
+        .await;
         let child_reference = agent_metadata
             .agent_path
             .as_ref()
@@ -546,6 +591,7 @@ impl AgentControl {
         result: CodexResult<String>,
     ) -> CodexResult<String> {
         if matches!(result, Err(CodexErr::InternalAgentDied)) {
+            self.clear_parent_wake_state(agent_id).await;
             let _ = state.remove_thread(&agent_id).await;
             self.state.release_spawned_thread(agent_id);
         }
@@ -567,6 +613,7 @@ impl AgentControl {
         } else {
             state.send_op(agent_id, Op::Shutdown {}).await
         };
+        self.clear_parent_wake_state(agent_id).await;
         let _ = state.remove_thread(&agent_id).await;
         self.state.release_spawned_thread(agent_id);
         result
@@ -817,10 +864,28 @@ impl AgentControl {
                 return;
             }
 
+            let wake_parent_on_completion = control
+                .parent_wake_subscriptions
+                .lock()
+                .await
+                .get(&child_thread_id)
+                .map(|subscription| subscription.wake_parent_on_completion)
+                .unwrap_or(false);
+
             let Ok(state) = control.upgrade() else {
                 return;
             };
             let child_thread = state.get_thread(child_thread_id).await.ok();
+            if let Some(child_thread) = child_thread.as_ref() {
+                let child_snapshot = child_thread.config_snapshot().await;
+                if matches!(
+                    child_snapshot.agent_wake_descendant_policy,
+                    AgentWakeDescendantPolicy::LeafOnly
+                ) && control.has_active_descendants(child_thread_id).await
+                {
+                    return;
+                }
+            }
             let message = format_subagent_notification_message(child_reference.as_str(), &status);
             if child_agent_path.is_some()
                 && child_thread
@@ -843,18 +908,19 @@ impl AgentControl {
                     parent_agent_path,
                     Vec::new(),
                     message,
-                    /*trigger_turn*/ false,
+                    wake_parent_on_completion,
                 );
                 let _ = control
                     .send_inter_agent_communication(parent_thread_id, communication)
                     .await;
                 return;
             }
-            let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
-                return;
-            };
-            parent_thread
-                .inject_user_message_without_turn(message)
+            control
+                .notify_parent_with_contextual_message(
+                    parent_thread_id,
+                    message,
+                    wake_parent_on_completion,
+                )
                 .await;
         });
     }
@@ -897,6 +963,86 @@ impl AgentControl {
             last_task_message: None,
         };
         Ok((session_source, agent_metadata))
+    }
+
+    async fn register_parent_wake_subscription(
+        &self,
+        child_thread_id: ThreadId,
+        session_source: Option<&SessionSource>,
+        wake_parent_on_completion: bool,
+    ) {
+        let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id, ..
+        })) = session_source
+        else {
+            return;
+        };
+        self.parent_wake_preferences.lock().await.insert(
+            child_thread_id,
+            ParentWakePreference {
+                wake_parent_on_completion,
+            },
+        );
+        self.parent_wake_subscriptions.lock().await.insert(
+            child_thread_id,
+            ParentWakeSubscription {
+                parent_thread_id: *parent_thread_id,
+                wake_parent_on_completion,
+            },
+        );
+    }
+
+    async fn wake_parent_on_completion_for_thread(
+        &self,
+        child_thread_id: ThreadId,
+        session_source: Option<&SessionSource>,
+        fallback_default: bool,
+    ) -> bool {
+        if let Some(preference) = self
+            .parent_wake_preferences
+            .lock()
+            .await
+            .get(&child_thread_id)
+            .copied()
+        {
+            return preference.wake_parent_on_completion;
+        }
+
+        matches!(
+            session_source,
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }))
+        ) && fallback_default
+    }
+
+    async fn clear_parent_wake_state(&self, child_thread_id: ThreadId) {
+        self.parent_wake_subscriptions
+            .lock()
+            .await
+            .remove(&child_thread_id);
+        self.parent_wake_preferences
+            .lock()
+            .await
+            .remove(&child_thread_id);
+    }
+
+    pub(crate) async fn wake_enabled_children_for_parent(
+        &self,
+        parent_thread_id: ThreadId,
+        child_thread_ids: &[ThreadId],
+    ) -> Vec<ThreadId> {
+        let subscriptions = self.parent_wake_subscriptions.lock().await;
+        child_thread_ids
+            .iter()
+            .copied()
+            .filter(|child_thread_id| {
+                subscriptions
+                    .get(child_thread_id)
+                    .is_some_and(|subscription| {
+                        subscription.parent_thread_id == parent_thread_id
+                            && subscription.wake_parent_on_completion
+                    })
+            })
+            .collect()
     }
 
     fn upgrade(&self) -> CodexResult<Arc<ThreadManagerState>> {
@@ -1022,6 +1168,62 @@ impl AgentControl {
         }
     }
 
+    async fn notify_parent_with_contextual_message(
+        &self,
+        parent_thread_id: ThreadId,
+        message: String,
+        trigger_turn: bool,
+    ) {
+        let Ok(state) = self.upgrade() else {
+            return;
+        };
+        let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
+            return;
+        };
+        if !trigger_turn {
+            parent_thread
+                .inject_user_message_without_turn(message)
+                .await;
+            return;
+        }
+
+        let pending_item = ResponseInputItem::Message {
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText { text: message }],
+        };
+        if parent_thread
+            .codex
+            .session
+            .inject_response_items(vec![pending_item.clone()])
+            .await
+            .is_ok()
+        {
+            return;
+        }
+
+        parent_thread
+            .codex
+            .session
+            .queue_response_items_for_next_turn(vec![pending_item])
+            .await;
+
+        let turn_context = parent_thread
+            .codex
+            .session
+            .new_default_turn_with_sub_id(format!("agent-wake-{}", Uuid::new_v4()))
+            .await;
+        parent_thread
+            .codex
+            .session
+            .maybe_emit_unknown_model_warning_for_turn(turn_context.as_ref())
+            .await;
+        parent_thread
+            .codex
+            .session
+            .spawn_task(turn_context, Vec::new(), crate::tasks::RegularTask::new())
+            .await;
+    }
+
     async fn live_thread_spawn_descendants(
         &self,
         root_thread_id: ThreadId,
@@ -1046,6 +1248,18 @@ impl AgentControl {
         }
 
         Ok(descendants)
+    }
+
+    async fn has_active_descendants(&self, owner_thread_id: ThreadId) -> bool {
+        let Ok(descendants) = self.live_thread_spawn_descendants(owner_thread_id).await else {
+            return false;
+        };
+        for descendant_id in descendants {
+            if !is_final(&self.get_status(descendant_id).await) {
+                return true;
+            }
+        }
+        false
     }
 }
 

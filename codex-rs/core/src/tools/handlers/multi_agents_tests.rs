@@ -5,6 +5,7 @@ use crate::ThreadManager;
 use crate::built_in_model_providers;
 use crate::codex::make_session_and_context;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
+use crate::config::types::AgentWaitOnWakeEnabledBehavior;
 use crate::config::types::ShellEnvironmentPolicy;
 use crate::function_tool::FunctionCallError;
 use crate::protocol::AgentStatus;
@@ -1772,6 +1773,59 @@ async fn wait_agent_rejects_empty_targets() {
 }
 
 #[tokio::test]
+async fn wait_agent_rejects_wake_enabled_child_agents_when_configured() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let mut config = (*turn.config).clone();
+    config.agent_wait_on_wake_enabled_behavior = AgentWaitOnWakeEnabledBehavior::Reject;
+    turn.config = Arc::new(config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let spawn_output = SpawnAgentHandler
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "hello child",
+                "wake_parent_on_completion": true
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+    let (content, _) = expect_text_output(spawn_output);
+    let spawn_result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn result should be json");
+
+    let Err(err) = WaitAgentHandler
+        .handle(invocation(
+            session,
+            turn,
+            "wait_agent",
+            function_payload(json!({
+                "targets": [spawn_result.agent_id],
+                "timeout_ms": 10000
+            })),
+        ))
+        .await
+    else {
+        panic!("wait should be rejected for wake-enabled child");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("expected respond-to-model error");
+    };
+    assert!(message.contains("disabled for wake-enabled child agents"));
+    assert!(message.contains("wake_parent_on_completion"));
+}
+
+#[tokio::test]
 async fn multi_agent_v2_wait_agent_accepts_targets_argument() {
     let (mut session, mut turn) = make_session_and_context().await;
     let target = ThreadId::new().to_string();
@@ -1804,6 +1858,56 @@ async fn multi_agent_v2_wait_agent_accepts_targets_argument() {
         }
     );
     assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_rejects_wake_enabled_child_agents_when_configured() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.agent_wait_on_wake_enabled_behavior = AgentWaitOnWakeEnabledBehavior::Reject;
+    turn.config = Arc::new(config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let _ = SpawnAgentHandlerV2
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "wake_child",
+                "wake_parent_on_completion": true
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+
+    let Err(err) = WaitAgentHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "wait_agent",
+            function_payload(json!({
+                "targets": ["wake_child"],
+                "timeout_ms": 10000
+            })),
+        ))
+        .await
+    else {
+        panic!("wait should be rejected for wake-enabled child");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("expected respond-to-model error");
+    };
+    assert!(message.contains("disabled for wake-enabled child agents"));
+    assert!(message.contains("wake_parent_on_completion"));
 }
 
 #[tokio::test]

@@ -356,6 +356,31 @@ impl ThreadManager {
         self.state.models_manager.clone()
     }
 
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn spawn_new_thread_with_source_for_tests(
+        &self,
+        config: Config,
+        agent_control: AgentControl,
+        session_source: SessionSource,
+        persist_extended_history: bool,
+        metrics_service_name: Option<String>,
+        inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
+        inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
+    ) -> CodexResult<NewThread> {
+        self.state
+            .spawn_new_thread_with_source(
+                config,
+                agent_control,
+                session_source,
+                persist_extended_history,
+                metrics_service_name,
+                inherited_shell_snapshot,
+                inherited_exec_policy,
+            )
+            .await
+    }
+
     pub async fn list_models(
         &self,
         refresh_strategy: crate::models_manager::manager::RefreshStrategy,

@@ -31,6 +31,20 @@
       },
       "type": "object"
     },
+    "AgentWaitOnWakeEnabledBehavior": {
+      "enum": [
+        "allow",
+        "reject"
+      ],
+      "type": "string"
+    },
+    "AgentWakeDescendantPolicy": {
+      "enum": [
+        "immediate",
+        "leaf_only"
+      ],
+      "type": "string"
+    },
     "AgentsToml": {
       "additionalProperties": {
         "$ref": "#/definitions/AgentRoleToml"
@@ -53,6 +67,28 @@
           "format": "uint",
           "minimum": 1.0,
           "type": "integer"
+        },
+        "wait_on_wake_enabled": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentWaitOnWakeEnabledBehavior"
+            }
+          ],
+          "default": "allow",
+          "description": "Whether `wait_agent(...)` is allowed for child agents that already wake their parent."
+        },
+        "wake_descendant_policy": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentWakeDescendantPolicy"
+            }
+          ],
+          "default": "immediate",
+          "description": "Whether a child may wake its parent before all descendants finish."
+        },
+        "wake_parent_on_completion_default": {
+          "description": "Default value used when `spawn_agent` omits `wake_parent_on_completion`.",
+          "type": "boolean"
         }
       },
       "type": "object"

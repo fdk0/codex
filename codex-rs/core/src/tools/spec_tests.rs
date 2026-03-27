@@ -454,6 +454,7 @@ fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
         panic!("spawn_agent should use object params");
     };
     assert!(properties.contains_key("task_name"));
+    assert!(properties.contains_key("wake_parent_on_completion"));
     assert_eq!(required.as_ref(), Some(&vec!["task_name".to_string()]));
     let output_schema = output_schema
         .as_ref()
@@ -523,6 +524,13 @@ fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
     let output_schema = output_schema
         .as_ref()
         .expect("wait_agent should define output schema");
+    let Some(JsonSchema::Number {
+        description: Some(timeout_description),
+    }) = properties.get("timeout_ms")
+    else {
+        panic!("wait_agent timeout_ms should include a description");
+    };
+    assert!(timeout_description.contains("agents.wait_on_wake_enabled = \"reject\""));
     assert_eq!(
         output_schema["properties"]["message"]["description"],
         json!("Brief wait summary without the agent's final content.")

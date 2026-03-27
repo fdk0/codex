@@ -6,6 +6,7 @@ use crate::agent::agent_status_from_event;
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::ConfigBuilder;
+use crate::config::types::AgentWakeDescendantPolicy;
 use crate::config_loader::LoaderOverrides;
 use crate::contextual_user_message::SUBAGENT_NOTIFICATION_OPEN_TAG;
 use assert_matches::assert_matches;
@@ -599,6 +600,7 @@ async fn spawn_agent_can_fork_parent_thread_history() {
             })),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id),
+                wake_parent_on_completion: None,
             },
         )
         .await
@@ -684,6 +686,7 @@ async fn spawn_agent_fork_injects_output_for_parent_spawn_call() {
             })),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
+                wake_parent_on_completion: None,
             },
         )
         .await
@@ -756,6 +759,7 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
             })),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
+                wake_parent_on_completion: None,
             },
         )
         .await
@@ -1237,6 +1241,205 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
             false,
         )
     ));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_completion_triggers_turn_when_child_is_wake_enabled() {
+    let harness = AgentControlHarness::new().await;
+    let (_root_thread_id, root_thread) = harness.start_thread().await;
+    let (worker_thread_id, _worker_thread) = harness.start_thread().await;
+    let mut tester_config = harness.config.clone();
+    let _ = tester_config.features.enable(Feature::MultiAgentV2);
+    let tester_thread_id = harness
+        .manager
+        .start_thread(tester_config)
+        .await
+        .expect("tester thread should start")
+        .thread_id;
+    let tester_thread = harness
+        .manager
+        .get_thread(tester_thread_id)
+        .await
+        .expect("tester thread should exist");
+    let worker_path = AgentPath::root().join("worker_a").expect("worker path");
+    let tester_path = worker_path.join("tester").expect("tester path");
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: worker_thread_id,
+        depth: 2,
+        agent_path: Some(tester_path.clone()),
+        agent_nickname: None,
+        agent_role: Some("explorer".to_string()),
+    });
+    harness
+        .control
+        .register_parent_wake_subscription(
+            tester_thread_id,
+            Some(&session_source),
+            /*wake_parent_on_completion*/ true,
+        )
+        .await;
+    harness.control.maybe_start_completion_watcher(
+        tester_thread_id,
+        Some(session_source),
+        tester_path.to_string(),
+        Some(tester_path.clone()),
+    );
+    let tester_turn = tester_thread.codex.session.new_default_turn().await;
+    tester_thread
+        .codex
+        .session
+        .send_event(
+            tester_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: tester_turn.sub_id.clone(),
+                last_agent_message: Some("done".to_string()),
+            }),
+        )
+        .await;
+
+    let expected_message = crate::session_prefix::format_subagent_notification_message(
+        tester_path.as_str(),
+        &AgentStatus::Completed(Some("done".to_string())),
+    );
+    let expected = (
+        worker_thread_id,
+        Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                tester_path.clone(),
+                worker_path.clone(),
+                Vec::new(),
+                expected_message.clone(),
+                true,
+            ),
+        },
+    );
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let captured = harness
+                .manager
+                .captured_ops()
+                .into_iter()
+                .find(|entry| *entry == expected);
+            if captured == Some(expected.clone()) {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("completion watcher should trigger a direct-parent wake");
+
+    let root_history_items = root_thread
+        .codex
+        .session
+        .clone_history()
+        .await
+        .raw_items()
+        .to_vec();
+    assert!(!history_contains_assistant_inter_agent_communication(
+        &root_history_items,
+        &InterAgentCommunication::new(
+            tester_path,
+            AgentPath::root(),
+            Vec::new(),
+            expected_message,
+            true,
+        )
+    ));
+}
+
+#[tokio::test]
+async fn leaf_only_completion_suppresses_parent_wake_while_descendant_is_active() {
+    let harness = AgentControlHarness::new().await;
+    let (_root_thread_id, _root_thread) = harness.start_thread().await;
+    let (worker_thread_id, _worker_thread) = harness.start_thread().await;
+    let mut tester_config = harness.config.clone();
+    let _ = tester_config.features.enable(Feature::MultiAgentV2);
+    tester_config.agent_wake_descendant_policy = AgentWakeDescendantPolicy::LeafOnly;
+    let tester_thread_id = harness
+        .manager
+        .start_thread(tester_config.clone())
+        .await
+        .expect("tester thread should start")
+        .thread_id;
+    let tester_thread = harness
+        .manager
+        .get_thread(tester_thread_id)
+        .await
+        .expect("tester thread should exist");
+    let worker_path = AgentPath::root().join("worker_a").expect("worker path");
+    let tester_path = worker_path.join("tester").expect("tester path");
+    let tester_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: worker_thread_id,
+        depth: 2,
+        agent_path: Some(tester_path.clone()),
+        agent_nickname: None,
+        agent_role: Some("explorer".to_string()),
+    });
+    harness
+        .control
+        .register_parent_wake_subscription(
+            tester_thread_id,
+            Some(&tester_source),
+            /*wake_parent_on_completion*/ true,
+        )
+        .await;
+    harness.control.maybe_start_completion_watcher(
+        tester_thread_id,
+        Some(tester_source),
+        tester_path.to_string(),
+        Some(tester_path.clone()),
+    );
+
+    let leaf_path = tester_path.join("leaf").expect("leaf path");
+    let leaf_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: tester_thread_id,
+        depth: 3,
+        agent_path: Some(leaf_path),
+        agent_nickname: None,
+        agent_role: Some("awaiter".to_string()),
+    });
+    let _leaf_thread = harness
+        .manager
+        .spawn_new_thread_with_source_for_tests(
+            tester_config,
+            harness.control.clone(),
+            leaf_source,
+            /*persist_extended_history*/ false,
+            /*metrics_service_name*/ None,
+            /*inherited_shell_snapshot*/ None,
+            /*inherited_exec_policy*/ None,
+        )
+        .await
+        .expect("leaf thread should start");
+
+    let tester_turn = tester_thread.codex.session.new_default_turn().await;
+    tester_thread
+        .codex
+        .session
+        .send_event(
+            tester_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: tester_turn.sub_id.clone(),
+                last_agent_message: Some("done".to_string()),
+            }),
+        )
+        .await;
+
+    sleep(Duration::from_millis(150)).await;
+
+    assert!(
+        !harness
+            .manager
+            .captured_ops()
+            .into_iter()
+            .any(|(thread_id, op)| {
+                thread_id == worker_thread_id
+                    && matches!(op, Op::InterAgentCommunication { communication } if communication.trigger_turn)
+            }),
+        "leaf_only child should not wake its parent while descendants are still active"
+    );
 }
 
 #[tokio::test]

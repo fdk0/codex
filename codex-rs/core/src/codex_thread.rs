@@ -2,6 +2,8 @@ use crate::agent::AgentStatus;
 use crate::codex::Codex;
 use crate::codex::SteerInputError;
 use crate::config::ConstraintResult;
+use crate::config::types::AgentWaitOnWakeEnabledBehavior;
+use crate::config::types::AgentWakeDescendantPolicy;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
 use crate::file_watcher::WatchRegistration;
@@ -41,6 +43,9 @@ pub struct ThreadConfigSnapshot {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub personality: Option<Personality>,
     pub session_source: SessionSource,
+    pub agent_wake_parent_on_completion_default: bool,
+    pub agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior,
+    pub agent_wake_descendant_policy: AgentWakeDescendantPolicy,
 }
 
 pub struct CodexThread {

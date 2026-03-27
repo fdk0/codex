@@ -1127,6 +1127,15 @@ impl SessionConfiguration {
             reasoning_effort: self.collaboration_mode.reasoning_effort(),
             personality: self.personality,
             session_source: self.session_source.clone(),
+            agent_wake_parent_on_completion_default: self
+                .original_config_do_not_use
+                .agent_wake_parent_on_completion_default,
+            agent_wait_on_wake_enabled_behavior: self
+                .original_config_do_not_use
+                .agent_wait_on_wake_enabled_behavior,
+            agent_wake_descendant_policy: self
+                .original_config_do_not_use
+                .agent_wake_descendant_policy,
         }
     }
 
