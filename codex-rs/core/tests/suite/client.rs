@@ -42,6 +42,7 @@ use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::load_default_config_for_test;
 use core_test_support::responses::ev_completed;
@@ -898,6 +899,7 @@ async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
                 .features
                 .enabled(Feature::DefaultModeRequestUserInput),
         },
+        Arc::new(codex_exec_server::EnvironmentManager::new(None)),
     );
     let NewThread { thread: codex, .. } = thread_manager
         .start_thread(config)
@@ -1175,7 +1177,8 @@ async fn skills_append_to_developer_message() {
         .with_home(codex_home.clone())
         .with_auth(CodexAuth::from_api_key("Test API Key"))
         .with_config(move |config| {
-            config.cwd = codex_home_path;
+            config.cwd =
+                AbsolutePathBuf::try_from(codex_home_path).expect("absolute codex home");
         });
     let codex = builder
         .build(&server)
@@ -1378,7 +1381,7 @@ async fn user_turn_collaboration_mode_overrides_model_and_effort() -> anyhow::Re
                 text: "hello".into(),
                 text_elements: Vec::new(),
             }],
-            cwd: config.cwd.clone(),
+            cwd: config.cwd.clone().to_path_buf(),
             approval_policy: config.permissions.approval_policy.value(),
             approvals_reviewer: None,
             sandbox_policy: config.permissions.sandbox_policy.get().clone(),
@@ -1496,7 +1499,7 @@ fn user_turn_explicit_reasoning_summary_overrides_model_catalog_default() -> any
                     text: "hello".into(),
                     text_elements: Vec::new(),
                 }],
-                cwd: config.cwd.clone(),
+                cwd: config.cwd.clone().to_path_buf(),
                 approval_policy: config.permissions.approval_policy.value(),
                 approvals_reviewer: None,
                 sandbox_policy: config.permissions.sandbox_policy.get().clone(),

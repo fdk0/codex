@@ -5,6 +5,8 @@ use crate::engine::ClaudeHooksEngine;
 use crate::engine::CommandShell;
 use crate::events::after_compaction::AfterCompactionOutcome;
 use crate::events::after_compaction::AfterCompactionRequest;
+use crate::events::post_tool_use::PostToolUseOutcome;
+use crate::events::post_tool_use::PostToolUseRequest;
 use crate::events::pre_tool_use::PreToolUseOutcome;
 use crate::events::pre_tool_use::PreToolUseRequest;
 use crate::events::session_start::SessionStartOutcome;
@@ -103,6 +105,13 @@ impl Hooks {
         self.engine.preview_after_compaction(request)
     }
 
+    pub fn preview_post_tool_use(
+        &self,
+        request: &PostToolUseRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_post_tool_use(request)
+    }
+
     pub fn preview_pre_tool_use(
         &self,
         request: &PreToolUseRequest,
@@ -123,6 +132,10 @@ impl Hooks {
         request: AfterCompactionRequest,
     ) -> AfterCompactionOutcome {
         self.engine.run_after_compaction(request).await
+    }
+
+    pub async fn run_post_tool_use(&self, request: PostToolUseRequest) -> PostToolUseOutcome {
+        self.engine.run_post_tool_use(request).await
     }
 
     pub async fn run_pre_tool_use(&self, request: PreToolUseRequest) -> PreToolUseOutcome {

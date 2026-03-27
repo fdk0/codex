@@ -428,6 +428,7 @@
     "HookEventName": {
       "enum": [
         "preToolUse",
+        "postToolUse",
         "sessionStart",
         "afterCompaction",
         "userPromptSubmit",

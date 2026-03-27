@@ -91,7 +91,11 @@ impl ChatWidget {
             })
             .collect();
 
-        let view = SkillsToggleView::new(items, self.app_event_tx.clone(), self.config.cwd.clone());
+        let view = SkillsToggleView::new(
+            items,
+            self.app_event_tx.clone(),
+            self.config.cwd.clone().to_path_buf(),
+        );
         self.bottom_pane.show_view(Box::new(view));
     }
 
@@ -190,8 +194,6 @@ fn protocol_skill_to_core(skill: &ProtocolSkillMetadata) -> SkillMetadata {
                     .collect(),
             }),
         policy: None,
-        permission_profile: None,
-        managed_network_override: None,
         path_to_skills_md: skill.path.clone(),
         scope: skill.scope,
     }

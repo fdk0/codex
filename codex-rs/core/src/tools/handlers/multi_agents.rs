@@ -1028,7 +1028,7 @@ mod list_agents {
         let listings = session
             .services
             .agent_control
-            .list_agents(owner_thread_id, args.recursive, args.all)
+            .list_agents_for_owner(owner_thread_id, args.recursive, args.all)
             .await
             .map_err(collab_spawn_error)?;
 
@@ -1839,6 +1839,7 @@ mod tests {
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::InitialHistory;
     use codex_protocol::protocol::RolloutItem;
+    use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
     use serde::Deserialize;
     use serde_json::json;
@@ -3212,7 +3213,8 @@ mod tests {
             ..ShellEnvironmentPolicy::default()
         };
         let temp_dir = tempfile::tempdir().expect("temp dir");
-        turn.cwd = temp_dir.path().to_path_buf();
+        turn.cwd = AbsolutePathBuf::from_absolute_path(temp_dir.path())
+            .expect("temp dir should be absolute");
         turn.codex_linux_sandbox_exe = Some(PathBuf::from("/bin/echo"));
         let sandbox_policy = pick_allowed_sandbox_policy(
             &turn.config.permissions.sandbox_policy,

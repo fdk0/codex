@@ -112,6 +112,8 @@ trust_level = "trusted"
         "resume".to_string(),
         "--last".to_string(),
         "--no-alt-screen".to_string(),
+        "--enable".to_string(),
+        "tui_app_server".to_string(),
         "-C".to_string(),
         repo_root.display().to_string(),
         "-c".to_string(),
@@ -178,10 +180,17 @@ trust_level = "trusted"
             anyhow::bail!("timed out waiting for codex resume to exit");
         }
     };
+    let output_text = String::from_utf8_lossy(&output);
+    let interrupt_only_output = {
+        let trimmed_output = output_text.trim();
+        !trimmed_output.is_empty()
+            && trimmed_output
+                .chars()
+                .all(|character| character == '^' || character == 'C' || character.is_whitespace())
+    };
     anyhow::ensure!(
-        exit_code == 0 || exit_code == 130,
-        "unexpected exit code from codex resume: {exit_code}; output: {}",
-        String::from_utf8_lossy(&output)
+        exit_code == 0 || exit_code == 130 || (exit_code == 1 && interrupt_only_output),
+        "unexpected exit code from codex resume: {exit_code}; output: {output_text}",
     );
 
     let config_contents = std::fs::read_to_string(codex_home.path().join("config.toml"))?;

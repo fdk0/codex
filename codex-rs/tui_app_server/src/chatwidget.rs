@@ -90,9 +90,6 @@ use codex_core::config::types::Notifications;
 use codex_core::config::types::WindowsSandboxModeToml;
 use codex_core::config_loader::ConfigLayerStackOrdering;
 use codex_core::find_thread_name_by_id;
-use codex_core::git_info::current_branch_name;
-use codex_core::git_info::get_git_repo_root;
-use codex_core::git_info::local_git_branches;
 use codex_core::plugins::PluginsManager;
 use codex_core::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use codex_core::skills::model::SkillMetadata;
@@ -100,6 +97,12 @@ use codex_core::skills::model::SkillMetadata;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_features::FEATURES;
 use codex_features::Feature;
+#[cfg(test)]
+use codex_git_utils::CommitLogEntry;
+use codex_git_utils::current_branch_name;
+use codex_git_utils::get_git_repo_root;
+use codex_git_utils::local_git_branches;
+use codex_git_utils::recent_commits;
 use codex_otel::RuntimeMetricsSummary;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
@@ -207,6 +210,7 @@ use codex_terminal_detection::Multiplexer;
 use codex_terminal_detection::TerminalInfo;
 use codex_terminal_detection::TerminalName;
 use codex_terminal_detection::terminal_info;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_sleep_inhibitor::SleepInhibitor;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -1267,11 +1271,6 @@ fn exec_approval_request_from_params(
                     .collect()
             },
         ),
-        skill_metadata: params.skill_metadata.map(|metadata| {
-            codex_protocol::approvals::ExecApprovalRequestSkillMetadata {
-                path_to_skills_md: metadata.path_to_skills_md,
-            }
-        }),
         available_decisions: params.available_decisions.map(|decisions| {
             decisions
                 .into_iter()
@@ -1796,7 +1795,12 @@ impl ChatWidget {
         self.forked_from = event.forked_from_id;
         self.current_rollout_path = event.rollout_path.clone();
         self.current_cwd = Some(event.cwd.clone());
-        self.config.cwd = event.cwd.clone();
+        match AbsolutePathBuf::try_from(event.cwd.clone()) {
+            Ok(cwd) => self.config.cwd = cwd,
+            Err(err) => {
+                tracing::warn!(path = %event.cwd.display(), %err, "session cwd should be absolute");
+            }
+        }
         if let Err(err) = self
             .config
             .permissions
@@ -1856,7 +1860,7 @@ impl ChatWidget {
             self.replay_initial_messages(messages);
         }
         self.submit_op(AppCommand::list_skills(
-            vec![self.config.cwd.clone()],
+            Vec::new(),
             /*force_reload*/ true,
         ));
         if self.connectors_enabled() {
@@ -4069,13 +4073,13 @@ impl ChatWidget {
             id: ev.call_id,
             reason: ev.reason,
             changes: ev.changes.clone(),
-            cwd: self.config.cwd.clone(),
+            cwd: self.config.cwd.clone().to_path_buf(),
         };
         self.bottom_pane
             .push_approval_request(request, &self.config.features);
         self.request_redraw();
         self.notify(Notification::EditApprovalRequested {
-            cwd: self.config.cwd.clone(),
+            cwd: self.config.cwd.clone().to_path_buf(),
             changes: ev.changes.keys().cloned().collect(),
         });
     }
@@ -4411,7 +4415,7 @@ impl ChatWidget {
             feedback,
             feedback_audience,
             current_rollout_path: None,
-            current_cwd,
+            current_cwd: current_cwd.map(|cwd| cwd.to_path_buf()),
             session_network_proxy: None,
             status_line_invalid_items_warned,
             status_line_branch: None,
@@ -4737,7 +4741,9 @@ impl ChatWidget {
             }
             SlashCommand::Init => {
                 let init_target = self.config.cwd.join(DEFAULT_PROJECT_DOC_FILENAME);
-                if init_target.exists() {
+                if let Ok(init_target) = init_target
+                    && init_target.exists()
+                {
                     let message = format!(
                         "{DEFAULT_PROJECT_DOC_FILENAME} already exists here. Skipping /init to avoid overwriting it."
                     );
@@ -4957,6 +4963,11 @@ impl ChatWidget {
             }
             SlashCommand::DebugConfig => {
                 self.add_debug_config_output();
+            }
+            SlashCommand::Title => {
+                self.add_error_message(
+                    "Terminal title setup is not yet available in the app-server TUI.".to_string(),
+                );
             }
             SlashCommand::Statusline => {
                 self.open_status_line_setup();
@@ -5458,7 +5469,7 @@ impl ChatWidget {
         let service_tier = self.config.service_tier.map(Some);
         let op = AppCommand::user_turn(
             items,
-            self.config.cwd.clone(),
+            self.config.cwd.clone().to_path_buf(),
             self.config.permissions.approval_policy.value(),
             self.config.permissions.sandbox_policy.get().clone(),
             effective_mode.model().to_string(),
@@ -6124,7 +6135,7 @@ impl ChatWidget {
             }
             ServerNotification::SkillsChanged(_) => {
                 self.submit_op(AppCommand::list_skills(
-                    vec![self.config.cwd.clone()],
+                    Vec::new(),
                     /*force_reload*/ true,
                 ));
             }
@@ -6227,6 +6238,7 @@ impl ChatWidget {
             | ServerNotification::McpServerStatusUpdated(_)
             | ServerNotification::McpServerOauthLoginCompleted(_)
             | ServerNotification::AppListUpdated(_)
+            | ServerNotification::FsChanged(_)
             | ServerNotification::ContextCompacted(_)
             | ServerNotification::FuzzyFileSearchSessionUpdated(_)
             | ServerNotification::FuzzyFileSearchSessionCompleted(_)
@@ -6649,7 +6661,7 @@ impl ChatWidget {
             EventMsg::ListSkillsResponse(ev) => self.on_list_skills(ev),
             EventMsg::SkillsUpdateAvailable => {
                 self.submit_op(AppCommand::list_skills(
-                    vec![self.config.cwd.clone()],
+                    Vec::new(),
                     /*force_reload*/ true,
                 ));
             }
@@ -7081,7 +7093,9 @@ impl ChatWidget {
     }
 
     fn status_line_cwd(&self) -> &Path {
-        self.current_cwd.as_ref().unwrap_or(&self.config.cwd)
+        self.current_cwd
+            .as_deref()
+            .unwrap_or_else(|| self.config.cwd.as_path())
     }
 
     fn status_line_project_root(&self) -> Option<PathBuf> {
@@ -9676,7 +9690,7 @@ impl ChatWidget {
             placeholder_style,
             /*reasoning_effort*/ None,
             /*show_fast_status*/ false,
-            config.cwd.clone(),
+            config.cwd.clone().to_path_buf(),
             CODEX_CLI_VERSION,
         ))
     }
@@ -10387,7 +10401,7 @@ impl ChatWidget {
             actions: vec![Box::new({
                 let cwd = self.config.cwd.clone();
                 move |tx| {
-                    tx.send(AppEvent::OpenReviewBranchPicker(cwd.clone()));
+                    tx.send(AppEvent::OpenReviewBranchPicker(cwd.clone().to_path_buf()));
                 }
             })],
             dismiss_on_select: false,
@@ -10412,7 +10426,7 @@ impl ChatWidget {
             actions: vec![Box::new({
                 let cwd = self.config.cwd.clone();
                 move |tx| {
-                    tx.send(AppEvent::OpenReviewCommitPicker(cwd.clone()));
+                    tx.send(AppEvent::OpenReviewCommitPicker(cwd.clone().to_path_buf()));
                 }
             })],
             dismiss_on_select: false,
@@ -10472,7 +10486,7 @@ impl ChatWidget {
     }
 
     pub(crate) async fn show_review_commit_picker(&mut self, cwd: &Path) {
-        let commits = codex_core::git_info::recent_commits(cwd, /*limit*/ 100).await;
+        let commits = recent_commits(cwd, /*limit*/ 100).await;
 
         let mut items: Vec<SelectionItem> = Vec::with_capacity(commits.len());
         for entry in commits {
@@ -10845,6 +10859,7 @@ fn extract_first_bold(s: &str) -> Option<String> {
 fn hook_event_label(event_name: codex_protocol::protocol::HookEventName) -> &'static str {
     match event_name {
         codex_protocol::protocol::HookEventName::PreToolUse => "PreToolUse",
+        codex_protocol::protocol::HookEventName::PostToolUse => "PostToolUse",
         codex_protocol::protocol::HookEventName::SessionStart => "SessionStart",
         codex_protocol::protocol::HookEventName::AfterCompaction => "AfterCompaction",
         codex_protocol::protocol::HookEventName::UserPromptSubmit => "UserPromptSubmit",
@@ -10855,7 +10870,7 @@ fn hook_event_label(event_name: codex_protocol::protocol::HookEventName) -> &'st
 #[cfg(test)]
 pub(crate) fn show_review_commit_picker_with_entries(
     chat: &mut ChatWidget,
-    entries: Vec<codex_core::git_info::CommitLogEntry>,
+    entries: Vec<CommitLogEntry>,
 ) {
     let mut items: Vec<SelectionItem> = Vec::with_capacity(entries.len());
     for entry in entries {

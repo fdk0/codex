@@ -1287,7 +1287,7 @@ async fn pre_tool_use_blocks_shell_command_before_execution() -> Result<()> {
         .and_then(Value::as_str)
         .expect("shell command output string");
     assert!(
-        output.contains("Bash command blocked by hook: blocked by pre hook"),
+        output.contains("Command blocked by PreToolUse hook: blocked by pre hook"),
         "blocked tool output should surface the hook reason",
     );
     assert!(
@@ -1389,7 +1389,7 @@ async fn pre_tool_use_blocks_local_shell_before_execution() -> Result<()> {
         .and_then(Value::as_str)
         .expect("local shell output string");
     assert!(
-        output.contains("Bash command blocked by hook: blocked local shell"),
+        output.contains("Command blocked by PreToolUse hook: blocked local shell"),
         "blocked local shell output should surface the hook reason",
     );
     assert!(
@@ -1484,7 +1484,7 @@ async fn pre_tool_use_blocks_exec_command_before_execution() -> Result<()> {
         .and_then(Value::as_str)
         .expect("exec command output string");
     assert!(
-        output.contains("Bash command blocked by hook: blocked exec command"),
+        output.contains("Command blocked by PreToolUse hook: blocked exec command"),
         "blocked exec command output should surface the hook reason",
     );
     assert!(

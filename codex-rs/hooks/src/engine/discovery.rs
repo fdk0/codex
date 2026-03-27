@@ -78,6 +78,24 @@ pub(crate) fn discover_handlers(config_layer_stack: Option<&ConfigLayerStack>) -
             }
         };
 
+        for group in parsed.hooks.post_tool_use {
+            append_group_handlers(
+                &mut handlers,
+                &mut warnings,
+                &mut display_order,
+                AppendGroupSpec {
+                    source_path: source_path.as_path(),
+                    event_name: codex_protocol::protocol::HookEventName::PostToolUse,
+                    matcher: matcher_pattern_for_event(
+                        codex_protocol::protocol::HookEventName::PostToolUse,
+                        group.matcher.as_deref(),
+                    ),
+                    conditions: group.conditions,
+                },
+                group.hooks,
+            );
+        }
+
         for group in parsed.hooks.pre_tool_use {
             append_group_handlers(
                 &mut handlers,

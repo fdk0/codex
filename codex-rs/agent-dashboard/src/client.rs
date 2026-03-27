@@ -40,6 +40,7 @@ impl DashboardClient {
     pub(crate) async fn connect(websocket_url: String) -> Result<Self> {
         let remote = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
             websocket_url,
+            auth_token: None,
             client_name: "codex-agent-dashboard".to_string(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             experimental_api: false,
@@ -104,7 +105,6 @@ impl DashboardClient {
                                     )
                                     .await;
                             }
-                            AppServerEvent::LegacyNotification(_) => {}
                         }
                     }
                 }

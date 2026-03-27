@@ -200,14 +200,12 @@ impl ToolHandler for ApplyPatchHandler {
                             file_paths,
                             changes,
                             exec_approval_requirement: apply.exec_approval_requirement,
-                            sandbox_permissions: effective_additional_permissions
-                                .sandbox_permissions,
                             additional_permissions: effective_additional_permissions
                                 .additional_permissions,
                             permissions_preapproved: effective_additional_permissions
                                 .permissions_preapproved,
                             timeout_ms: None,
-                            codex_exe: turn.codex_linux_sandbox_exe.clone(),
+                            codex_exe: turn.codex_self_exe.clone(),
                         };
 
                         let mut orchestrator = ToolOrchestrator::new();
@@ -305,13 +303,12 @@ pub(crate) async fn intercept_apply_patch(
                         file_paths: approval_keys,
                         changes,
                         exec_approval_requirement: apply.exec_approval_requirement,
-                        sandbox_permissions: effective_additional_permissions.sandbox_permissions,
                         additional_permissions: effective_additional_permissions
                             .additional_permissions,
                         permissions_preapproved: effective_additional_permissions
                             .permissions_preapproved,
                         timeout_ms,
-                        codex_exe: turn.codex_linux_sandbox_exe.clone(),
+                        codex_exe: turn.codex_self_exe.clone(),
                     };
 
                     let mut orchestrator = ToolOrchestrator::new();

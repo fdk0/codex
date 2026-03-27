@@ -13,6 +13,8 @@ use codex_protocol::protocol::HookRunSummary;
 use crate::engine::config::HookConditions;
 use crate::events::after_compaction::AfterCompactionOutcome;
 use crate::events::after_compaction::AfterCompactionRequest;
+use crate::events::post_tool_use::PostToolUseOutcome;
+use crate::events::post_tool_use::PostToolUseRequest;
 use crate::events::pre_tool_use::PreToolUseOutcome;
 use crate::events::pre_tool_use::PreToolUseRequest;
 use crate::events::session_start::SessionStartOutcome;
@@ -53,6 +55,7 @@ impl ConfiguredHandler {
     fn event_name_label(&self) -> &'static str {
         match self.event_name {
             codex_protocol::protocol::HookEventName::PreToolUse => "pre-tool-use",
+            codex_protocol::protocol::HookEventName::PostToolUse => "post-tool-use",
             codex_protocol::protocol::HookEventName::SessionStart => "session-start",
             codex_protocol::protocol::HookEventName::AfterCompaction => "after-compaction",
             codex_protocol::protocol::HookEventName::UserPromptSubmit => "user-prompt-submit",
@@ -120,6 +123,13 @@ impl ClaudeHooksEngine {
         crate::events::after_compaction::preview(&self.handlers, request)
     }
 
+    pub(crate) fn preview_post_tool_use(
+        &self,
+        request: &PostToolUseRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::post_tool_use::preview(&self.handlers, request)
+    }
+
     pub(crate) fn preview_pre_tool_use(&self, request: &PreToolUseRequest) -> Vec<HookRunSummary> {
         crate::events::pre_tool_use::preview(&self.handlers, request)
     }
@@ -137,6 +147,13 @@ impl ClaudeHooksEngine {
         request: AfterCompactionRequest,
     ) -> AfterCompactionOutcome {
         crate::events::after_compaction::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) async fn run_post_tool_use(
+        &self,
+        request: PostToolUseRequest,
+    ) -> PostToolUseOutcome {
+        crate::events::post_tool_use::run(&self.handlers, &self.shell, request).await
     }
 
     pub(crate) async fn run_pre_tool_use(&self, request: PreToolUseRequest) -> PreToolUseOutcome {

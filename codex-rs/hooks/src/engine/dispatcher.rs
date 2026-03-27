@@ -144,6 +144,7 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
     match event_name {
         HookEventName::SessionStart => HookScope::Thread,
         HookEventName::PreToolUse
+        | HookEventName::PostToolUse
         | HookEventName::AfterCompaction
         | HookEventName::UserPromptSubmit
         | HookEventName::Stop => HookScope::Turn,
@@ -309,6 +310,40 @@ mod tests {
             &handlers,
             HookSelectionContext {
                 event_name: HookEventName::PreToolUse,
+                matcher_input: Some("Bash"),
+                active_profile: None,
+                model: None,
+                permission_mode: None,
+            },
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].display_order, 0);
+    }
+
+    #[test]
+    fn post_tool_use_matches_tool_name() {
+        let handlers = vec![
+            make_handler(
+                HookEventName::PostToolUse,
+                Some("^Bash$"),
+                HookConditions::default(),
+                "echo same",
+                0,
+            ),
+            make_handler(
+                HookEventName::PostToolUse,
+                Some("^Edit$"),
+                HookConditions::default(),
+                "echo same",
+                1,
+            ),
+        ];
+
+        let selected = select_handlers(
+            &handlers,
+            HookSelectionContext {
+                event_name: HookEventName::PostToolUse,
                 matcher_input: Some("Bash"),
                 active_profile: None,
                 model: None,

@@ -15,6 +15,8 @@ use crate::config_loader::RequirementSource;
 use crate::config_loader::Sourced;
 use crate::protocol::SandboxPolicy;
 use crate::test_support;
+use codex_config::NetworkDomainPermissionToml;
+use codex_config::NetworkDomainPermissionsToml;
 use codex_network_proxy::NetworkProxyConfig;
 use codex_protocol::approvals::NetworkApprovalProtocol;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -549,7 +551,8 @@ fn guardian_review_request_layout_matches_model_visible_request_snapshot() {
             let (mut session, mut turn) = crate::codex::make_session_and_context().await;
             let temp_cwd = TempDir::new()?;
             let mut config = (*turn.config).clone();
-            config.cwd = temp_cwd.path().to_path_buf();
+            config.cwd = AbsolutePathBuf::from_absolute_path(temp_cwd.path())
+                .expect("temp cwd should be absolute");
             config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
             let config = Arc::new(config);
             let models_manager = Arc::new(test_support::models_manager_with_provider(
@@ -1012,7 +1015,12 @@ fn guardian_review_session_config_preserves_parent_network_proxy() {
         NetworkProxyConfig::default(),
         Some(NetworkConstraints {
             enabled: Some(true),
-            allowed_domains: Some(vec!["github.com".to_string()]),
+            domains: Some(NetworkDomainPermissionsToml {
+                entries: BTreeMap::from([(
+                    "github.com".to_string(),
+                    NetworkDomainPermissionToml::Allow,
+                )]),
+            }),
             ..Default::default()
         }),
         parent_config.permissions.sandbox_policy.get(),
@@ -1068,7 +1076,9 @@ fn guardian_review_session_config_uses_live_network_proxy_state() {
     let mut parent_config = test_config();
     let mut parent_network = NetworkProxyConfig::default();
     parent_network.network.enabled = true;
-    parent_network.network.allowed_domains = vec!["parent.example".to_string()];
+    parent_network
+        .network
+        .set_allowed_domains(vec!["parent.example".to_string()]);
     parent_config.permissions.network = Some(
         NetworkProxySpec::from_config_and_constraints(
             parent_network,
@@ -1080,7 +1090,9 @@ fn guardian_review_session_config_uses_live_network_proxy_state() {
 
     let mut live_network = NetworkProxyConfig::default();
     live_network.network.enabled = true;
-    live_network.network.allowed_domains = vec!["github.com".to_string()];
+    live_network
+        .network
+        .set_allowed_domains(vec!["github.com".to_string()]);
 
     let guardian_config = build_guardian_review_session_config_for_test(
         &parent_config,

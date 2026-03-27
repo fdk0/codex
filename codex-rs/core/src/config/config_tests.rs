@@ -56,6 +56,7 @@ fn stdio_mcp(command: &str) -> McpServerConfig {
         disabled_tools: None,
         scopes: None,
         oauth_resource: None,
+        tools: HashMap::new(),
     }
 }
 
@@ -76,6 +77,7 @@ fn http_mcp(url: &str) -> McpServerConfig {
         disabled_tools: None,
         scopes: None,
         oauth_resource: None,
+        tools: HashMap::new(),
     }
 }
 
@@ -321,9 +323,13 @@ allowed_domains = ["openai.com"]
                         dangerously_allow_non_loopback_proxy: None,
                         dangerously_allow_all_unix_sockets: None,
                         mode: None,
-                        allowed_domains: Some(vec!["openai.com".to_string()]),
-                        denied_domains: None,
-                        allow_unix_sockets: None,
+                        domains: Some(NetworkDomainPermissionsToml {
+                            entries: BTreeMap::from([(
+                                "openai.com".to_string(),
+                                NetworkDomainPermissionToml::Allow,
+                            )]),
+                        }),
+                        unix_sockets: None,
                         allow_local_binding: None,
                     }),
                 },
@@ -399,7 +405,12 @@ fn permissions_profiles_network_disabled_by_default_does_not_start_proxy() -> st
                             )]),
                         }),
                         network: Some(NetworkToml {
-                            allowed_domains: Some(vec!["openai.com".to_string()]),
+                            domains: Some(NetworkDomainPermissionsToml {
+                                entries: BTreeMap::from([(
+                                    "openai.com".to_string(),
+                                    NetworkDomainPermissionToml::Allow,
+                                )]),
+                            }),
                             ..Default::default()
                         }),
                     },
@@ -1895,6 +1906,7 @@ async fn replace_mcp_servers_round_trips_entries() -> anyhow::Result<()> {
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            tools: HashMap::new(),
         },
     );
 
@@ -2051,6 +2063,7 @@ async fn replace_mcp_servers_serializes_env_sorted() -> anyhow::Result<()> {
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            tools: HashMap::new(),
         },
     )]);
 
@@ -2123,6 +2136,7 @@ async fn replace_mcp_servers_serializes_env_vars() -> anyhow::Result<()> {
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            tools: HashMap::new(),
         },
     )]);
 
@@ -2175,6 +2189,7 @@ async fn replace_mcp_servers_serializes_cwd() -> anyhow::Result<()> {
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            tools: HashMap::new(),
         },
     )]);
 
@@ -2225,6 +2240,7 @@ async fn replace_mcp_servers_streamable_http_serializes_bearer_token() -> anyhow
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            tools: HashMap::new(),
         },
     )]);
 
@@ -2291,6 +2307,7 @@ async fn replace_mcp_servers_streamable_http_serializes_custom_headers() -> anyh
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            tools: HashMap::new(),
         },
     )]);
     apply_blocking(
@@ -2369,6 +2386,7 @@ async fn replace_mcp_servers_streamable_http_removes_optional_sections() -> anyh
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            tools: HashMap::new(),
         },
     )]);
 
@@ -2400,6 +2418,7 @@ async fn replace_mcp_servers_streamable_http_removes_optional_sections() -> anyh
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            tools: HashMap::new(),
         },
     );
     apply_blocking(
@@ -2466,6 +2485,7 @@ async fn replace_mcp_servers_streamable_http_isolates_headers_between_servers() 
                 disabled_tools: None,
                 scopes: None,
                 oauth_resource: None,
+                tools: HashMap::new(),
             },
         ),
         (
@@ -2487,6 +2507,7 @@ async fn replace_mcp_servers_streamable_http_isolates_headers_between_servers() 
                 disabled_tools: None,
                 scopes: None,
                 oauth_resource: None,
+                tools: HashMap::new(),
             },
         ),
     ]);
@@ -2571,6 +2592,7 @@ async fn replace_mcp_servers_serializes_disabled_flag() -> anyhow::Result<()> {
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            tools: HashMap::new(),
         },
     )]);
 
@@ -2617,6 +2639,7 @@ async fn replace_mcp_servers_serializes_required_flag() -> anyhow::Result<()> {
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            tools: HashMap::new(),
         },
     )]);
 
@@ -2663,6 +2686,7 @@ async fn replace_mcp_servers_serializes_tool_filters() -> anyhow::Result<()> {
             disabled_tools: Some(vec!["blocked".to_string()]),
             scopes: None,
             oauth_resource: None,
+            tools: HashMap::new(),
         },
     )]);
 
@@ -2713,6 +2737,7 @@ async fn replace_mcp_servers_streamable_http_serializes_oauth_resource() -> anyh
             disabled_tools: None,
             scopes: None,
             oauth_resource: Some("https://resource.example.com".to_string()),
+            tools: HashMap::new(),
         },
     )]);
 
@@ -2993,7 +3018,11 @@ struct PrecedenceTestFixture {
 }
 
 impl PrecedenceTestFixture {
-    fn cwd(&self) -> PathBuf {
+    fn cwd(&self) -> AbsolutePathBuf {
+        AbsolutePathBuf::from_absolute_path(self.cwd.path()).expect("cwd should be absolute")
+    }
+
+    fn cwd_path(&self) -> PathBuf {
         self.cwd.path().to_path_buf()
     }
 
@@ -4385,7 +4414,7 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
 
     let o3_profile_overrides = ConfigOverrides {
         config_profile: Some("o3".to_string()),
-        cwd: Some(fixture.cwd()),
+        cwd: Some(fixture.cwd_path()),
         ..Default::default()
     };
     let o3_profile_config: Config = Config::load_from_base_config_with_overrides(
@@ -4414,7 +4443,6 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 windows_sandbox_mode: None,
                 windows_sandbox_private_desktop: true,
-                macos_seatbelt_profile_extensions: None,
             },
             approvals_reviewer: ApprovalsReviewer::User,
             enforce_residency: Constrained::allow_any(None),
@@ -4448,6 +4476,7 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             history: History::default(),
             ephemeral: false,
             file_opener: UriBasedFileOpener::VsCode,
+            codex_self_exe: None,
             codex_linux_sandbox_exe: None,
             main_execve_wrapper_exe: None,
             js_repl_node_path: None,
@@ -4463,7 +4492,6 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             model_verbosity: None,
             personality: Some(Personality::Pragmatic),
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
-            experimental_exec_server_url: None,
             realtime_audio: RealtimeAudioConfig::default(),
             experimental_realtime_start_instructions: None,
             experimental_realtime_ws_base_url: None,
@@ -4518,7 +4546,7 @@ fn metrics_exporter_defaults_to_statsig_when_missing() -> std::io::Result<()> {
     let config = Config::load_from_base_config_with_overrides(
         fixture.cfg.clone(),
         ConfigOverrides {
-            cwd: Some(fixture.cwd()),
+            cwd: Some(fixture.cwd_path()),
             ..Default::default()
         },
         fixture.codex_home(),
@@ -4534,7 +4562,7 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
 
     let gpt3_profile_overrides = ConfigOverrides {
         config_profile: Some("gpt3".to_string()),
-        cwd: Some(fixture.cwd()),
+        cwd: Some(fixture.cwd_path()),
         ..Default::default()
     };
     let gpt3_profile_config = Config::load_from_base_config_with_overrides(
@@ -4562,7 +4590,6 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             windows_sandbox_mode: None,
             windows_sandbox_private_desktop: true,
-            macos_seatbelt_profile_extensions: None,
         },
         approvals_reviewer: ApprovalsReviewer::User,
         enforce_residency: Constrained::allow_any(None),
@@ -4596,6 +4623,7 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         history: History::default(),
         ephemeral: false,
         file_opener: UriBasedFileOpener::VsCode,
+        codex_self_exe: None,
         codex_linux_sandbox_exe: None,
         main_execve_wrapper_exe: None,
         js_repl_node_path: None,
@@ -4611,7 +4639,6 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         model_verbosity: None,
         personality: Some(Personality::Pragmatic),
         chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
-        experimental_exec_server_url: None,
         realtime_audio: RealtimeAudioConfig::default(),
         experimental_realtime_start_instructions: None,
         experimental_realtime_ws_base_url: None,
@@ -4660,7 +4687,7 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
     // Verify that loading without specifying a profile in ConfigOverrides
     // uses the default profile from the config file (which is "gpt3").
     let default_profile_overrides = ConfigOverrides {
-        cwd: Some(fixture.cwd()),
+        cwd: Some(fixture.cwd_path()),
         ..Default::default()
     };
 
@@ -4680,7 +4707,7 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
 
     let zdr_profile_overrides = ConfigOverrides {
         config_profile: Some("zdr".to_string()),
-        cwd: Some(fixture.cwd()),
+        cwd: Some(fixture.cwd_path()),
         ..Default::default()
     };
     let zdr_profile_config = Config::load_from_base_config_with_overrides(
@@ -4708,7 +4735,6 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             windows_sandbox_mode: None,
             windows_sandbox_private_desktop: true,
-            macos_seatbelt_profile_extensions: None,
         },
         approvals_reviewer: ApprovalsReviewer::User,
         enforce_residency: Constrained::allow_any(None),
@@ -4742,6 +4768,7 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         history: History::default(),
         ephemeral: false,
         file_opener: UriBasedFileOpener::VsCode,
+        codex_self_exe: None,
         codex_linux_sandbox_exe: None,
         main_execve_wrapper_exe: None,
         js_repl_node_path: None,
@@ -4757,7 +4784,6 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         model_verbosity: None,
         personality: Some(Personality::Pragmatic),
         chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
-        experimental_exec_server_url: None,
         realtime_audio: RealtimeAudioConfig::default(),
         experimental_realtime_start_instructions: None,
         experimental_realtime_ws_base_url: None,
@@ -4812,7 +4838,7 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
 
     let gpt5_profile_overrides = ConfigOverrides {
         config_profile: Some("gpt5".to_string()),
-        cwd: Some(fixture.cwd()),
+        cwd: Some(fixture.cwd_path()),
         ..Default::default()
     };
     let gpt5_profile_config = Config::load_from_base_config_with_overrides(
@@ -4840,7 +4866,6 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             windows_sandbox_mode: None,
             windows_sandbox_private_desktop: true,
-            macos_seatbelt_profile_extensions: None,
         },
         approvals_reviewer: ApprovalsReviewer::User,
         enforce_residency: Constrained::allow_any(None),
@@ -4874,6 +4899,7 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         history: History::default(),
         ephemeral: false,
         file_opener: UriBasedFileOpener::VsCode,
+        codex_self_exe: None,
         codex_linux_sandbox_exe: None,
         main_execve_wrapper_exe: None,
         js_repl_node_path: None,
@@ -4889,7 +4915,6 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         model_verbosity: Some(Verbosity::High),
         personality: Some(Personality::Pragmatic),
         chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
-        experimental_exec_server_url: None,
         realtime_audio: RealtimeAudioConfig::default(),
         experimental_realtime_start_instructions: None,
         experimental_realtime_ws_base_url: None,
@@ -4985,7 +5010,7 @@ fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() -> any
     let config = Config::load_config_with_layer_stack(
         fixture.cfg.clone(),
         ConfigOverrides {
-            cwd: Some(fixture.cwd()),
+            cwd: Some(fixture.cwd_path()),
             ..Default::default()
         },
         fixture.codex_home(),
@@ -5833,78 +5858,6 @@ shell_tool = true
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn system_bwrap_warning_reports_missing_system_bwrap() {
-    let warning = system_bwrap_warning_for_path(Path::new("/definitely/not/a/bwrap"))
-        .expect("missing system bwrap should emit a warning");
-
-    assert!(warning.contains("could not find system bubblewrap"));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn system_bwrap_warning_reports_too_old_system_bwrap() {
-    let fake_bwrap = write_fake_bwrap(
-        r#"#!/bin/sh
-if [ "$1" = "--help" ]; then
-  echo 'usage: bwrap [OPTION...] COMMAND'
-  exit 0
-fi
-exit 1
-"#,
-    );
-    let fake_bwrap_path: &Path = fake_bwrap.as_ref();
-    let warning = system_bwrap_warning_for_path(fake_bwrap_path)
-        .expect("old system bwrap should emit a warning");
-
-    assert!(warning.contains("too old to support `--argv0`"));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn system_bwrap_warning_skips_supported_system_bwrap() {
-    let fake_bwrap = write_fake_bwrap(
-        r#"#!/bin/sh
-if [ "$1" = "--help" ]; then
-  echo '  --argv0 PROGRAM'
-  exit 0
-fi
-exit 1
-"#,
-    );
-    let fake_bwrap_path: &Path = fake_bwrap.as_ref();
-
-    assert_eq!(system_bwrap_warning_for_path(fake_bwrap_path), None);
-}
-
-#[cfg(not(target_os = "linux"))]
-#[test]
-fn system_bwrap_warning_is_disabled_off_linux() {
-    assert!(system_bwrap_warning().is_none());
-}
-
-#[cfg(target_os = "linux")]
-fn write_fake_bwrap(contents: &str) -> tempfile::TempPath {
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-    use tempfile::NamedTempFile;
-
-    // Bazel can mount the OS temp directory `noexec`, so prefer the current
-    // working directory for fake executables and fall back to the default temp
-    // dir outside that environment.
-    let temp_file = std::env::current_dir()
-        .ok()
-        .and_then(|dir| NamedTempFile::new_in(dir).ok())
-        .unwrap_or_else(|| NamedTempFile::new().expect("temp file"));
-    // Linux rejects exec-ing a file that is still open for writing.
-    let path = temp_file.into_temp_path();
-    fs::write(&path, contents).expect("write fake bwrap");
-    let permissions = fs::Permissions::from_mode(0o755);
-    fs::set_permissions(&path, permissions).expect("chmod fake bwrap");
-    path
-}
-
 #[tokio::test]
 async fn approvals_reviewer_defaults_to_manual_only_without_guardian_feature() -> std::io::Result<()>
 {
@@ -6189,34 +6142,6 @@ experimental_realtime_start_instructions = "start instructions from config"
     assert_eq!(
         config.experimental_realtime_start_instructions.as_deref(),
         Some("start instructions from config")
-    );
-    Ok(())
-}
-
-#[test]
-fn experimental_exec_server_url_loads_from_config_toml() -> std::io::Result<()> {
-    let cfg: ConfigToml = toml::from_str(
-        r#"
-experimental_exec_server_url = "http://127.0.0.1:8080"
-"#,
-    )
-    .expect("TOML deserialization should succeed");
-
-    assert_eq!(
-        cfg.experimental_exec_server_url.as_deref(),
-        Some("http://127.0.0.1:8080")
-    );
-
-    let codex_home = TempDir::new()?;
-    let config = Config::load_from_base_config_with_overrides(
-        cfg,
-        ConfigOverrides::default(),
-        codex_home.path().to_path_buf(),
-    )?;
-
-    assert_eq!(
-        config.experimental_exec_server_url.as_deref(),
-        Some("http://127.0.0.1:8080")
     );
     Ok(())
 }

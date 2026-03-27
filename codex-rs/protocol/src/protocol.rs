@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fmt;
+use std::ops::Mul;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -49,6 +50,7 @@ use crate::request_permissions::RequestPermissionsEvent;
 use crate::request_permissions::RequestPermissionsResponse;
 use crate::request_user_input::RequestUserInputResponse;
 use crate::user_input::UserInput;
+use codex_git_utils::GitSha;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -62,7 +64,6 @@ use ts_rs::TS;
 pub use crate::approvals::ApplyPatchApprovalRequestEvent;
 pub use crate::approvals::ElicitationAction;
 pub use crate::approvals::ExecApprovalRequestEvent;
-pub use crate::approvals::ExecApprovalRequestSkillMetadata;
 pub use crate::approvals::ExecPolicyAmendment;
 pub use crate::approvals::GuardianAssessmentEvent;
 pub use crate::approvals::GuardianAssessmentStatus;
@@ -541,6 +542,7 @@ pub struct InterAgentCommunication {
     #[serde(default)]
     pub other_recipients: Vec<AgentPath>,
     pub content: String,
+    pub trigger_turn: bool,
 }
 
 impl InterAgentCommunication {
@@ -549,12 +551,14 @@ impl InterAgentCommunication {
         recipient: AgentPath,
         other_recipients: Vec<AgentPath>,
         content: String,
+        trigger_turn: bool,
     ) -> Self {
         Self {
             author,
             recipient,
             other_recipients,
             content,
+            trigger_turn,
         }
     }
 
@@ -571,7 +575,7 @@ impl InterAgentCommunication {
         Self::from_message_content(content).is_some()
     }
 
-    fn from_message_content(content: &[ContentItem]) -> Option<Self> {
+    pub fn from_message_content(content: &[ContentItem]) -> Option<Self> {
         match content {
             [ContentItem::InputText { text }] | [ContentItem::OutputText { text }] => {
                 serde_json::from_str(text).ok()
@@ -1083,13 +1087,20 @@ impl SandboxPolicy {
                 }
 
                 // For each root, compute subpaths that should remain read-only.
+                let cwd_root = AbsolutePathBuf::from_absolute_path(cwd).ok();
                 roots
                     .into_iter()
-                    .map(|writable_root| WritableRoot {
-                        read_only_subpaths: default_read_only_subpaths_for_writable_root(
-                            &writable_root,
-                        ),
-                        root: writable_root,
+                    .map(|writable_root| {
+                        let protect_missing_dot_codex = cwd_root
+                            .as_ref()
+                            .is_some_and(|cwd_root| cwd_root == &writable_root);
+                        WritableRoot {
+                            read_only_subpaths: default_read_only_subpaths_for_writable_root(
+                                &writable_root,
+                                protect_missing_dot_codex,
+                            ),
+                            root: writable_root,
+                        }
                     })
                     .collect()
             }
@@ -1099,6 +1110,7 @@ impl SandboxPolicy {
 
 fn default_read_only_subpaths_for_writable_root(
     writable_root: &AbsolutePathBuf,
+    protect_missing_dot_codex: bool,
 ) -> Vec<AbsolutePathBuf> {
     let mut subpaths: Vec<AbsolutePathBuf> = Vec::new();
     #[allow(clippy::expect_used)]
@@ -1120,14 +1132,20 @@ fn default_read_only_subpaths_for_writable_root(
         subpaths.push(top_level_git);
     }
 
-    // Make .agents/skills and .codex/config.toml and related files read-only
-    // to the agent, by default.
-    for subdir in &[".agents", ".codex"] {
-        #[allow(clippy::expect_used)]
-        let top_level_codex = writable_root.join(subdir).expect("valid relative path");
-        if top_level_codex.as_path().is_dir() {
-            subpaths.push(top_level_codex);
-        }
+    #[allow(clippy::expect_used)]
+    let top_level_agents = writable_root.join(".agents").expect("valid relative path");
+    if top_level_agents.as_path().is_dir() {
+        subpaths.push(top_level_agents);
+    }
+
+    // Keep top-level project metadata under .codex read-only to the agent by
+    // default. For the workspace root itself, protect it even before the
+    // directory exists so first-time creation still goes through the
+    // protected-path approval flow.
+    #[allow(clippy::expect_used)]
+    let top_level_codex = writable_root.join(".codex").expect("valid relative path");
+    if protect_missing_dot_codex || top_level_codex.as_path().is_dir() {
+        subpaths.push(top_level_codex);
     }
 
     let mut deduped = Vec::with_capacity(subpaths.len());
@@ -1427,6 +1445,7 @@ pub enum EventMsg {
 #[serde(rename_all = "snake_case")]
 pub enum HookEventName {
     PreToolUse,
+    PostToolUse,
     SessionStart,
     AfterCompaction,
     UserPromptSubmit,
@@ -2650,6 +2669,51 @@ pub enum TruncationPolicy {
     Tokens(usize),
 }
 
+impl From<crate::openai_models::TruncationPolicyConfig> for TruncationPolicy {
+    fn from(config: crate::openai_models::TruncationPolicyConfig) -> Self {
+        match config.mode {
+            crate::openai_models::TruncationMode::Bytes => Self::Bytes(config.limit as usize),
+            crate::openai_models::TruncationMode::Tokens => Self::Tokens(config.limit as usize),
+        }
+    }
+}
+
+impl TruncationPolicy {
+    pub fn token_budget(&self) -> usize {
+        match self {
+            TruncationPolicy::Bytes(bytes) => {
+                usize::try_from(codex_utils_string::approx_tokens_from_byte_count(*bytes))
+                    .unwrap_or(usize::MAX)
+            }
+            TruncationPolicy::Tokens(tokens) => *tokens,
+        }
+    }
+
+    pub fn byte_budget(&self) -> usize {
+        match self {
+            TruncationPolicy::Bytes(bytes) => *bytes,
+            TruncationPolicy::Tokens(tokens) => {
+                codex_utils_string::approx_bytes_for_tokens(*tokens)
+            }
+        }
+    }
+}
+
+impl Mul<f64> for TruncationPolicy {
+    type Output = Self;
+
+    fn mul(self, multiplier: f64) -> Self::Output {
+        match self {
+            TruncationPolicy::Bytes(bytes) => {
+                TruncationPolicy::Bytes((bytes as f64 * multiplier).ceil() as usize)
+            }
+            TruncationPolicy::Tokens(tokens) => {
+                TruncationPolicy::Tokens((tokens as f64 * multiplier).ceil() as usize)
+            }
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 pub struct RolloutLine {
     pub timestamp: String,
@@ -2661,7 +2725,7 @@ pub struct RolloutLine {
 pub struct GitInfo {
     /// Current commit hash (SHA)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub commit_hash: Option<String>,
+    pub commit_hash: Option<GitSha>,
     /// Current branch name
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
@@ -4082,6 +4146,8 @@ mod tests {
         let expected_docs_public =
             AbsolutePathBuf::from_absolute_path(canonical_cwd.join("docs/public"))
                 .expect("canonical docs/public");
+        let expected_dot_codex = AbsolutePathBuf::from_absolute_path(canonical_cwd.join(".codex"))
+            .expect("canonical .codex");
         let policy = FileSystemSandboxPolicy::restricted(vec![
             FileSystemSandboxEntry {
                 path: FileSystemPath::Special {
@@ -4103,7 +4169,13 @@ mod tests {
         assert_eq!(
             sorted_writable_roots(policy.get_writable_roots_with_cwd(cwd.path())),
             vec![
-                (canonical_cwd, vec![expected_docs.to_path_buf()]),
+                (
+                    canonical_cwd,
+                    vec![
+                        expected_dot_codex.to_path_buf(),
+                        expected_docs.to_path_buf()
+                    ],
+                ),
                 (expected_docs_public.to_path_buf(), Vec::new()),
             ]
         );
@@ -4115,6 +4187,8 @@ mod tests {
         let docs =
             AbsolutePathBuf::resolve_path_against_base("docs", cwd.path()).expect("resolve docs");
         let canonical_cwd = cwd.path().canonicalize().expect("canonicalize cwd");
+        let expected_dot_codex = AbsolutePathBuf::from_absolute_path(canonical_cwd.join(".codex"))
+            .expect("canonical .codex");
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![],
             read_only_access: ReadOnlyAccess::Restricted {
@@ -4131,7 +4205,7 @@ mod tests {
                 FileSystemSandboxPolicy::from_legacy_sandbox_policy(&policy, cwd.path())
                     .get_writable_roots_with_cwd(cwd.path())
             ),
-            vec![(canonical_cwd, Vec::new())]
+            vec![(canonical_cwd, vec![expected_dot_codex.to_path_buf()])]
         );
     }
 
