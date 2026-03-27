@@ -51,6 +51,24 @@ fn finds_first_executable_bwrap_in_search_paths() {
 }
 
 #[test]
+fn finds_executable_bwrap_in_path_env_with_multiple_entries() {
+    let temp_dir = tempdir().expect("temp dir");
+    let cwd = temp_dir.path().join("cwd");
+    let first_dir = temp_dir.path().join("first");
+    let second_dir = temp_dir.path().join("second");
+    std::fs::create_dir_all(&cwd).expect("create cwd");
+    std::fs::create_dir_all(&first_dir).expect("create first dir");
+    std::fs::create_dir_all(&second_dir).expect("create second dir");
+    let expected_bwrap = write_named_fake_bwrap_in(&second_dir);
+    let search_path = std::env::join_paths([first_dir, second_dir]).expect("join search path");
+
+    assert_eq!(
+        find_system_bwrap_in_search_path_env(&search_path, &cwd),
+        Some(expected_bwrap)
+    );
+}
+
+#[test]
 fn skips_workspace_local_bwrap_in_search_paths() {
     let temp_dir = tempdir().expect("temp dir");
     let cwd = temp_dir.path().join("cwd");

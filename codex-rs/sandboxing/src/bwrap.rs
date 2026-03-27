@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -20,7 +21,11 @@ fn system_bwrap_warning_for_lookup(system_bwrap_path: Option<PathBuf>) -> Option
 pub fn find_system_bwrap_in_path() -> Option<PathBuf> {
     let search_path = std::env::var_os("PATH")?;
     let cwd = std::env::current_dir().ok()?;
-    find_system_bwrap_in_search_paths(std::iter::once(PathBuf::from(search_path)), &cwd)
+    find_system_bwrap_in_search_path_env(&search_path, &cwd)
+}
+
+fn find_system_bwrap_in_search_path_env(search_path: &OsStr, cwd: &Path) -> Option<PathBuf> {
+    find_system_bwrap_in_search_paths(std::env::split_paths(search_path), cwd)
 }
 
 fn find_system_bwrap_in_search_paths(
