@@ -6,6 +6,7 @@
 //! - Select items
 //! - Reorder items
 //! - Preview the rendered title
+#![allow(dead_code)]
 
 use itertools::Itertools;
 use ratatui::buffer::Buffer;

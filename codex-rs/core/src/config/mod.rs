@@ -2433,7 +2433,9 @@ impl Config {
         let file_base_instructions =
             Self::try_read_non_empty_file(model_instructions_path, "model instructions file")?;
         let base_instructions = base_instructions.or(file_base_instructions);
-        let developer_instructions = developer_instructions.or(cfg.developer_instructions);
+        let developer_instructions = developer_instructions
+            .or(config_profile.developer_instructions)
+            .or(cfg.developer_instructions);
         let guardian_developer_instructions = guardian_developer_instructions_from_requirements(
             config_layer_stack.requirements_toml(),
         );
@@ -2575,7 +2577,9 @@ impl Config {
             service_tier,
             review_model,
             model_context_window: cfg.model_context_window,
-            model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
+            model_auto_compact_token_limit: config_profile
+                .model_auto_compact_token_limit
+                .or(cfg.model_auto_compact_token_limit),
             model_provider_id,
             model_provider,
             cwd: resolved_cwd,
@@ -2624,7 +2628,9 @@ impl Config {
                     }
                 })
                 .collect(),
-            tool_output_token_limit: cfg.tool_output_token_limit,
+            tool_output_token_limit: config_profile
+                .tool_output_token_limit
+                .or(cfg.tool_output_token_limit),
             agent_max_threads,
             agent_job_max_runtime_seconds,
             agent_wake_parent_on_completion_default,

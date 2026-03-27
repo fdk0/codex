@@ -5476,6 +5476,186 @@ mcp_oauth_callback_url = "https://example.com/callback"
 }
 
 #[test]
+fn profile_model_auto_compact_token_limit_overrides_root() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut profiles = HashMap::new();
+    profiles.insert(
+        "dispatcher".to_string(),
+        ConfigProfile {
+            model_auto_compact_token_limit: Some(90_000),
+            ..Default::default()
+        },
+    );
+
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            model: Some("gpt-5.4".to_string()),
+            model_auto_compact_token_limit: Some(120_000),
+            profiles,
+            ..Default::default()
+        },
+        ConfigOverrides {
+            config_profile: Some("dispatcher".to_string()),
+            ..Default::default()
+        },
+        codex_home.path().to_path_buf(),
+    )?;
+
+    assert_eq!(config.model_auto_compact_token_limit, Some(90_000));
+    Ok(())
+}
+
+#[test]
+fn profile_tool_output_token_limit_overrides_root() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut profiles = HashMap::new();
+    profiles.insert(
+        "dispatcher".to_string(),
+        ConfigProfile {
+            tool_output_token_limit: Some(8_000),
+            ..Default::default()
+        },
+    );
+
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            model: Some("gpt-5.4".to_string()),
+            tool_output_token_limit: Some(12_500),
+            profiles,
+            ..Default::default()
+        },
+        ConfigOverrides {
+            config_profile: Some("dispatcher".to_string()),
+            ..Default::default()
+        },
+        codex_home.path().to_path_buf(),
+    )?;
+
+    assert_eq!(config.tool_output_token_limit, Some(8_000));
+    Ok(())
+}
+
+#[test]
+fn root_limits_apply_when_profile_omits_overrides() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut profiles = HashMap::new();
+    profiles.insert("dispatcher".to_string(), ConfigProfile::default());
+
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            model: Some("gpt-5.4".to_string()),
+            model_auto_compact_token_limit: Some(110_000),
+            tool_output_token_limit: Some(12_500),
+            profiles,
+            ..Default::default()
+        },
+        ConfigOverrides {
+            config_profile: Some("dispatcher".to_string()),
+            ..Default::default()
+        },
+        codex_home.path().to_path_buf(),
+    )?;
+
+    assert_eq!(config.model_auto_compact_token_limit, Some(110_000));
+    assert_eq!(config.tool_output_token_limit, Some(12_500));
+    Ok(())
+}
+
+#[test]
+fn profile_developer_instructions_override_root() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut profiles = HashMap::new();
+    profiles.insert(
+        "dispatcher".to_string(),
+        ConfigProfile {
+            developer_instructions: Some("Profile instructions".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            model: Some("gpt-5.4".to_string()),
+            developer_instructions: Some("Root instructions".to_string()),
+            profiles,
+            ..Default::default()
+        },
+        ConfigOverrides {
+            config_profile: Some("dispatcher".to_string()),
+            ..Default::default()
+        },
+        codex_home.path().to_path_buf(),
+    )?;
+
+    assert_eq!(
+        config.developer_instructions.as_deref(),
+        Some("Profile instructions")
+    );
+    Ok(())
+}
+
+#[test]
+fn root_developer_instructions_apply_when_profile_omits_override() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut profiles = HashMap::new();
+    profiles.insert("dispatcher".to_string(), ConfigProfile::default());
+
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            model: Some("gpt-5.4".to_string()),
+            developer_instructions: Some("Root instructions".to_string()),
+            profiles,
+            ..Default::default()
+        },
+        ConfigOverrides {
+            config_profile: Some("dispatcher".to_string()),
+            ..Default::default()
+        },
+        codex_home.path().to_path_buf(),
+    )?;
+
+    assert_eq!(
+        config.developer_instructions.as_deref(),
+        Some("Root instructions")
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_developer_instructions_override_profile() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut profiles = HashMap::new();
+    profiles.insert(
+        "dispatcher".to_string(),
+        ConfigProfile {
+            developer_instructions: Some("Profile instructions".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            model: Some("gpt-5.4".to_string()),
+            developer_instructions: Some("Root instructions".to_string()),
+            profiles,
+            ..Default::default()
+        },
+        ConfigOverrides {
+            config_profile: Some("dispatcher".to_string()),
+            developer_instructions: Some("CLI instructions".to_string()),
+            ..Default::default()
+        },
+        codex_home.path().to_path_buf(),
+    )?;
+
+    assert_eq!(
+        config.developer_instructions.as_deref(),
+        Some("CLI instructions")
+    );
+    Ok(())
+}
+
+#[test]
 fn test_untrusted_project_gets_unless_trusted_approval_policy() -> anyhow::Result<()> {
     let codex_home = TempDir::new()?;
     let test_project_dir = TempDir::new()?;

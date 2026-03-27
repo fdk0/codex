@@ -14,6 +14,7 @@
 //! - bidi/invisible formatting codepoints that can visually reorder or hide
 //!   text (the same family of issues discussed in Trojan Source writeups)
 //! - redundant whitespace that would make titles noisy or hard to scan
+#![allow(dead_code)]
 
 use std::fmt;
 use std::io;
