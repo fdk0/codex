@@ -9,6 +9,7 @@ use core_test_support::responses::ev_shell_command_call;
 use core_test_support::test_codex::ApplyPatchModelOutput;
 use pretty_assertions::assert_eq;
 use std::fs;
+use std::process::Command;
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering;
 
@@ -411,6 +412,92 @@ async fn apply_patch_cli_add_overwrites_existing_file(
     harness.submit("apply add overwrite patch").await?;
 
     assert_eq!(fs::read_to_string(&path)?, "new content\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[test_case(ApplyPatchModelOutput::Freeform)]
+#[test_case(ApplyPatchModelOutput::Function)]
+#[test_case(ApplyPatchModelOutput::ShellCommandViaHeredoc)]
+async fn apply_patch_cli_adds_file_in_external_worktree(
+    model_output: ApplyPatchModelOutput,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = apply_patch_harness().await?;
+
+    let repo = tempfile::tempdir()?;
+    assert!(
+        Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .current_dir(repo.path())
+            .status()?
+            .success()
+    );
+    let readme = repo.path().join("README.md");
+    fs::write(&readme, "root\n")?;
+    assert!(
+        Command::new("git")
+            .arg("add")
+            .arg(&readme)
+            .current_dir(repo.path())
+            .status()?
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test User",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--quiet",
+                "-m",
+                "init",
+            ])
+            .current_dir(repo.path())
+            .status()?
+            .success()
+    );
+
+    let worktree_parent = tempfile::tempdir()?;
+    let planner_worktree = worktree_parent.path().join("planner");
+    assert!(
+        Command::new("git")
+            .current_dir(repo.path())
+            .args(["worktree", "add", "--quiet", "-b", "planner"])
+            .arg(&planner_worktree)
+            .status()?
+            .success()
+    );
+
+    let target = planner_worktree
+        .join("docs/exec-plans/active/2026-03-27-polytick-execution-correctness-hardening.md");
+    fs::create_dir_all(target.parent().expect("target should have parent"))?;
+
+    let patch = format!(
+        "*** Begin Patch\n*** Add File: {}\n+hello planner\n*** End Patch",
+        target.display()
+    );
+    let call_id = "apply-external-worktree-add";
+    mount_apply_patch(&harness, call_id, &patch, "ok", model_output).await;
+
+    harness
+        .submit("add file in external planner worktree")
+        .await?;
+
+    let out = harness.apply_patch_output(call_id, model_output).await;
+    assert!(
+        out.contains("Success. Updated the following files:"),
+        "expected success output: {out}"
+    );
+    assert!(
+        out.contains(&format!("A {}", target.display())),
+        "expected added absolute target path in output: {out}"
+    );
+    assert_eq!(fs::read_to_string(&target)?, "hello planner\n");
     Ok(())
 }
 

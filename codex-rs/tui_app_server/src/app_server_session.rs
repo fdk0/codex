@@ -81,9 +81,7 @@ use color_eyre::eyre::ContextCompat;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::path::PathBuf;
-use url::Url;
 
 pub(crate) struct AppServerBootstrap {
     pub(crate) account_auth_mode: Option<AuthMode>,
@@ -126,14 +124,14 @@ pub(crate) struct ThreadSessionState {
 #[derive(Clone, Copy)]
 pub(crate) enum ThreadParamsMode {
     Embedded,
-    Remote { send_local_cwd: bool },
+    Remote,
 }
 
 impl ThreadParamsMode {
     fn model_provider_from_config(self, config: &Config) -> Option<String> {
         match self {
             Self::Embedded => Some(config.model_provider_id.clone()),
-            Self::Remote { .. } => None,
+            Self::Remote => None,
         }
     }
 }
@@ -871,24 +869,12 @@ fn thread_fork_params_from_config(
 fn thread_cwd_from_config(config: &Config, thread_params_mode: ThreadParamsMode) -> Option<String> {
     match thread_params_mode {
         ThreadParamsMode::Embedded => Some(config.cwd.to_string_lossy().to_string()),
-        ThreadParamsMode::Remote { send_local_cwd } => {
-            send_local_cwd.then(|| config.cwd.to_string_lossy().to_string())
-        }
+        ThreadParamsMode::Remote => None,
     }
 }
 
-pub(crate) fn thread_params_mode_for_remote_url(websocket_url: &str) -> ThreadParamsMode {
-    let send_local_cwd = Url::parse(websocket_url)
-        .ok()
-        .and_then(|url| {
-            url.host().map(|host| match host {
-                url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
-                url::Host::Ipv4(address) => IpAddr::V4(address).is_loopback(),
-                url::Host::Ipv6(address) => IpAddr::V6(address).is_loopback(),
-            })
-        })
-        .unwrap_or(false);
-    ThreadParamsMode::Remote { send_local_cwd }
+pub(crate) fn thread_params_mode_for_remote_url(_websocket_url: &str) -> ThreadParamsMode {
+    ThreadParamsMode::Remote
 }
 
 async fn started_thread_from_start_response(
@@ -1137,26 +1123,10 @@ mod tests {
         let config = build_config(&temp_dir).await;
         let thread_id = ThreadId::new();
 
-        let start = thread_start_params_from_config(
-            &config,
-            ThreadParamsMode::Remote {
-                send_local_cwd: false,
-            },
-        );
-        let resume = thread_resume_params_from_config(
-            config.clone(),
-            thread_id,
-            ThreadParamsMode::Remote {
-                send_local_cwd: false,
-            },
-        );
-        let fork = thread_fork_params_from_config(
-            config,
-            thread_id,
-            ThreadParamsMode::Remote {
-                send_local_cwd: false,
-            },
-        );
+        let start = thread_start_params_from_config(&config, ThreadParamsMode::Remote);
+        let resume =
+            thread_resume_params_from_config(config.clone(), thread_id, ThreadParamsMode::Remote);
+        let fork = thread_fork_params_from_config(config, thread_id, ThreadParamsMode::Remote);
 
         assert_eq!(start.cwd, None);
         assert_eq!(resume.cwd, None);
@@ -1166,34 +1136,20 @@ mod tests {
         assert_eq!(fork.model_provider, None);
     }
 
-    #[tokio::test]
-    async fn thread_lifecycle_params_include_local_cwd_for_loopback_remote_sessions() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let config = build_config(&temp_dir).await;
-        let thread_id = ThreadId::new();
-
-        let start = thread_start_params_from_config(
-            &config,
+    #[test]
+    fn thread_params_mode_for_remote_url_does_not_enable_local_cwd() {
+        assert!(matches!(
             thread_params_mode_for_remote_url("ws://127.0.0.1:4222/"),
-        );
-        let resume = thread_resume_params_from_config(
-            config.clone(),
-            thread_id,
+            ThreadParamsMode::Remote
+        ));
+        assert!(matches!(
             thread_params_mode_for_remote_url("ws://localhost:4222/"),
-        );
-        let fork = thread_fork_params_from_config(
-            config.clone(),
-            thread_id,
+            ThreadParamsMode::Remote
+        ));
+        assert!(matches!(
             thread_params_mode_for_remote_url("ws://[::1]:4222/"),
-        );
-
-        let expected_cwd = Some(config.cwd.to_string_lossy().to_string());
-        assert_eq!(start.cwd, expected_cwd);
-        assert_eq!(resume.cwd, expected_cwd);
-        assert_eq!(fork.cwd, expected_cwd);
-        assert_eq!(start.model_provider, None);
-        assert_eq!(resume.model_provider, None);
-        assert_eq!(fork.model_provider, None);
+            ThreadParamsMode::Remote
+        ));
     }
 
     #[tokio::test]
