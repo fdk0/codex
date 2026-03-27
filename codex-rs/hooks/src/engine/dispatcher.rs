@@ -33,7 +33,8 @@ pub(crate) fn select_handlers(
         .filter(|handler| match event_name {
             HookEventName::PreToolUse
             | HookEventName::PostToolUse
-            | HookEventName::SessionStart => {
+            | HookEventName::SessionStart
+            | HookEventName::AfterCompaction => {
                 matches_matcher(handler.matcher.as_deref(), matcher_input)
             }
             HookEventName::UserPromptSubmit | HookEventName::Stop => true,
@@ -110,6 +111,7 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
         HookEventName::SessionStart => HookScope::Thread,
         HookEventName::PreToolUse
         | HookEventName::PostToolUse
+        | HookEventName::AfterCompaction
         | HookEventName::UserPromptSubmit
         | HookEventName::Stop => HookScope::Turn,
     }
@@ -120,6 +122,7 @@ mod tests {
     use std::path::PathBuf;
 
     use codex_protocol::protocol::HookEventName;
+    use pretty_assertions::assert_eq;
 
     use super::ConfiguredHandler;
     use super::select_handlers;
@@ -201,6 +204,29 @@ mod tests {
     }
 
     #[test]
+    fn after_compaction_matches_source() {
+        let handlers = vec![
+            make_handler(
+                HookEventName::AfterCompaction,
+                Some("^manual$"),
+                "echo same",
+                0,
+            ),
+            make_handler(
+                HookEventName::AfterCompaction,
+                Some("^auto$"),
+                "echo same",
+                1,
+            ),
+        ];
+
+        let selected = select_handlers(&handlers, HookEventName::AfterCompaction, Some("manual"));
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].display_order, 0);
+    }
+
+    #[test]
     fn pre_tool_use_star_matcher_matches_all_tools() {
         let handlers = vec![
             make_handler(HookEventName::PreToolUse, Some("*"), "echo same", 0),
@@ -261,8 +287,8 @@ mod tests {
         let selected = select_handlers(&handlers, HookEventName::Stop, None);
 
         assert_eq!(selected.len(), 3);
-        assert_eq!(selected[0].command, "first");
-        assert_eq!(selected[1].command, "second");
-        assert_eq!(selected[2].command, "third");
+        assert_eq!(selected[0].display_order, 0);
+        assert_eq!(selected[1].display_order, 1);
+        assert_eq!(selected[2].display_order, 2);
     }
 }

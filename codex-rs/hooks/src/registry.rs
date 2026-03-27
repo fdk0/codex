@@ -3,6 +3,8 @@ use tokio::process::Command;
 
 use crate::engine::ClaudeHooksEngine;
 use crate::engine::CommandShell;
+use crate::events::after_compaction::AfterCompactionOutcome;
+use crate::events::after_compaction::AfterCompactionRequest;
 use crate::events::post_tool_use::PostToolUseOutcome;
 use crate::events::post_tool_use::PostToolUseRequest;
 use crate::events::pre_tool_use::PreToolUseOutcome;
@@ -96,11 +98,11 @@ impl Hooks {
         self.engine.preview_session_start(request)
     }
 
-    pub fn preview_pre_tool_use(
+    pub fn preview_after_compaction(
         &self,
-        request: &PreToolUseRequest,
+        request: &AfterCompactionRequest,
     ) -> Vec<codex_protocol::protocol::HookRunSummary> {
-        self.engine.preview_pre_tool_use(request)
+        self.engine.preview_after_compaction(request)
     }
 
     pub fn preview_post_tool_use(
@@ -108,6 +110,13 @@ impl Hooks {
         request: &PostToolUseRequest,
     ) -> Vec<codex_protocol::protocol::HookRunSummary> {
         self.engine.preview_post_tool_use(request)
+    }
+
+    pub fn preview_pre_tool_use(
+        &self,
+        request: &PreToolUseRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_pre_tool_use(request)
     }
 
     pub async fn run_session_start(
@@ -118,12 +127,19 @@ impl Hooks {
         self.engine.run_session_start(request, turn_id).await
     }
 
-    pub async fn run_pre_tool_use(&self, request: PreToolUseRequest) -> PreToolUseOutcome {
-        self.engine.run_pre_tool_use(request).await
+    pub async fn run_after_compaction(
+        &self,
+        request: AfterCompactionRequest,
+    ) -> AfterCompactionOutcome {
+        self.engine.run_after_compaction(request).await
     }
 
     pub async fn run_post_tool_use(&self, request: PostToolUseRequest) -> PostToolUseOutcome {
         self.engine.run_post_tool_use(request).await
+    }
+
+    pub async fn run_pre_tool_use(&self, request: PreToolUseRequest) -> PreToolUseOutcome {
+        self.engine.run_pre_tool_use(request).await
     }
 
     pub fn preview_user_prompt_submit(

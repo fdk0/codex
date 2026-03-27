@@ -1,3 +1,4 @@
+pub mod after_compaction;
 pub(crate) mod common;
 pub mod post_tool_use;
 pub mod pre_tool_use;

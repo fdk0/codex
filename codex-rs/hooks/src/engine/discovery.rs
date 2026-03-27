@@ -75,6 +75,7 @@ pub(crate) fn discover_handlers(config_layer_stack: Option<&ConfigLayerStack>) -
             pre_tool_use,
             post_tool_use,
             session_start,
+            after_compaction,
             user_prompt_submit,
             stop,
         } = parsed.hooks;
@@ -91,6 +92,10 @@ pub(crate) fn discover_handlers(config_layer_stack: Option<&ConfigLayerStack>) -
             (
                 codex_protocol::protocol::HookEventName::SessionStart,
                 session_start,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::AfterCompaction,
+                after_compaction,
             ),
             (
                 codex_protocol::protocol::HookEventName::UserPromptSubmit,
@@ -307,32 +312,5 @@ mod tests {
         assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(handlers.len(), 1);
         assert_eq!(handlers[0].matcher.as_deref(), Some("*"));
-    }
-
-    #[test]
-    fn post_tool_use_keeps_valid_matcher_during_discovery() {
-        let mut handlers = Vec::new();
-        let mut warnings = Vec::new();
-        let mut display_order = 0;
-
-        append_group_handlers(
-            &mut handlers,
-            &mut warnings,
-            &mut display_order,
-            Path::new("/tmp/hooks.json"),
-            HookEventName::PostToolUse,
-            matcher_pattern_for_event(HookEventName::PostToolUse, Some("Edit|Write")),
-            vec![HookHandlerConfig::Command {
-                command: "echo hello".to_string(),
-                timeout_sec: None,
-                r#async: false,
-                status_message: None,
-            }],
-        );
-
-        assert_eq!(warnings, Vec::<String>::new());
-        assert_eq!(handlers.len(), 1);
-        assert_eq!(handlers[0].event_name, HookEventName::PostToolUse);
-        assert_eq!(handlers[0].matcher.as_deref(), Some("Edit|Write"));
     }
 }

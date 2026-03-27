@@ -19,6 +19,8 @@ const PRE_TOOL_USE_INPUT_FIXTURE: &str = "pre-tool-use.command.input.schema.json
 const PRE_TOOL_USE_OUTPUT_FIXTURE: &str = "pre-tool-use.command.output.schema.json";
 const SESSION_START_INPUT_FIXTURE: &str = "session-start.command.input.schema.json";
 const SESSION_START_OUTPUT_FIXTURE: &str = "session-start.command.output.schema.json";
+const AFTER_COMPACTION_INPUT_FIXTURE: &str = "after-compaction.command.input.schema.json";
+const AFTER_COMPACTION_OUTPUT_FIXTURE: &str = "after-compaction.command.output.schema.json";
 const USER_PROMPT_SUBMIT_INPUT_FIXTURE: &str = "user-prompt-submit.command.input.schema.json";
 const USER_PROMPT_SUBMIT_OUTPUT_FIXTURE: &str = "user-prompt-submit.command.output.schema.json";
 const STOP_INPUT_FIXTURE: &str = "stop.command.input.schema.json";
@@ -73,6 +75,8 @@ pub(crate) enum HookEventNameWire {
     PostToolUse,
     #[serde(rename = "SessionStart")]
     SessionStart,
+    #[serde(rename = "AfterCompaction")]
+    AfterCompaction,
     #[serde(rename = "UserPromptSubmit")]
     UserPromptSubmit,
     #[serde(rename = "Stop")]
@@ -162,6 +166,13 @@ pub(crate) struct PreToolUseToolInput {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PostToolUseToolInput {
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(rename = "pre-tool-use.command.input")]
 pub(crate) struct PreToolUseCommandInput {
@@ -179,13 +190,6 @@ pub(crate) struct PreToolUseCommandInput {
     pub tool_name: String,
     pub tool_input: PreToolUseToolInput,
     pub tool_use_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PostToolUseToolInput {
-    pub command: String,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -224,6 +228,26 @@ pub(crate) struct SessionStartCommandOutputWire {
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SessionStartHookSpecificOutputWire {
+    pub hook_event_name: HookEventNameWire,
+    #[serde(default)]
+    pub additional_context: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "after-compaction.command.output")]
+pub(crate) struct AfterCompactionCommandOutputWire {
+    #[serde(flatten)]
+    pub universal: HookUniversalOutputWire,
+    #[serde(default)]
+    pub hook_specific_output: Option<AfterCompactionHookSpecificOutputWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AfterCompactionHookSpecificOutputWire {
     pub hook_event_name: HookEventNameWire,
     #[serde(default)]
     pub additional_context: Option<String>,
@@ -313,6 +337,24 @@ impl SessionStartCommandInput {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "after-compaction.command.input")]
+pub(crate) struct AfterCompactionCommandInput {
+    pub session_id: String,
+    pub turn_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "after_compaction_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub active_profile: NullableString,
+    pub model: String,
+    #[schemars(schema_with = "permission_mode_schema")]
+    pub permission_mode: String,
+    #[schemars(schema_with = "after_compaction_source_schema")]
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[schemars(rename = "user-prompt-submit.command.input")]
 pub(crate) struct UserPromptSubmitCommandInput {
     pub session_id: String,
@@ -373,6 +415,14 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
     write_schema(
         &generated_dir.join(SESSION_START_OUTPUT_FIXTURE),
         schema_json::<SessionStartCommandOutputWire>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(AFTER_COMPACTION_INPUT_FIXTURE),
+        schema_json::<AfterCompactionCommandInput>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(AFTER_COMPACTION_OUTPUT_FIXTURE),
+        schema_json::<AfterCompactionCommandOutputWire>()?,
     )?;
     write_schema(
         &generated_dir.join(USER_PROMPT_SUBMIT_INPUT_FIXTURE),
@@ -457,6 +507,10 @@ fn post_tool_use_tool_name_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_const_schema("Bash")
 }
 
+fn after_compaction_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("AfterCompaction")
+}
+
 fn pre_tool_use_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_const_schema("PreToolUse")
 }
@@ -485,6 +539,10 @@ fn permission_mode_schema(_gen: &mut SchemaGenerator) -> Schema {
 
 fn session_start_source_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_enum_schema(&["startup", "resume", "clear"])
+}
+
+fn after_compaction_source_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_enum_schema(&["manual", "auto", "modelSwitch"])
 }
 
 fn string_const_schema(value: &str) -> Schema {
@@ -516,6 +574,9 @@ fn default_continue() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::AFTER_COMPACTION_INPUT_FIXTURE;
+    use super::AFTER_COMPACTION_OUTPUT_FIXTURE;
+    use super::AfterCompactionCommandInput;
     use super::POST_TOOL_USE_INPUT_FIXTURE;
     use super::POST_TOOL_USE_OUTPUT_FIXTURE;
     use super::PRE_TOOL_USE_INPUT_FIXTURE;
@@ -556,6 +617,12 @@ mod tests {
             SESSION_START_OUTPUT_FIXTURE => {
                 include_str!("../schema/generated/session-start.command.output.schema.json")
             }
+            AFTER_COMPACTION_INPUT_FIXTURE => {
+                include_str!("../schema/generated/after-compaction.command.input.schema.json")
+            }
+            AFTER_COMPACTION_OUTPUT_FIXTURE => {
+                include_str!("../schema/generated/after-compaction.command.output.schema.json")
+            }
             USER_PROMPT_SUBMIT_INPUT_FIXTURE => {
                 include_str!("../schema/generated/user-prompt-submit.command.input.schema.json")
             }
@@ -589,6 +656,8 @@ mod tests {
             PRE_TOOL_USE_OUTPUT_FIXTURE,
             SESSION_START_INPUT_FIXTURE,
             SESSION_START_OUTPUT_FIXTURE,
+            AFTER_COMPACTION_INPUT_FIXTURE,
+            AFTER_COMPACTION_OUTPUT_FIXTURE,
             USER_PROMPT_SUBMIT_INPUT_FIXTURE,
             USER_PROMPT_SUBMIT_OUTPUT_FIXTURE,
             STOP_INPUT_FIXTURE,
@@ -615,6 +684,11 @@ mod tests {
                 .expect("serialize post tool use input schema"),
         )
         .expect("parse post tool use input schema");
+        let after_compaction: Value = serde_json::from_slice(
+            &schema_json::<AfterCompactionCommandInput>()
+                .expect("serialize after compaction input schema"),
+        )
+        .expect("parse after compaction input schema");
         let user_prompt_submit: Value = serde_json::from_slice(
             &schema_json::<UserPromptSubmitCommandInput>()
                 .expect("serialize user prompt submit input schema"),
@@ -625,7 +699,13 @@ mod tests {
         )
         .expect("parse stop input schema");
 
-        for schema in [&pre_tool_use, &post_tool_use, &user_prompt_submit, &stop] {
+        for schema in [
+            &pre_tool_use,
+            &post_tool_use,
+            &after_compaction,
+            &user_prompt_submit,
+            &stop,
+        ] {
             assert_eq!(schema["properties"]["turn_id"]["type"], "string");
             assert!(
                 schema["required"]
