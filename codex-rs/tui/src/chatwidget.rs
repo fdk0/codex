@@ -3106,7 +3106,13 @@ impl ChatWidget {
                 codex_protocol::protocol::HookOutputEntryKind::Context => "hook context: ",
                 codex_protocol::protocol::HookOutputEntryKind::Error => "error: ",
             };
-            lines.push(format!("  {prefix}{}", entry.text).into());
+            let continuation_prefix = " ".repeat(prefix.len());
+            let mut entry_lines = entry.text.split('\n');
+            let first_line = entry_lines.next().unwrap_or_default();
+            lines.push(format!("  {prefix}{first_line}").into());
+            for continuation in entry_lines {
+                lines.push(format!("  {continuation_prefix}{continuation}").into());
+            }
         }
         self.add_to_history(PlainHistoryCell::new(lines));
         self.request_redraw();
@@ -5786,7 +5792,11 @@ impl ChatWidget {
         self.last_rendered_user_message_event =
             Some(Self::rendered_user_message_event_from_event(&event));
         let remote_image_urls = event.images.unwrap_or_default();
-        if !event.message.trim().is_empty()
+        if let Some(message) =
+            history_cell::format_subagent_notification_for_display(&event.message)
+        {
+            self.add_to_history(history_cell::new_info_event(message, None));
+        } else if !event.message.trim().is_empty()
             || !event.text_elements.is_empty()
             || !remote_image_urls.is_empty()
         {

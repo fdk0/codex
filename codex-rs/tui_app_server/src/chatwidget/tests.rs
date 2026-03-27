@@ -22,6 +22,7 @@ use crate::test_support::test_path_display;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
 use codex_app_server_protocol::AppSummary;
+use codex_app_server_protocol::CollabAgentRef as AppServerCollabAgentRef;
 use codex_app_server_protocol::CollabAgentState as AppServerCollabAgentState;
 use codex_app_server_protocol::CollabAgentStatus as AppServerCollabAgentStatus;
 use codex_app_server_protocol::CollabAgentTool as AppServerCollabAgentTool;
@@ -1757,6 +1758,36 @@ async fn thread_snapshot_replay_preserves_agent_message_during_review_mode() {
     assert!(lines_to_single_string(&inserted[0]).contains("Review progress update"));
 }
 
+#[tokio::test]
+async fn committed_user_message_subagent_notification_renders_formatted_info_cell() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+    let notification = "<subagent_notification>\n{\"agent_id\":\"00000000-0000-0000-0000-000000000141\",\"status\":{\"completed\":\"PR #141 finished monitoring.\\n- Overall state: OPEN\\n- Ready to merge: yes\"}}\n</subagent_notification>";
+
+    complete_user_message(&mut chat, "user-subagent-notification", notification);
+
+    let inserted = drain_insert_history(&mut rx);
+    assert_eq!(inserted.len(), 1);
+    let rendered = lines_to_single_string(&inserted[0]);
+    assert_snapshot!(
+        "formatted_subagent_notification_user_message_event",
+        rendered
+    );
+}
+
+#[tokio::test]
+async fn committed_user_message_subagent_notification_accepts_agent_path_payload() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+    let notification = "<subagent_notification>\n{\"agent_path\":\"worker/child-1\",\"status\":{\"completed\":\"done\"}}\n</subagent_notification>";
+
+    complete_user_message(&mut chat, "user-subagent-notification-path", notification);
+
+    let inserted = drain_insert_history(&mut rx);
+    assert_eq!(inserted.len(), 1);
+    let rendered = lines_to_single_string(&inserted[0]);
+    assert!(rendered.contains("Subagent completed"));
+    assert!(rendered.contains("Agent: worker/child-1"));
+}
+
 /// Exiting review restores the pre-review context window indicator.
 #[tokio::test]
 async fn review_restores_context_window_indicator() {
@@ -1942,7 +1973,6 @@ async fn helpers_are_available_and_do_not_panic() {
         model: Some(resolved_model),
         startup_tooltip_override: None,
         status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
-        terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         session_telemetry,
     };
     let mut w = ChatWidget::new_with_app_event(init);
@@ -2045,10 +2075,8 @@ async fn make_chatwidget_manual(
         stream_controller: None,
         plan_stream_controller: None,
         pending_guardian_review_status: PendingGuardianReviewStatus::default(),
-        terminal_title_status_kind: TerminalTitleStatusKind::Working,
         last_copyable_output: None,
         running_commands: HashMap::new(),
-        collab_agent_metadata: HashMap::new(),
         pending_collab_spawn_requests: HashMap::new(),
         suppressed_exec_calls: HashSet::new(),
         skills_all: Vec::new(),
@@ -2097,7 +2125,6 @@ async fn make_chatwidget_manual(
         had_work_activity: false,
         saw_plan_update_this_turn: false,
         saw_plan_item_this_turn: false,
-        last_plan_progress: None,
         plan_delta_buffer: String::new(),
         plan_item_active: false,
         last_separator_elapsed_secs: None,
@@ -2109,11 +2136,6 @@ async fn make_chatwidget_manual(
         current_cwd: None,
         session_network_proxy: None,
         status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
-        terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
-        last_terminal_title: None,
-        terminal_title_setup_original_items: None,
-        terminal_title_animation_origin: Instant::now(),
-        status_line_project_root_name_cache: None,
         status_line_branch: None,
         status_line_branch_cwd: None,
         status_line_branch_pending: false,
@@ -4778,17 +4800,6 @@ async fn live_app_server_collab_wait_items_render_history() {
         ThreadId::from_string("019cff70-2599-75e2-af72-b958ce5dc1cc").expect("valid thread id");
     let other_receiver_thread_id =
         ThreadId::from_string("019cff70-2599-75e2-af72-b96db334332d").expect("valid thread id");
-    chat.set_collab_agent_metadata(
-        receiver_thread_id,
-        Some("Robie".to_string()),
-        Some("explorer".to_string()),
-    );
-    chat.set_collab_agent_metadata(
-        other_receiver_thread_id,
-        Some("Ada".to_string()),
-        Some("reviewer".to_string()),
-    );
-
     chat.handle_server_notification(
         ServerNotification::ItemStarted(ItemStartedNotification {
             thread_id: "thread-1".to_string(),
@@ -4801,6 +4812,18 @@ async fn live_app_server_collab_wait_items_render_history() {
                 receiver_thread_ids: vec![
                     receiver_thread_id.to_string(),
                     other_receiver_thread_id.to_string(),
+                ],
+                receiver_agents: vec![
+                    AppServerCollabAgentRef {
+                        thread_id: receiver_thread_id.to_string(),
+                        agent_nickname: Some("Robie".to_string()),
+                        agent_role: Some("explorer".to_string()),
+                    },
+                    AppServerCollabAgentRef {
+                        thread_id: other_receiver_thread_id.to_string(),
+                        agent_nickname: Some("Bob".to_string()),
+                        agent_role: Some("review".to_string()),
+                    },
                 ],
                 prompt: None,
                 model: None,
@@ -4823,6 +4846,18 @@ async fn live_app_server_collab_wait_items_render_history() {
                 receiver_thread_ids: vec![
                     receiver_thread_id.to_string(),
                     other_receiver_thread_id.to_string(),
+                ],
+                receiver_agents: vec![
+                    AppServerCollabAgentRef {
+                        thread_id: receiver_thread_id.to_string(),
+                        agent_nickname: Some("Robie".to_string()),
+                        agent_role: Some("explorer".to_string()),
+                    },
+                    AppServerCollabAgentRef {
+                        thread_id: other_receiver_thread_id.to_string(),
+                        agent_nickname: Some("Bob".to_string()),
+                        agent_role: Some("review".to_string()),
+                    },
                 ],
                 prompt: None,
                 model: None,
@@ -4874,6 +4909,7 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 status: AppServerCollabAgentToolCallStatus::InProgress,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: Vec::new(),
+                receiver_agents: Vec::new(),
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
@@ -4893,6 +4929,11 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 status: AppServerCollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                receiver_agents: vec![AppServerCollabAgentRef {
+                    thread_id: spawned_thread_id.to_string(),
+                    agent_nickname: Some("Robie".to_string()),
+                    agent_role: Some("explorer".to_string()),
+                }],
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
@@ -6847,7 +6888,6 @@ async fn collaboration_modes_defaults_to_code_on_startup() {
         model: Some(resolved_model.clone()),
         startup_tooltip_override: None,
         status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
-        terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         session_telemetry,
     };
 
@@ -6892,7 +6932,6 @@ async fn experimental_mode_plan_is_ignored_on_startup() {
         model: Some(resolved_model.clone()),
         startup_tooltip_override: None,
         status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
-        terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         session_telemetry,
     };
 
@@ -12800,7 +12839,7 @@ async fn assert_hook_events_snapshot(
                     },
                     codex_protocol::protocol::HookOutputEntry {
                         kind: codex_protocol::protocol::HookOutputEntryKind::Context,
-                        text: "Remember the startup checklist.".to_string(),
+                        text: "SESSION_CONTEXT v1\nRepoRoot: /tmp/repo\nQueue: open=12".to_string(),
                     },
                 ],
             },
@@ -12813,6 +12852,50 @@ async fn assert_hook_events_snapshot(
         .map(|lines| lines_to_single_string(lines))
         .collect::<String>();
     assert_snapshot!(snapshot_name, combined);
+}
+
+#[tokio::test]
+async fn replayed_hook_run_item_renders_hook_context() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.replay_thread_item(
+        AppServerThreadItem::HookRun {
+            id: "hook-run-1".to_string(),
+            run: codex_app_server_protocol::HookRunSummary {
+                id: "hook-run-1".to_string(),
+                event_name: codex_app_server_protocol::HookEventName::SessionStart,
+                handler_type: codex_app_server_protocol::HookHandlerType::Command,
+                execution_mode: codex_app_server_protocol::HookExecutionMode::Sync,
+                scope: codex_app_server_protocol::HookScope::Turn,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 0,
+                status: codex_app_server_protocol::HookRunStatus::Completed,
+                status_message: Some("warming the shell".to_string()),
+                started_at: 1,
+                completed_at: Some(11),
+                duration_ms: Some(10),
+                entries: vec![
+                    codex_app_server_protocol::HookOutputEntry {
+                        kind: codex_app_server_protocol::HookOutputEntryKind::Warning,
+                        text: "Heads up from the hook".to_string(),
+                    },
+                    codex_app_server_protocol::HookOutputEntry {
+                        kind: codex_app_server_protocol::HookOutputEntryKind::Context,
+                        text: "SESSION_CONTEXT v1\nRepoRoot: /tmp/repo\nQueue: open=12".to_string(),
+                    },
+                ],
+            },
+        },
+        "turn-1".to_string(),
+        ReplayKind::ThreadSnapshot,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let combined = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert_snapshot!("replayed_hook_run_item_renders_hook_context", combined);
 }
 
 // Combined visual snapshot using vt100 for history + direct buffer overlay for UI.

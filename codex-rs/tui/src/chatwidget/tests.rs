@@ -6707,7 +6707,11 @@ async fn undo_started_refreshes_default_spinner_project_title() {
         msg: EventMsg::UndoStarted(UndoStartedEvent { message: None }),
     });
 
-    assert_eq!(chat.last_terminal_title, Some(format!("⠋ {project}")));
+    let expected_project = ChatWidget::truncate_terminal_title_part(project, /*max_chars*/ 24);
+    assert_eq!(
+        chat.last_terminal_title,
+        Some(format!("⠋ {expected_project}"))
+    );
 }
 
 /// The commit picker shows only commit subjects (no timestamps).
@@ -11651,7 +11655,11 @@ async fn default_terminal_title_refreshes_when_spinner_state_changes() {
 
     chat.refresh_terminal_title();
 
-    assert_eq!(chat.last_terminal_title, Some(format!("⠋ {project}")));
+    let expected_project = ChatWidget::truncate_terminal_title_part(project, /*max_chars*/ 24);
+    assert_eq!(
+        chat.last_terminal_title,
+        Some(format!("⠋ {expected_project}"))
+    );
 }
 
 #[tokio::test]

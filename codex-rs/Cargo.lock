@@ -1334,6 +1334,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9b18233253483ce2f65329a24072ec414db782531bdbb7d0bbc4bd2ce6b7e21"
 
 [[package]]
+name = "codex-agent-dashboard"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "codex-app-server-client",
+ "codex-app-server-protocol",
+ "crossterm",
+ "futures",
+ "pretty_assertions",
+ "ratatui",
+ "textwrap 0.16.2",
+ "tokio",
+]
+
+[[package]]
 name = "codex-analytics"
 version = "0.0.0"
 dependencies = [

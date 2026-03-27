@@ -5689,6 +5689,29 @@
           }
         ]
       },
+      "CollabAgentRef": {
+        "properties": {
+          "agentNickname": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agentRole": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "threadId"
+        ],
+        "type": "object"
+      },
       "CollabAgentState": {
         "properties": {
           "message": {
@@ -8124,6 +8147,7 @@
           "preToolUse",
           "postToolUse",
           "sessionStart",
+          "afterCompaction",
           "userPromptSubmit",
           "stop"
         ],
@@ -12026,6 +12050,13 @@
               "null"
             ]
           },
+          "parentThreadId": {
+            "description": "Direct parent thread id for AgentControl-spawned child threads.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "path": {
             "description": "[UNSTABLE] Path to the thread on disk.",
             "type": [
@@ -12372,6 +12403,30 @@
               "type"
             ],
             "title": "HookPromptThreadItem",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "run": {
+                "$ref": "#/definitions/v2/HookRunSummary"
+              },
+              "type": {
+                "enum": [
+                  "hookRun"
+                ],
+                "title": "HookRunThreadItemType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "run",
+              "type"
+            ],
+            "title": "HookRunThreadItem",
             "type": "object"
           },
           {
@@ -12742,6 +12797,14 @@
                   }
                 ],
                 "description": "Reasoning effort requested for the spawned agent, when applicable."
+              },
+              "receiverAgents": {
+                "default": [],
+                "description": "Optional nickname/role metadata for receiving agents when available.",
+                "items": {
+                  "$ref": "#/definitions/v2/CollabAgentRef"
+                },
+                "type": "array"
               },
               "receiverThreadIds": {
                 "description": "Thread ID of the receiving agent, when applicable. In case of spawn operation, this corresponds to the newly spawned agent.",

@@ -2,9 +2,7 @@
 source: tui_app_server/src/chatwidget/tests.rs
 expression: combined
 ---
-• Running PostToolUse hook: warming the shell
-
-PostToolUse hook (completed)
+SessionStart hook (completed)
   warning: Heads up from the hook
   hook context: SESSION_CONTEXT v1
                 RepoRoot: /tmp/repo

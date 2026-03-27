@@ -838,6 +838,7 @@ fn thread_item_to_core(item: &ThreadItem) -> Option<TurnItem> {
         | ThreadItem::McpToolCall { .. }
         | ThreadItem::DynamicToolCall { .. }
         | ThreadItem::CollabAgentToolCall { .. }
+        | ThreadItem::HookRun { .. }
         | ThreadItem::HookPrompt { .. }
         | ThreadItem::ImageView { .. }
         | ThreadItem::EnteredReviewMode { .. }
@@ -1243,6 +1244,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             cli_version: "test".to_string(),
             source: SessionSource::Cli.into(),
+            parent_thread_id: None,
             agent_nickname: None,
             agent_role: None,
             git_info: None,
@@ -1409,6 +1411,7 @@ mod tests {
                 cwd: PathBuf::from("/tmp/project"),
                 cli_version: "test".to_string(),
                 source: SessionSource::Cli.into(),
+                parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
                 git_info: None,

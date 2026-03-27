@@ -8,6 +8,7 @@ use app::App;
 pub use app::AppExitInfo;
 pub use app::ExitReason;
 use app_server_session::AppServerSession;
+use app_server_session::thread_params_mode_for_remote_url;
 use codex_app_server_client::AppServerClient;
 use codex_app_server_client::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
 use codex_app_server_client::InProcessAppServerClient;
@@ -134,6 +135,7 @@ mod resume_picker;
 mod selection_list;
 mod session_log;
 mod shimmer;
+mod skills_cwd;
 mod skills_helpers;
 mod slash_command;
 mod status;
@@ -410,6 +412,17 @@ async fn start_app_server(
     }
 }
 
+fn session_thread_params_mode(
+    target: &AppServerTarget,
+) -> crate::app_server_session::ThreadParamsMode {
+    match target {
+        AppServerTarget::Embedded => crate::app_server_session::ThreadParamsMode::Embedded,
+        AppServerTarget::Remote { websocket_url, .. } => {
+            thread_params_mode_for_remote_url(websocket_url)
+        }
+    }
+}
+
 pub(crate) async fn start_app_server_for_picker(
     config: &Config,
     target: &AppServerTarget,
@@ -424,7 +437,10 @@ pub(crate) async fn start_app_server_for_picker(
         codex_feedback::CodexFeedback::new(),
     )
     .await?;
-    Ok(AppServerSession::new(app_server))
+    Ok(AppServerSession::new(
+        app_server,
+        session_thread_params_mode(target),
+    ))
 }
 
 #[cfg(test)]
@@ -1023,6 +1039,7 @@ async fn run_ratatui_app(
                 feedback.clone(),
             )
             .await?,
+            session_thread_params_mode(&app_server_target),
         ))
     } else {
         None
@@ -1137,6 +1154,7 @@ async fn run_ratatui_app(
                 feedback.clone(),
             )
             .await?,
+            session_thread_params_mode(&app_server_target),
         ))
     } else {
         None
@@ -1354,7 +1372,7 @@ async fn run_ratatui_app(
 
     let app_result = App::run(
         &mut tui,
-        AppServerSession::new(app_server),
+        AppServerSession::new(app_server, session_thread_params_mode(&app_server_target)),
         config,
         cli_kv_overrides.clone(),
         overrides.clone(),

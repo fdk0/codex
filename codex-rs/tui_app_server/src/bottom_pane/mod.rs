@@ -102,7 +102,6 @@ pub(crate) use status_line_setup::StatusLineItem;
 pub(crate) use status_line_setup::StatusLinePreviewData;
 pub(crate) use status_line_setup::StatusLineSetupView;
 pub(crate) use title_setup::TerminalTitleItem;
-pub(crate) use title_setup::TerminalTitleSetupView;
 mod paste_burst;
 mod pending_input_preview;
 mod pending_thread_approvals;
@@ -174,6 +173,7 @@ pub(crate) struct BottomPane {
     is_task_running: bool,
     esc_backtrack_hint: bool,
     animations_enabled: bool,
+    active_agent_summary: Option<ActiveAgentStatusSummary>,
 
     /// Inline status indicator shown above the composer while a task is running.
     status: Option<StatusIndicatorWidget>,
@@ -188,6 +188,8 @@ pub(crate) struct BottomPane {
     pending_thread_approvals: PendingThreadApprovals,
     context_window_percent: Option<i64>,
     context_window_used_tokens: Option<i64>,
+    base_status_line: Option<Line<'static>>,
+    base_status_line_enabled: bool,
 }
 
 pub(crate) struct BottomPaneParams {
@@ -199,6 +201,32 @@ pub(crate) struct BottomPaneParams {
     pub(crate) disable_paste_burst: bool,
     pub(crate) animations_enabled: bool,
     pub(crate) skills: Option<Vec<SkillMetadata>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActiveAgentStatusSummary {
+    pub(crate) label: String,
+    pub(crate) active_agents: usize,
+}
+
+impl ActiveAgentStatusSummary {
+    fn inline_message(&self) -> Option<String> {
+        let label = self.label.trim();
+        if label.is_empty() {
+            return None;
+        }
+
+        if self.active_agents == 0 {
+            return Some(label.to_string());
+        }
+
+        let noun = if self.active_agents == 1 {
+            "open agent"
+        } else {
+            "open agents"
+        };
+        Some(format!("{label} • {} {noun}", self.active_agents))
+    }
 }
 
 impl BottomPane {
@@ -237,8 +265,11 @@ impl BottomPane {
             pending_thread_approvals: PendingThreadApprovals::new(),
             esc_backtrack_hint: false,
             animations_enabled,
+            active_agent_summary: None,
             context_window_percent: None,
             context_window_used_tokens: None,
+            base_status_line: None,
+            base_status_line_enabled: false,
         }
     }
 
@@ -844,6 +875,18 @@ impl BottomPane {
         self.pending_thread_approvals.threads()
     }
 
+    /// Update the current active-agent summary shown in the composer/footer status line.
+    pub(crate) fn set_active_agent_summary(&mut self, summary: Option<ActiveAgentStatusSummary>) {
+        if self.active_agent_summary == summary {
+            return;
+        }
+
+        self.active_agent_summary = summary;
+        self.sync_status_inline_message();
+        self.sync_composer_status_line();
+        self.request_redraw();
+    }
+
     /// Update the unified-exec process set and refresh whichever summary surface is active.
     ///
     /// The summary may be displayed inline in the status row or as a dedicated
@@ -855,6 +898,29 @@ impl BottomPane {
         }
     }
 
+    fn compose_composer_status_line(&self) -> Option<Line<'static>> {
+        let mut spans = Vec::new();
+        if let Some(summary) = self
+            .active_agent_summary
+            .as_ref()
+            .and_then(ActiveAgentStatusSummary::inline_message)
+        {
+            spans.push(summary.into());
+        }
+        if let Some(base_status_line) = self.base_status_line.clone() {
+            if !spans.is_empty() {
+                spans.push(" · ".into());
+            }
+            spans.extend(base_status_line.spans);
+        }
+
+        if spans.is_empty() {
+            None
+        } else {
+            Some(Line::from(spans))
+        }
+    }
+
     /// Copy unified-exec summary text into the active status row, if any.
     ///
     /// This keeps status-line inline text synchronized without forcing the
@@ -863,6 +929,13 @@ impl BottomPane {
         if let Some(status) = self.status.as_mut() {
             status.update_inline_message(self.unified_exec_footer.summary_text());
         }
+    }
+
+    fn sync_composer_status_line(&mut self) {
+        let enabled = self.base_status_line_enabled || self.active_agent_summary.is_some();
+        self.composer.set_status_line_enabled(enabled);
+        self.composer
+            .set_status_line(self.compose_composer_status_line());
     }
 
     pub(crate) fn composer_is_empty(&self) -> bool {
@@ -1178,15 +1251,15 @@ impl BottomPane {
     }
 
     pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
-        if self.composer.set_status_line(status_line) {
-            self.request_redraw();
-        }
+        self.base_status_line = status_line;
+        self.sync_composer_status_line();
+        self.request_redraw();
     }
 
     pub(crate) fn set_status_line_enabled(&mut self, enabled: bool) {
-        if self.composer.set_status_line_enabled(enabled) {
-            self.request_redraw();
-        }
+        self.base_status_line_enabled = enabled;
+        self.sync_composer_status_line();
+        self.request_redraw();
     }
 
     /// Updates the contextual footer label and requests a redraw only when it changed.

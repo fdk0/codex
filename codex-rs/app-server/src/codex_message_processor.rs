@@ -8611,6 +8611,7 @@ fn build_thread_from_snapshot(
         path,
         cwd: config_snapshot.cwd.clone(),
         cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        parent_thread_id: thread_parent_id(&config_snapshot.session_source),
         agent_nickname: config_snapshot.session_source.get_nickname(),
         agent_role: config_snapshot.session_source.get_agent_role(),
         source: config_snapshot.session_source.clone().into(),
@@ -8653,12 +8654,24 @@ pub(crate) fn summary_to_thread(summary: ConversationSummary) -> Thread {
         path: Some(path),
         cwd,
         cli_version,
+        parent_thread_id: thread_parent_id(&source),
         agent_nickname: source.get_nickname(),
         agent_role: source.get_agent_role(),
         source: source.into(),
         git_info,
         name: None,
         turns: Vec::new(),
+    }
+}
+
+fn thread_parent_id(source: &codex_protocol::protocol::SessionSource) -> Option<String> {
+    match source {
+        codex_protocol::protocol::SessionSource::SubAgent(
+            codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+                parent_thread_id, ..
+            },
+        ) => Some(parent_thread_id.to_string()),
+        _ => None,
     }
 }
 
@@ -8794,6 +8807,11 @@ mod tests {
             reasoning_effort: None,
             personality: None,
             session_source: SessionSource::Cli,
+            agent_wake_parent_on_completion_default: false,
+            agent_wait_on_wake_enabled_behavior:
+                codex_core::config::types::AgentWaitOnWakeEnabledBehavior::Allow,
+            agent_wake_descendant_policy:
+                codex_core::config::types::AgentWakeDescendantPolicy::Immediate,
         };
 
         assert_eq!(
@@ -9134,6 +9152,10 @@ mod tests {
         let summary = read_summary_from_rollout(path.as_path(), "fallback").await?;
         let thread = summary_to_thread(summary);
 
+        assert_eq!(
+            thread.parent_thread_id,
+            Some("ad7f0408-99b8-4f6e-a46f-bd0eec433370".to_string())
+        );
         assert_eq!(thread.agent_nickname, Some("atlas".to_string()));
         assert_eq!(thread.agent_role, Some("explorer".to_string()));
         Ok(())
@@ -9230,6 +9252,10 @@ mod tests {
 
         let thread = summary_to_thread(summary);
 
+        assert_eq!(
+            thread.parent_thread_id,
+            Some("ad7f0408-99b8-4f6e-a46f-bd0eec433370".to_string())
+        );
         assert_eq!(thread.agent_nickname, Some("atlas".to_string()));
         assert_eq!(thread.agent_role, Some("explorer".to_string()));
         Ok(())

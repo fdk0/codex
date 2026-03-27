@@ -105,7 +105,11 @@ fn event_msg_persistence_mode(ev: &EventMsg) -> Option<EventPersistenceMode> {
         | EventMsg::TurnAborted(_)
         | EventMsg::TurnStarted(_)
         | EventMsg::TurnComplete(_)
-        | EventMsg::ImageGenerationEnd(_) => Some(EventPersistenceMode::Limited),
+        | EventMsg::ImageGenerationEnd(_)
+        // Persist completed hook runs so local and remote TUI replay can
+        // render visible hook results on resume without keeping every live
+        // lifecycle event.
+        | EventMsg::HookCompleted(_) => Some(EventPersistenceMode::Limited),
         EventMsg::ItemCompleted(event) => {
             // Plan items are derived from streaming tags and are not part of the
             // raw ResponseItem history, so we persist their completion to replay
@@ -168,7 +172,6 @@ fn event_msg_persistence_mode(ev: &EventMsg) -> Option<EventPersistenceMode> {
         | EventMsg::DeprecationNotice(_)
         | EventMsg::ItemStarted(_)
         | EventMsg::HookStarted(_)
-        | EventMsg::HookCompleted(_)
         | EventMsg::AgentMessageContentDelta(_)
         | EventMsg::PlanDelta(_)
         | EventMsg::ReasoningContentDelta(_)
@@ -188,7 +191,15 @@ mod tests {
     use super::EventPersistenceMode;
     use super::should_persist_event_msg;
     use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::HookCompletedEvent;
+    use codex_protocol::protocol::HookEventName;
+    use codex_protocol::protocol::HookExecutionMode;
+    use codex_protocol::protocol::HookHandlerType;
+    use codex_protocol::protocol::HookRunStatus;
+    use codex_protocol::protocol::HookRunSummary;
+    use codex_protocol::protocol::HookScope;
     use codex_protocol::protocol::ImageGenerationEndEvent;
+    use std::path::PathBuf;
 
     #[test]
     fn persists_image_generation_end_events_in_limited_mode() {
@@ -198,6 +209,33 @@ mod tests {
             revised_prompt: Some("final prompt".into()),
             result: "Zm9v".into(),
             saved_path: None,
+        });
+
+        assert!(should_persist_event_msg(
+            &event,
+            EventPersistenceMode::Limited
+        ));
+    }
+
+    #[test]
+    fn persists_hook_completed_events_in_limited_mode() {
+        let event = EventMsg::HookCompleted(HookCompletedEvent {
+            turn_id: Some("turn-1".into()),
+            run: HookRunSummary {
+                id: "hook-run-1".into(),
+                event_name: HookEventName::SessionStart,
+                handler_type: HookHandlerType::Command,
+                execution_mode: HookExecutionMode::Sync,
+                scope: HookScope::Turn,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 0,
+                status: HookRunStatus::Completed,
+                status_message: Some("loaded guards".into()),
+                started_at: 1,
+                completed_at: Some(2),
+                duration_ms: Some(1),
+                entries: Vec::new(),
+            },
         });
 
         assert!(should_persist_event_msg(

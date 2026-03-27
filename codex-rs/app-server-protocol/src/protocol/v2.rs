@@ -423,6 +423,15 @@ impl From<CoreHookOutputEntry> for HookOutputEntry {
     }
 }
 
+impl HookOutputEntry {
+    pub fn to_core(self) -> CoreHookOutputEntry {
+        CoreHookOutputEntry {
+            kind: self.kind.to_core(),
+            text: self.text,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -458,6 +467,30 @@ impl From<CoreHookRunSummary> for HookRunSummary {
             completed_at: value.completed_at,
             duration_ms: value.duration_ms,
             entries: value.entries.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl HookRunSummary {
+    pub fn to_core(self) -> CoreHookRunSummary {
+        CoreHookRunSummary {
+            id: self.id,
+            event_name: self.event_name.to_core(),
+            handler_type: self.handler_type.to_core(),
+            execution_mode: self.execution_mode.to_core(),
+            scope: self.scope.to_core(),
+            source_path: self.source_path,
+            display_order: self.display_order,
+            status: self.status.to_core(),
+            status_message: self.status_message,
+            started_at: self.started_at,
+            completed_at: self.completed_at,
+            duration_ms: self.duration_ms,
+            entries: self
+                .entries
+                .into_iter()
+                .map(HookOutputEntry::to_core)
+                .collect(),
         }
     }
 }
@@ -3594,6 +3627,8 @@ pub struct Thread {
     pub cli_version: String,
     /// Origin of the thread (CLI, VSCode, codex exec, codex app-server, etc.).
     pub source: SessionSource,
+    /// Direct parent thread id for AgentControl-spawned child threads.
+    pub parent_thread_id: Option<String>,
     /// Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
     pub agent_nickname: Option<String>,
     /// Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.
@@ -4239,6 +4274,9 @@ pub enum ThreadItem {
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
+    HookRun { id: String, run: HookRunSummary },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
     AgentMessage {
         id: String,
         text: String,
@@ -4334,6 +4372,9 @@ pub enum ThreadItem {
         /// Thread ID of the receiving agent, when applicable. In case of spawn operation,
         /// this corresponds to the newly spawned agent.
         receiver_thread_ids: Vec<String>,
+        /// Optional nickname/role metadata for receiving agents when available.
+        #[serde(default)]
+        receiver_agents: Vec<CollabAgentRef>,
         /// Prompt text sent as part of the collab tool call, when available.
         prompt: Option<String>,
         /// Model requested for the spawned agent, when applicable.
@@ -4388,6 +4429,7 @@ impl ThreadItem {
         match self {
             ThreadItem::UserMessage { id, .. }
             | ThreadItem::HookPrompt { id, .. }
+            | ThreadItem::HookRun { id, .. }
             | ThreadItem::AgentMessage { id, .. }
             | ThreadItem::Plan { id, .. }
             | ThreadItem::Reasoning { id, .. }
@@ -4688,6 +4730,15 @@ pub enum CollabAgentStatus {
     Errored,
     Shutdown,
     NotFound,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct CollabAgentRef {
+    pub thread_id: String,
+    pub agent_nickname: Option<String>,
+    pub agent_role: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -6047,6 +6098,23 @@ mod tests {
                 status: CollabAgentStatus::Interrupted,
                 message: None,
             }
+        );
+    }
+
+    #[test]
+    fn collab_agent_ref_serializes_camel_case() {
+        assert_eq!(
+            serde_json::to_value(CollabAgentRef {
+                thread_id: "thread-1".to_string(),
+                agent_nickname: Some("Robie".to_string()),
+                agent_role: Some("explorer".to_string()),
+            })
+            .expect("collab agent ref should serialize"),
+            json!({
+                "threadId": "thread-1",
+                "agentNickname": "Robie",
+                "agentRole": "explorer"
+            })
         );
     }
 

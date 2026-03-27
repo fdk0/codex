@@ -1,3 +1,4 @@
+use crate::protocol::v2::CollabAgentRef;
 use crate::protocol::v2::CollabAgentState;
 use crate::protocol::v2::CollabAgentTool;
 use crate::protocol::v2::CollabAgentToolCallStatus;
@@ -31,6 +32,7 @@ use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandBeginEvent;
 use codex_protocol::protocol::ExecCommandEndEvent;
+use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::ImageGenerationBeginEvent;
 use codex_protocol::protocol::ImageGenerationEndEvent;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -186,7 +188,8 @@ impl ThreadHistoryBuilder {
             EventMsg::ExitedReviewMode(payload) => self.handle_exited_review_mode(payload),
             EventMsg::ItemStarted(payload) => self.handle_item_started(payload),
             EventMsg::ItemCompleted(payload) => self.handle_item_completed(payload),
-            EventMsg::HookStarted(_) | EventMsg::HookCompleted(_) => {}
+            EventMsg::HookStarted(_) => {}
+            EventMsg::HookCompleted(payload) => self.handle_hook_completed(payload),
             EventMsg::Error(payload) => self.handle_error(payload),
             EventMsg::TokenCount(_) => {}
             EventMsg::ThreadRolledBack(payload) => self.handle_thread_rollback(payload),
@@ -614,6 +617,7 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: Vec::new(),
+            receiver_agents: Vec::new(),
             prompt: Some(payload.prompt.clone()),
             model: Some(payload.model.clone()),
             reasoning_effort: Some(payload.reasoning_effort),
@@ -649,6 +653,16 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids,
+            receiver_agents: payload
+                .new_thread_id
+                .map(|thread_id| {
+                    vec![CollabAgentRef {
+                        thread_id: thread_id.to_string(),
+                        agent_nickname: payload.new_agent_nickname.clone(),
+                        agent_role: payload.new_agent_role.clone(),
+                    }]
+                })
+                .unwrap_or_default(),
             prompt: Some(payload.prompt.clone()),
             model: Some(payload.model.clone()),
             reasoning_effort: Some(payload.reasoning_effort),
@@ -666,6 +680,7 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![payload.receiver_thread_id.to_string()],
+            receiver_agents: Vec::new(),
             prompt: Some(payload.prompt.clone()),
             model: None,
             reasoning_effort: None,
@@ -690,6 +705,11 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id.clone()],
+            receiver_agents: vec![CollabAgentRef {
+                thread_id: payload.receiver_thread_id.to_string(),
+                agent_nickname: payload.receiver_agent_nickname.clone(),
+                agent_role: payload.receiver_agent_role.clone(),
+            }],
             prompt: Some(payload.prompt.clone()),
             model: None,
             reasoning_effort: None,
@@ -710,6 +730,15 @@ impl ThreadHistoryBuilder {
                 .receiver_thread_ids
                 .iter()
                 .map(ToString::to_string)
+                .collect(),
+            receiver_agents: payload
+                .receiver_agents
+                .iter()
+                .map(|agent| CollabAgentRef {
+                    thread_id: agent.thread_id.to_string(),
+                    agent_nickname: agent.agent_nickname.clone(),
+                    agent_role: agent.agent_role.clone(),
+                })
                 .collect(),
             prompt: None,
             model: None,
@@ -746,6 +775,15 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids,
+            receiver_agents: payload
+                .agent_statuses
+                .iter()
+                .map(|agent| CollabAgentRef {
+                    thread_id: agent.thread_id.to_string(),
+                    agent_nickname: agent.agent_nickname.clone(),
+                    agent_role: agent.agent_role.clone(),
+                })
+                .collect(),
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -763,6 +801,7 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![payload.receiver_thread_id.to_string()],
+            receiver_agents: Vec::new(),
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -789,6 +828,11 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id],
+            receiver_agents: vec![CollabAgentRef {
+                thread_id: payload.receiver_thread_id.to_string(),
+                agent_nickname: payload.receiver_agent_nickname.clone(),
+                agent_role: payload.receiver_agent_role.clone(),
+            }],
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -806,6 +850,11 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![payload.receiver_thread_id.to_string()],
+            receiver_agents: vec![CollabAgentRef {
+                thread_id: payload.receiver_thread_id.to_string(),
+                agent_nickname: payload.receiver_agent_nickname.clone(),
+                agent_role: payload.receiver_agent_role.clone(),
+            }],
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -835,6 +884,11 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id],
+            receiver_agents: vec![CollabAgentRef {
+                thread_id: payload.receiver_thread_id.to_string(),
+                agent_nickname: payload.receiver_agent_nickname.clone(),
+                agent_role: payload.receiver_agent_role.clone(),
+            }],
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -907,6 +961,18 @@ impl ThreadHistoryBuilder {
         // If the event has no ID (or refers to an unknown turn), fall back to the active turn.
         if let Some(turn) = self.current_turn.as_mut() {
             turn.status = TurnStatus::Interrupted;
+        }
+    }
+
+    fn handle_hook_completed(&mut self, payload: &HookCompletedEvent) {
+        let item = ThreadItem::HookRun {
+            id: payload.run.id.clone(),
+            run: payload.run.clone().into(),
+        };
+        if let Some(turn_id) = payload.turn_id.as_deref() {
+            self.upsert_item_in_turn_id(turn_id, item);
+        } else {
+            self.upsert_item_in_current_turn(item);
         }
     }
 
@@ -1217,6 +1283,15 @@ mod tests {
     use codex_protocol::protocol::DynamicToolCallResponseEvent;
     use codex_protocol::protocol::ExecCommandEndEvent;
     use codex_protocol::protocol::ExecCommandSource;
+    use codex_protocol::protocol::HookCompletedEvent;
+    use codex_protocol::protocol::HookEventName;
+    use codex_protocol::protocol::HookExecutionMode;
+    use codex_protocol::protocol::HookHandlerType;
+    use codex_protocol::protocol::HookOutputEntry;
+    use codex_protocol::protocol::HookOutputEntryKind;
+    use codex_protocol::protocol::HookRunStatus;
+    use codex_protocol::protocol::HookRunSummary;
+    use codex_protocol::protocol::HookScope;
     use codex_protocol::protocol::ItemStartedEvent;
     use codex_protocol::protocol::McpInvocation;
     use codex_protocol::protocol::McpToolCallEndEvent;
@@ -2489,6 +2564,11 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: "00000000-0000-0000-0000-000000000001".into(),
                 receiver_thread_ids: vec!["00000000-0000-0000-0000-000000000002".into()],
+                receiver_agents: vec![CollabAgentRef {
+                    thread_id: "00000000-0000-0000-0000-000000000002".into(),
+                    agent_nickname: None,
+                    agent_role: None,
+                }],
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -2546,6 +2626,11 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: "00000000-0000-0000-0000-000000000001".into(),
                 receiver_thread_ids: vec!["00000000-0000-0000-0000-000000000002".into()],
+                receiver_agents: vec![CollabAgentRef {
+                    thread_id: "00000000-0000-0000-0000-000000000002".into(),
+                    agent_nickname: Some("Scout".into()),
+                    agent_role: Some("explorer".into()),
+                }],
                 prompt: Some("inspect the repo".into()),
                 model: Some("gpt-5.4-mini".into()),
                 reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
@@ -2614,6 +2699,11 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender.to_string(),
                 receiver_thread_ids: vec![receiver.to_string()],
+                receiver_agents: vec![CollabAgentRef {
+                    thread_id: receiver.to_string(),
+                    agent_nickname: None,
+                    agent_role: None,
+                }],
                 prompt: Some("new task".into()),
                 model: None,
                 reasoning_effort: None,
@@ -2800,6 +2890,70 @@ mod tests {
                     },
                 ],
             }
+        );
+    }
+
+    #[test]
+    fn rebuilds_hook_completed_events_into_hook_run_items() {
+        let items = vec![
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-a".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::HookCompleted(HookCompletedEvent {
+                turn_id: Some("turn-a".into()),
+                run: HookRunSummary {
+                    id: "hook-run-1".into(),
+                    event_name: HookEventName::SessionStart,
+                    handler_type: HookHandlerType::Command,
+                    execution_mode: HookExecutionMode::Sync,
+                    scope: HookScope::Turn,
+                    source_path: PathBuf::from("/tmp/hooks.json"),
+                    display_order: 0,
+                    status: HookRunStatus::Completed,
+                    status_message: Some("loaded guards".into()),
+                    started_at: 1,
+                    completed_at: Some(2),
+                    duration_ms: Some(1),
+                    entries: vec![HookOutputEntry {
+                        kind: HookOutputEntryKind::Context,
+                        text: "Remember the startup checklist.".into(),
+                    }],
+                },
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-a".into(),
+                last_agent_message: None,
+            })),
+        ];
+
+        let turns = build_turns_from_rollout_items(&items);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].items,
+            vec![ThreadItem::HookRun {
+                id: "hook-run-1".into(),
+                run: crate::protocol::v2::HookRunSummary {
+                    id: "hook-run-1".into(),
+                    event_name: crate::protocol::v2::HookEventName::SessionStart,
+                    handler_type: crate::protocol::v2::HookHandlerType::Command,
+                    execution_mode: crate::protocol::v2::HookExecutionMode::Sync,
+                    scope: crate::protocol::v2::HookScope::Turn,
+                    source_path: PathBuf::from("/tmp/hooks.json"),
+                    display_order: 0,
+                    status: crate::protocol::v2::HookRunStatus::Completed,
+                    status_message: Some("loaded guards".into()),
+                    started_at: 1,
+                    completed_at: Some(2),
+                    duration_ms: Some(1),
+                    entries: vec![crate::protocol::v2::HookOutputEntry {
+                        kind: crate::protocol::v2::HookOutputEntryKind::Context,
+                        text: "Remember the startup checklist.".into(),
+                    }],
+                },
+            }]
         );
     }
 

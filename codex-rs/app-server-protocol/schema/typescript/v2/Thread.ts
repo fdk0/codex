@@ -48,6 +48,10 @@ cliVersion: string,
  */
 source: SessionSource, 
 /**
+ * Direct parent thread id for AgentControl-spawned child threads.
+ */
+parentThreadId: string | null, 
+/**
  * Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
  */
 agentNickname: string | null, 

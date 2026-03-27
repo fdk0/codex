@@ -46,6 +46,7 @@ pub(crate) struct SkillsToggleView {
     state: ScrollState,
     complete: bool,
     app_event_tx: AppEventSender,
+    cwd: PathBuf,
     header: Box<dyn Renderable>,
     footer_hint: Line<'static>,
     search_query: String,
@@ -53,7 +54,11 @@ pub(crate) struct SkillsToggleView {
 }
 
 impl SkillsToggleView {
-    pub(crate) fn new(items: Vec<SkillsToggleItem>, app_event_tx: AppEventSender) -> Self {
+    pub(crate) fn new(
+        items: Vec<SkillsToggleItem>,
+        app_event_tx: AppEventSender,
+        cwd: PathBuf,
+    ) -> Self {
         let mut header = ColumnRenderable::new();
         header.push(Line::from("Enable/Disable Skills".bold()));
         header.push(Line::from(
@@ -65,6 +70,7 @@ impl SkillsToggleView {
             state: ScrollState::new(),
             complete: false,
             app_event_tx,
+            cwd,
             header: Box::new(header),
             footer_hint: skills_toggle_hint_line(),
             search_query: String::new(),
@@ -187,7 +193,7 @@ impl SkillsToggleView {
         self.complete = true;
         self.app_event_tx.send(AppEvent::ManageSkillsClosed);
         self.app_event_tx
-            .list_skills(Vec::new(), /*force_reload*/ true);
+            .list_skills(vec![self.cwd.clone()], /*force_reload*/ true);
     }
 
     fn rows_width(total_width: u16) -> u16 {
@@ -428,7 +434,7 @@ mod tests {
                 path: PathBuf::from("/tmp/skills/changelog_writer.toml"),
             },
         ];
-        let view = SkillsToggleView::new(items, tx);
+        let view = SkillsToggleView::new(items, tx, PathBuf::from("/tmp/project"));
         assert_snapshot!("skills_toggle_basic", render_lines(&view, 72));
     }
 }

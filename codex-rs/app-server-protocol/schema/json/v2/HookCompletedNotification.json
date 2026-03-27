@@ -6,6 +6,7 @@
         "preToolUse",
         "postToolUse",
         "sessionStart",
+        "afterCompaction",
         "userPromptSubmit",
         "stop"
       ],

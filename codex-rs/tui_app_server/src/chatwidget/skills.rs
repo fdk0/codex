@@ -10,6 +10,7 @@ use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::SkillsToggleItem;
 use crate::bottom_pane::SkillsToggleView;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+use crate::skills_cwd::skills_entry_for_cwd;
 use crate::skills_helpers::skill_description;
 use crate::skills_helpers::skill_display_name;
 use codex_chatgpt::connectors::AppInfo;
@@ -90,7 +91,11 @@ impl ChatWidget {
             })
             .collect();
 
-        let view = SkillsToggleView::new(items, self.app_event_tx.clone());
+        let view = SkillsToggleView::new(
+            items,
+            self.app_event_tx.clone(),
+            self.config.cwd.to_path_buf(),
+        );
         self.bottom_pane.show_view(Box::new(view));
     }
 
@@ -145,9 +150,7 @@ impl ChatWidget {
 }
 
 fn skills_for_cwd(cwd: &Path, skills_entries: &[SkillsListEntry]) -> Vec<ProtocolSkillMetadata> {
-    skills_entries
-        .iter()
-        .find(|entry| entry.cwd.as_path() == cwd)
+    skills_entry_for_cwd(cwd, skills_entries)
         .map(|entry| entry.skills.clone())
         .unwrap_or_default()
 }

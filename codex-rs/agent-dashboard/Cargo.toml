@@ -1,0 +1,31 @@
+[package]
+name = "codex-agent-dashboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "codex-agent-dashboard"
+path = "src/main.rs"
+
+[lib]
+name = "codex_agent_dashboard"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+codex-app-server-client = { workspace = true }
+codex-app-server-protocol = { workspace = true }
+crossterm = { workspace = true, features = ["event-stream"] }
+futures = { workspace = true }
+ratatui = { workspace = true }
+textwrap = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
