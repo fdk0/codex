@@ -4,6 +4,8 @@ use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 #[cfg(not(target_os = "windows"))]
 use std::path::PathBuf;
+#[cfg(not(target_os = "windows"))]
+use tempfile::tempdir;
 
 #[test]
 fn wants_no_sandbox_approval_granular_respects_sandbox_flag() {
@@ -128,6 +130,44 @@ fn build_sandbox_command_falls_back_to_current_exe_for_apply_patch() {
 
     let command =
         ApplyPatchRuntime::build_sandbox_command(&request, None).expect("build sandbox command");
+
+    assert_eq!(
+        command.program,
+        std::env::current_exe()
+            .expect("current exe")
+            .into_os_string()
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn build_sandbox_command_falls_back_when_configured_codex_self_exe_is_missing() {
+    let path = std::env::temp_dir().join("apply-patch-current-exe-test.txt");
+    let action = ApplyPatchAction::new_add_for_test(&path, "hello".to_string());
+    let request = ApplyPatchRequest {
+        action,
+        file_paths: vec![
+            AbsolutePathBuf::from_absolute_path(&path).expect("temp path should be absolute"),
+        ],
+        changes: HashMap::from([(
+            path,
+            FileChange::Add {
+                content: "hello".to_string(),
+            },
+        )]),
+        exec_approval_requirement: ExecApprovalRequirement::NeedsApproval {
+            reason: None,
+            proposed_execpolicy_amendment: None,
+        },
+        additional_permissions: None,
+        permissions_preapproved: false,
+        timeout_ms: None,
+    };
+    let temp = tempdir().expect("tempdir");
+    let missing_codex_self_exe = temp.path().join("missing-codex");
+
+    let command = ApplyPatchRuntime::build_sandbox_command(&request, Some(&missing_codex_self_exe))
+        .expect("build sandbox command");
 
     assert_eq!(
         command.program,

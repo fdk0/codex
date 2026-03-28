@@ -87,7 +87,9 @@ impl ApplyPatchRuntime {
 
     #[cfg(not(target_os = "windows"))]
     fn resolve_apply_patch_program(codex_self_exe: Option<&PathBuf>) -> Result<PathBuf, ToolError> {
-        if let Some(path) = codex_self_exe {
+        if let Some(path) = codex_self_exe
+            && path.is_file()
+        {
             return Ok(path.clone());
         }
 

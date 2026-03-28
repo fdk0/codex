@@ -138,6 +138,52 @@ async fn apply_patch_cli_uses_codex_self_exe_with_linux_sandbox_helper_alias() -
     Ok(())
 }
 
+#[cfg(not(target_os = "windows"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_patch_cli_falls_back_when_configured_codex_self_exe_is_missing() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let missing_codex_self_exe = std::env::temp_dir().join("codex-missing-self-exe-for-test");
+    if missing_codex_self_exe.exists() {
+        fs::remove_file(&missing_codex_self_exe)?;
+    }
+
+    let harness = apply_patch_harness_with(|builder| {
+        builder.with_config(move |config| {
+            config.codex_self_exe = Some(missing_codex_self_exe);
+        })
+    })
+    .await?;
+
+    let patch = "*** Begin Patch\n*** Add File: fallback-self-exe.txt\n+hello\n*** End Patch";
+    let call_id = "apply-missing-self-exe";
+    mount_apply_patch(
+        &harness,
+        call_id,
+        patch,
+        "done",
+        ApplyPatchModelOutput::Function,
+    )
+    .await;
+
+    harness
+        .submit("please apply patch with fallback self exe")
+        .await?;
+
+    let out = harness
+        .apply_patch_output(call_id, ApplyPatchModelOutput::Function)
+        .await;
+    assert_regex_match(
+        r"(?s)^Exit code: 0.*Success\. Updated the following files:\nA fallback-self-exe\.txt\n?$",
+        &out,
+    );
+    assert_eq!(
+        fs::read_to_string(harness.path("fallback-self-exe.txt"))?,
+        "hello\n"
+    );
+
+    Ok(())
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[test_case(ApplyPatchModelOutput::Freeform)]
 #[test_case(ApplyPatchModelOutput::Function)]
