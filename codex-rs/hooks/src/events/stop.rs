@@ -24,6 +24,7 @@ pub struct StopRequest {
     pub turn_id: String,
     pub cwd: PathBuf,
     pub transcript_path: Option<PathBuf>,
+    pub active_profile: Option<String>,
     pub model: String,
     pub permission_mode: String,
     pub stop_hook_active: bool,
@@ -51,12 +52,21 @@ struct StopHandlerData {
 
 pub(crate) fn preview(
     handlers: &[ConfiguredHandler],
-    _request: &StopRequest,
+    request: &StopRequest,
 ) -> Vec<HookRunSummary> {
-    dispatcher::select_handlers(handlers, HookEventName::Stop, /*matcher_input*/ None)
-        .into_iter()
-        .map(|handler| dispatcher::running_summary(&handler))
-        .collect()
+    dispatcher::select_handlers(
+        handlers,
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::Stop,
+            matcher_input: request.last_assistant_message.as_deref(),
+            active_profile: request.active_profile.as_deref(),
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
+    )
+    .into_iter()
+    .map(|handler| dispatcher::running_summary(&handler))
+    .collect()
 }
 
 pub(crate) async fn run(
@@ -64,8 +74,16 @@ pub(crate) async fn run(
     shell: &CommandShell,
     request: StopRequest,
 ) -> StopOutcome {
-    let matched =
-        dispatcher::select_handlers(handlers, HookEventName::Stop, /*matcher_input*/ None);
+    let matched = dispatcher::select_handlers(
+        handlers,
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::Stop,
+            matcher_input: request.last_assistant_message.as_deref(),
+            active_profile: request.active_profile.as_deref(),
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
+    );
     if matched.is_empty() {
         return StopOutcome {
             hook_events: Vec::new(),
@@ -83,6 +101,7 @@ pub(crate) async fn run(
         transcript_path: NullableString::from_path(request.transcript_path.clone()),
         cwd: request.cwd.display().to_string(),
         hook_event_name: "Stop".to_string(),
+        active_profile: NullableString::from_string(request.active_profile.clone()),
         model: request.model.clone(),
         permission_mode: request.permission_mode.clone(),
         stop_hook_active: request.stop_hook_active,
@@ -325,6 +344,7 @@ mod tests {
     use super::parse_completed;
     use crate::engine::ConfiguredHandler;
     use crate::engine::command_runner::CommandRunResult;
+    use crate::engine::config::HookConditions;
 
     #[test]
     fn block_decision_with_reason_sets_continuation_prompt() {
@@ -519,6 +539,7 @@ mod tests {
         ConfiguredHandler {
             event_name: HookEventName::Stop,
             matcher: None,
+            conditions: HookConditions::default(),
             command: "echo hook".to_string(),
             timeout_sec: 600,
             status_message: None,

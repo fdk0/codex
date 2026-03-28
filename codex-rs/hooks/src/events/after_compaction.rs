@@ -63,8 +63,13 @@ pub(crate) fn preview(
 ) -> Vec<HookRunSummary> {
     dispatcher::select_handlers(
         handlers,
-        HookEventName::AfterCompaction,
-        Some(request.source.as_str()),
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::AfterCompaction,
+            matcher_input: Some(request.source.as_str()),
+            active_profile: request.active_profile.as_deref(),
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
     )
     .into_iter()
     .map(|handler| dispatcher::running_summary(&handler))
@@ -78,8 +83,13 @@ pub(crate) async fn run(
 ) -> AfterCompactionOutcome {
     let matched = dispatcher::select_handlers(
         handlers,
-        HookEventName::AfterCompaction,
-        Some(request.source.as_str()),
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::AfterCompaction,
+            matcher_input: Some(request.source.as_str()),
+            active_profile: request.active_profile.as_deref(),
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
     );
     if matched.is_empty() {
         return AfterCompactionOutcome {
@@ -237,6 +247,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use crate::engine::ConfiguredHandler;
+    use crate::engine::config::HookConditions;
 
     use super::AfterCompactionRequest;
     use super::AfterCompactionSource;
@@ -246,6 +257,7 @@ mod tests {
         ConfiguredHandler {
             event_name: HookEventName::AfterCompaction,
             matcher: matcher.map(str::to_owned),
+            conditions: HookConditions::default(),
             command: "echo ok".to_string(),
             timeout_sec: 5,
             status_message: None,

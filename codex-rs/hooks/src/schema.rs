@@ -183,6 +183,7 @@ pub(crate) struct PreToolUseCommandInput {
     pub cwd: String,
     #[schemars(schema_with = "pre_tool_use_hook_event_name_schema")]
     pub hook_event_name: String,
+    pub active_profile: NullableString,
     pub model: String,
     #[schemars(schema_with = "permission_mode_schema")]
     pub permission_mode: String,
@@ -203,6 +204,7 @@ pub(crate) struct PostToolUseCommandInput {
     pub cwd: String,
     #[schemars(schema_with = "post_tool_use_hook_event_name_schema")]
     pub hook_event_name: String,
+    pub active_profile: NullableString,
     pub model: String,
     #[schemars(schema_with = "permission_mode_schema")]
     pub permission_mode: String,
@@ -307,6 +309,7 @@ pub(crate) struct SessionStartCommandInput {
     pub cwd: String,
     #[schemars(schema_with = "session_start_hook_event_name_schema")]
     pub hook_event_name: String,
+    pub active_profile: NullableString,
     pub model: String,
     #[schemars(schema_with = "permission_mode_schema")]
     pub permission_mode: String,
@@ -319,6 +322,7 @@ impl SessionStartCommandInput {
         session_id: impl Into<String>,
         transcript_path: Option<PathBuf>,
         cwd: impl Into<String>,
+        active_profile: Option<String>,
         model: impl Into<String>,
         permission_mode: impl Into<String>,
         source: impl Into<String>,
@@ -328,6 +332,7 @@ impl SessionStartCommandInput {
             transcript_path: NullableString::from_path(transcript_path),
             cwd: cwd.into(),
             hook_event_name: "SessionStart".to_string(),
+            active_profile: NullableString::from_string(active_profile),
             model: model.into(),
             permission_mode: permission_mode.into(),
             source: source.into(),
@@ -364,6 +369,7 @@ pub(crate) struct UserPromptSubmitCommandInput {
     pub cwd: String,
     #[schemars(schema_with = "user_prompt_submit_hook_event_name_schema")]
     pub hook_event_name: String,
+    pub active_profile: NullableString,
     pub model: String,
     #[schemars(schema_with = "permission_mode_schema")]
     pub permission_mode: String,
@@ -381,6 +387,7 @@ pub(crate) struct StopCommandInput {
     pub cwd: String,
     #[schemars(schema_with = "stop_hook_event_name_schema")]
     pub hook_event_name: String,
+    pub active_profile: NullableString,
     pub model: String,
     #[schemars(schema_with = "permission_mode_schema")]
     pub permission_mode: String,

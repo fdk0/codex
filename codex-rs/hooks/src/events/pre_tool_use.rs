@@ -22,6 +22,7 @@ pub struct PreToolUseRequest {
     pub turn_id: String,
     pub cwd: PathBuf,
     pub transcript_path: Option<PathBuf>,
+    pub active_profile: Option<String>,
     pub model: String,
     pub permission_mode: String,
     pub tool_name: String,
@@ -48,8 +49,13 @@ pub(crate) fn preview(
 ) -> Vec<HookRunSummary> {
     dispatcher::select_handlers(
         handlers,
-        HookEventName::PreToolUse,
-        Some(&request.tool_name),
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::PreToolUse,
+            matcher_input: Some(&request.tool_name),
+            active_profile: request.active_profile.as_deref(),
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
     )
     .into_iter()
     .map(|handler| dispatcher::running_summary(&handler))
@@ -63,8 +69,13 @@ pub(crate) async fn run(
 ) -> PreToolUseOutcome {
     let matched = dispatcher::select_handlers(
         handlers,
-        HookEventName::PreToolUse,
-        Some(&request.tool_name),
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::PreToolUse,
+            matcher_input: Some(&request.tool_name),
+            active_profile: request.active_profile.as_deref(),
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
     );
     if matched.is_empty() {
         return PreToolUseOutcome {
@@ -80,6 +91,7 @@ pub(crate) async fn run(
         transcript_path: crate::schema::NullableString::from_path(request.transcript_path.clone()),
         cwd: request.cwd.display().to_string(),
         hook_event_name: "PreToolUse".to_string(),
+        active_profile: crate::schema::NullableString::from_string(request.active_profile.clone()),
         model: request.model.clone(),
         permission_mode: request.permission_mode.clone(),
         tool_name: "Bash".to_string(),
@@ -242,6 +254,7 @@ mod tests {
     use super::parse_completed;
     use crate::engine::ConfiguredHandler;
     use crate::engine::command_runner::CommandRunResult;
+    use crate::engine::config::HookConditions;
 
     #[test]
     fn permission_decision_deny_blocks_processing() {
@@ -457,6 +470,7 @@ mod tests {
         ConfiguredHandler {
             event_name: HookEventName::PreToolUse,
             matcher: Some("^Bash$".to_string()),
+            conditions: HookConditions::default(),
             command: "echo hook".to_string(),
             timeout_sec: 5,
             status_message: None,

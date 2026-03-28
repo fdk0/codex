@@ -36,6 +36,7 @@ pub struct SessionStartRequest {
     pub session_id: ThreadId,
     pub cwd: PathBuf,
     pub transcript_path: Option<PathBuf>,
+    pub active_profile: Option<String>,
     pub model: String,
     pub permission_mode: String,
     pub source: SessionStartSource,
@@ -62,8 +63,13 @@ pub(crate) fn preview(
 ) -> Vec<HookRunSummary> {
     dispatcher::select_handlers(
         handlers,
-        HookEventName::SessionStart,
-        Some(request.source.as_str()),
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::SessionStart,
+            matcher_input: Some(request.source.as_str()),
+            active_profile: request.active_profile.as_deref(),
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
     )
     .into_iter()
     .map(|handler| dispatcher::running_summary(&handler))
@@ -78,8 +84,13 @@ pub(crate) async fn run(
 ) -> SessionStartOutcome {
     let matched = dispatcher::select_handlers(
         handlers,
-        HookEventName::SessionStart,
-        Some(request.source.as_str()),
+        dispatcher::HookSelectionContext {
+            event_name: HookEventName::SessionStart,
+            matcher_input: Some(request.source.as_str()),
+            active_profile: request.active_profile.as_deref(),
+            model: Some(request.model.as_str()),
+            permission_mode: Some(request.permission_mode.as_str()),
+        },
     );
     if matched.is_empty() {
         return SessionStartOutcome {
@@ -94,6 +105,7 @@ pub(crate) async fn run(
         request.session_id.to_string(),
         request.transcript_path.clone(),
         request.cwd.display().to_string(),
+        request.active_profile.clone(),
         request.model.clone(),
         request.permission_mode.clone(),
         request.source.as_str().to_string(),
@@ -257,6 +269,7 @@ mod tests {
     use super::parse_completed;
     use crate::engine::ConfiguredHandler;
     use crate::engine::command_runner::CommandRunResult;
+    use crate::engine::config::HookConditions;
 
     #[test]
     fn plain_stdout_becomes_model_context() {
@@ -354,6 +367,7 @@ mod tests {
         ConfiguredHandler {
             event_name: HookEventName::SessionStart,
             matcher: None,
+            conditions: HookConditions::default(),
             command: "echo hook".to_string(),
             timeout_sec: 600,
             status_message: None,

@@ -22,6 +22,9 @@
     }
   },
   "properties": {
+    "active_profile": {
+      "$ref": "#/definitions/NullableString"
+    },
     "cwd": {
       "type": "string"
     },
@@ -64,6 +67,7 @@
     }
   },
   "required": [
+    "active_profile",
     "cwd",
     "hook_event_name",
     "model",

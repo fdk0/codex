@@ -178,6 +178,56 @@ if payload.get("prompt") == {blocked_prompt_json}:
     Ok(())
 }
 
+fn write_profile_scoped_user_prompt_submit_hooks(home: &Path) -> Result<()> {
+    let general_script_path = home.join("user_prompt_submit_general.py");
+    let scoped_script_path = home.join("user_prompt_submit_scoped.py");
+    let general_log_path = home.join("user_prompt_submit_general_log.jsonl");
+    let scoped_log_path = home.join("user_prompt_submit_scoped_log.jsonl");
+    let make_script = |log_path: &Path| {
+        format!(
+            r#"import json
+from pathlib import Path
+import sys
+
+payload = json.load(sys.stdin)
+with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload) + "\n")
+"#,
+            log_path = log_path.display(),
+        )
+    };
+    let hooks = serde_json::json!({
+        "hooks": {
+            "UserPromptSubmit": [
+                {
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!("python3 {}", general_script_path.display()),
+                        "statusMessage": "running general user prompt hook",
+                    }]
+                },
+                {
+                    "conditions": {
+                        "profiles": ["bd-worker"]
+                    },
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!("python3 {}", scoped_script_path.display()),
+                        "statusMessage": "running scoped user prompt hook",
+                    }]
+                }
+            ]
+        }
+    });
+
+    fs::write(&general_script_path, make_script(&general_log_path))
+        .context("write general user prompt submit hook script")?;
+    fs::write(&scoped_script_path, make_script(&scoped_log_path))
+        .context("write scoped user prompt submit hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
+    Ok(())
+}
+
 fn write_pre_tool_use_hook(
     home: &Path,
     matcher: Option<&str>,
@@ -350,6 +400,76 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
     Ok(())
 }
 
+fn write_profile_scoped_session_start_hooks(
+    home: &Path,
+    active_profile: &str,
+    general_context: &str,
+    scoped_context: &str,
+) -> Result<()> {
+    let general_script_path = home.join("session_start_general.py");
+    let scoped_script_path = home.join("session_start_scoped.py");
+    let general_log_path = home.join("session_start_general_log.jsonl");
+    let scoped_log_path = home.join("session_start_scoped_log.jsonl");
+    let general_context_json =
+        serde_json::to_string(general_context).context("serialize general hook context")?;
+    let scoped_context_json =
+        serde_json::to_string(scoped_context).context("serialize scoped hook context")?;
+    let make_script = |log_path: &Path, additional_context_json: &str| {
+        format!(
+            r#"import json
+from pathlib import Path
+import sys
+
+payload = json.load(sys.stdin)
+with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload) + "\n")
+
+print({additional_context_json})
+"#,
+            log_path = log_path.display(),
+            additional_context_json = additional_context_json,
+        )
+    };
+    let hooks = serde_json::json!({
+        "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "^(startup)$",
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!("python3 {}", general_script_path.display()),
+                        "statusMessage": "running general session start hook",
+                    }]
+                },
+                {
+                    "matcher": "^(startup|resume)$",
+                    "conditions": {
+                        "profiles": [active_profile]
+                    },
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!("python3 {}", scoped_script_path.display()),
+                        "statusMessage": "running scoped session start hook",
+                    }]
+                }
+            ]
+        }
+    });
+
+    fs::write(
+        &general_script_path,
+        make_script(&general_log_path, &general_context_json),
+    )
+    .context("write general session start hook script")?;
+    fs::write(
+        &scoped_script_path,
+        make_script(&scoped_log_path, &scoped_context_json),
+    )
+    .context("write scoped session start hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
+    Ok(())
+}
+
 fn write_after_compaction_hook(home: &Path, additional_context: &str) -> Result<()> {
     let script_path = home.join("after_compaction_hook.py");
     let log_path = home.join("after_compaction_hook_log.jsonl");
@@ -431,6 +551,15 @@ fn request_hook_prompt_texts(
         .message_input_texts("user")
         .into_iter()
         .filter_map(|text| parse_hook_prompt_fragment(&text).map(|fragment| fragment.text))
+        .collect()
+}
+
+fn read_hook_log(home: &Path, file_name: &str) -> Result<Vec<serde_json::Value>> {
+    fs::read_to_string(home.join(file_name))
+        .with_context(|| format!("read hook log {file_name}"))?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).context("parse hook log line"))
         .collect()
 }
 
@@ -682,6 +811,87 @@ async fn session_start_hook_sees_materialized_transcript_path() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_start_hooks_support_general_and_profile_scoped_handlers() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let request_log = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "hooked startup response"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+
+    let active_profile = "bd-driver";
+    let general_context = "GLOBAL_SESSION_GUARD v1";
+    let scoped_context = "PROFILE_SESSION_CONTEXT v1";
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            if let Err(error) = write_profile_scoped_session_start_hooks(
+                home,
+                active_profile,
+                general_context,
+                scoped_context,
+            ) {
+                panic!("failed to write scoped session start hook fixture: {error}");
+            }
+        })
+        .with_config(|config| {
+            config.active_profile = Some(active_profile.to_string());
+            config
+                .features
+                .enable(Feature::CodexHooks)
+                .expect("test config should allow feature update");
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("hello startup hooks").await?;
+
+    let general_inputs = read_hook_log(test.codex_home_path(), "session_start_general_log.jsonl")?;
+    let scoped_inputs = read_hook_log(test.codex_home_path(), "session_start_scoped_log.jsonl")?;
+
+    assert_eq!(general_inputs.len(), 1);
+    assert_eq!(scoped_inputs.len(), 1);
+    assert_eq!(
+        general_inputs[0]
+            .get("active_profile")
+            .and_then(Value::as_str),
+        Some(active_profile)
+    );
+    assert_eq!(
+        scoped_inputs[0]
+            .get("active_profile")
+            .and_then(Value::as_str),
+        Some(active_profile)
+    );
+    assert_eq!(
+        general_inputs[0].get("source").and_then(Value::as_str),
+        Some("startup")
+    );
+    assert_eq!(
+        scoped_inputs[0].get("source").and_then(Value::as_str),
+        Some("startup")
+    );
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 1);
+    let request_body = requests[0].body_json().to_string();
+    assert!(
+        request_body.contains(general_context),
+        "startup request should include general session-start context",
+    );
+    assert!(
+        request_body.contains(scoped_context),
+        "startup request should include profile-scoped session-start context",
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resumed_thread_keeps_stop_continuation_prompt_in_history() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -901,6 +1111,65 @@ async fn blocked_user_prompt_submit_persists_additional_context_for_next_turn() 
             .as_str()
             .is_some_and(|turn_id| !turn_id.is_empty())),
         "blocked and accepted prompt hooks should both receive a non-empty turn_id",
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_prompt_submit_hooks_support_general_and_profile_scoped_handlers() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let _response = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "hook profile response"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            if let Err(error) = write_profile_scoped_user_prompt_submit_hooks(home) {
+                panic!("failed to write profile scoped user prompt hook fixture: {error}");
+            }
+        })
+        .with_config(|config| {
+            config.active_profile = Some("bd-worker".to_string());
+            config
+                .features
+                .enable(Feature::CodexHooks)
+                .expect("test config should allow feature update");
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("run scoped hooks").await?;
+
+    let general_inputs = read_hook_log(
+        test.codex_home_path(),
+        "user_prompt_submit_general_log.jsonl",
+    )?;
+    let scoped_inputs = read_hook_log(
+        test.codex_home_path(),
+        "user_prompt_submit_scoped_log.jsonl",
+    )?;
+
+    assert_eq!(general_inputs.len(), 1);
+    assert_eq!(scoped_inputs.len(), 1);
+    assert_eq!(
+        general_inputs[0]
+            .get("active_profile")
+            .and_then(Value::as_str),
+        Some("bd-worker")
+    );
+    assert_eq!(
+        scoped_inputs[0]
+            .get("active_profile")
+            .and_then(Value::as_str),
+        Some("bd-worker")
     );
 
     Ok(())

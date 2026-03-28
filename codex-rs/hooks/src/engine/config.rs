@@ -27,7 +27,25 @@ pub(crate) struct MatcherGroup {
     #[serde(default)]
     pub matcher: Option<String>,
     #[serde(default)]
+    pub conditions: HookConditions,
+    #[serde(default)]
     pub hooks: Vec<HookHandlerConfig>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize, PartialEq, Eq)]
+pub(crate) struct HookConditions {
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub profiles: Vec<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default, rename = "permissionMode")]
+    pub permission_mode: Option<String>,
+    #[serde(default, rename = "permissionModes")]
+    pub permission_modes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
