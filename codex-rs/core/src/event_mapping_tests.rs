@@ -1,4 +1,5 @@
 use super::parse_turn_item;
+use codex_protocol::AgentPath;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::HookPromptFragment;
 use codex_protocol::items::TurnItem;
@@ -9,6 +10,7 @@ use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::WebSearchAction;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::user_input::UserInput;
 use pretty_assertions::assert_eq;
 
@@ -244,6 +246,89 @@ fn skips_user_instructions_and_env() {
     for item in items {
         let turn_item = parse_turn_item(&item);
         assert!(turn_item.is_none(), "expected none, got {turn_item:?}");
+    }
+}
+
+#[test]
+fn parses_user_subagent_notification_as_visible_user_message() {
+    let item = ResponseItem::Message {
+        id: Some("msg-1".to_string()),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: crate::session_prefix::format_subagent_notification_message(
+                "/root/dispatcher",
+                &codex_protocol::protocol::AgentStatus::Completed(None),
+            ),
+        }],
+        end_turn: None,
+        phase: None,
+    };
+
+    let turn_item = parse_turn_item(&item).expect("expected user message turn item");
+
+    match turn_item {
+        TurnItem::UserMessage(user) => {
+            assert_eq!(user.id, "msg-1");
+            assert_eq!(user.content.len(), 1);
+            let UserInput::Text {
+                text,
+                text_elements,
+            } = &user.content[0]
+            else {
+                panic!("expected text input");
+            };
+            assert!(text.starts_with("<subagent_notification>"));
+            assert!(text.ends_with("</subagent_notification>"));
+            assert!(text.contains("/root/dispatcher"));
+            assert!(text_elements.is_empty());
+        }
+        other => panic!("expected TurnItem::UserMessage, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_v2_subagent_notification_as_visible_user_message() {
+    let communication = InterAgentCommunication::new(
+        AgentPath::root()
+            .join("dispatcher")
+            .expect("dispatcher path"),
+        AgentPath::root(),
+        Vec::new(),
+        crate::session_prefix::format_subagent_notification_message(
+            "/root/dispatcher/worker_1",
+            &codex_protocol::protocol::AgentStatus::Completed(None),
+        ),
+        true,
+    );
+    let item = ResponseItem::Message {
+        id: Some("msg-2".to_string()),
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: serde_json::to_string(&communication).expect("communication json"),
+        }],
+        end_turn: None,
+        phase: None,
+    };
+
+    let turn_item = parse_turn_item(&item).expect("expected user message turn item");
+
+    match turn_item {
+        TurnItem::UserMessage(user) => {
+            assert_eq!(user.id, "msg-2");
+            assert_eq!(user.content.len(), 1);
+            let UserInput::Text {
+                text,
+                text_elements,
+            } = &user.content[0]
+            else {
+                panic!("expected text input");
+            };
+            assert!(text.starts_with("<subagent_notification>"));
+            assert!(text.ends_with("</subagent_notification>"));
+            assert!(text.contains("/root/dispatcher/worker_1"));
+            assert!(text_elements.is_empty());
+        }
+        other => panic!("expected TurnItem::UserMessage, got {other:?}"),
     }
 }
 

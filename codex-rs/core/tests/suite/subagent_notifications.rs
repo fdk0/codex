@@ -134,6 +134,37 @@ async fn wait_for_requests(
     }
 }
 
+async fn wait_for_notification_request_count(
+    mock: &core_test_support::responses::ResponseMock,
+) -> Result<usize> {
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut first_notification_at: Option<Instant> = None;
+    loop {
+        let notification_count = mock
+            .requests()
+            .into_iter()
+            .filter(has_subagent_notification)
+            .count();
+        if notification_count > 0 {
+            match first_notification_at {
+                Some(first_seen)
+                    if Instant::now().duration_since(first_seen) >= Duration::from_millis(200) =>
+                {
+                    return Ok(notification_count);
+                }
+                None => first_notification_at = Some(Instant::now()),
+                Some(_) => {}
+            }
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "expected at least 1 subagent notification request, got {notification_count}"
+            );
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn setup_turn_one_with_spawned_child(
     server: &MockServer,
     child_response_delay: Option<Duration>,
@@ -286,6 +317,91 @@ async fn subagent_notification_is_included_without_wait() -> Result<()> {
 
     let turn2_requests = wait_for_requests(&turn2).await?;
     assert!(turn2_requests.iter().any(has_subagent_notification));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wake_enabled_child_triggers_parent_turn_without_wait() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let wake_turn = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, "<subagent_notification>")
+                && !body_contains(req, TURN_1_PROMPT)
+                && !body_contains(req, TURN_2_NO_WAIT_PROMPT)
+        },
+        sse(vec![
+            ev_response_created("resp-wake-1"),
+            ev_assistant_message("msg-wake-1", "wake handled"),
+            ev_completed("resp-wake-1"),
+        ]),
+    )
+    .await;
+
+    let (_test, _spawned_id) = setup_turn_one_with_custom_spawned_child(
+        &server,
+        json!({
+            "message": CHILD_PROMPT,
+            "wake_parent_on_completion": true,
+        }),
+        None,
+        true,
+        |builder| builder,
+    )
+    .await?;
+
+    let notification_requests = wait_for_notification_request_count(&wake_turn).await?;
+    assert_eq!(notification_requests, 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wake_enabled_multi_agent_v2_child_triggers_single_parent_turn_without_wait() -> Result<()>
+{
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let wake_turn = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, "<subagent_notification>")
+                && !body_contains(req, TURN_1_PROMPT)
+                && !body_contains(req, TURN_2_NO_WAIT_PROMPT)
+        },
+        sse(vec![
+            ev_response_created("resp-wake-v2-1"),
+            ev_assistant_message("msg-wake-v2-1", "wake handled"),
+            ev_completed("resp-wake-v2-1"),
+        ]),
+    )
+    .await;
+
+    let (_test, _spawned_id) = setup_turn_one_with_custom_spawned_child(
+        &server,
+        json!({
+            "task_name": "worker_1",
+            "message": CHILD_PROMPT,
+            "wake_parent_on_completion": true,
+        }),
+        None,
+        true,
+        |builder| {
+            builder.with_config(|config| {
+                config
+                    .features
+                    .enable(Feature::MultiAgentV2)
+                    .expect("test config should allow feature update");
+            })
+        },
+    )
+    .await?;
+
+    let notification_requests = wait_for_notification_request_count(&wake_turn).await?;
+    assert_eq!(notification_requests, 1);
 
     Ok(())
 }

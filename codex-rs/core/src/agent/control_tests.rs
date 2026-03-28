@@ -1046,6 +1046,59 @@ async fn spawn_child_completion_notifies_parent_history() {
 }
 
 #[tokio::test]
+async fn completion_watcher_wakes_root_parent_for_legacy_child() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let child_thread_id = harness
+        .manager
+        .start_thread(harness.config.clone())
+        .await
+        .expect("child thread should start")
+        .thread_id;
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist");
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: Some("dispatcher".to_string()),
+    });
+    harness
+        .control
+        .register_parent_wake_subscription(
+            child_thread_id,
+            Some(&session_source),
+            /*wake_parent_on_completion*/ true,
+        )
+        .await;
+    harness.control.maybe_start_completion_watcher(
+        child_thread_id,
+        Some(session_source),
+        child_thread_id.to_string(),
+        None,
+    );
+
+    let child_turn = child_thread.codex.session.new_default_turn().await;
+    child_thread
+        .codex
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: child_turn.sub_id.clone(),
+                last_agent_message: Some("done".to_string()),
+            }),
+        )
+        .await;
+
+    assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);
+}
+
+#[tokio::test]
 async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
     let harness = AgentControlHarness::new().await;
     let (root_thread_id, root_thread) = harness.start_thread().await;
@@ -1440,6 +1493,144 @@ async fn leaf_only_completion_suppresses_parent_wake_while_descendant_is_active(
             }),
         "leaf_only child should not wake its parent while descendants are still active"
     );
+}
+
+#[tokio::test]
+async fn leaf_only_completion_wakes_parent_after_descendants_finish() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let mut dispatcher_config = harness.config.clone();
+    dispatcher_config.agent_wake_descendant_policy = AgentWakeDescendantPolicy::LeafOnly;
+    let dispatcher_thread_id = harness
+        .manager
+        .start_thread(dispatcher_config.clone())
+        .await
+        .expect("dispatcher thread should start")
+        .thread_id;
+    let dispatcher_thread = harness
+        .manager
+        .get_thread(dispatcher_thread_id)
+        .await
+        .expect("dispatcher thread should exist");
+    let dispatcher_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: Some("dispatcher".to_string()),
+    });
+    harness
+        .control
+        .register_parent_wake_subscription(
+            dispatcher_thread_id,
+            Some(&dispatcher_source),
+            /*wake_parent_on_completion*/ true,
+        )
+        .await;
+    harness.control.maybe_start_completion_watcher(
+        dispatcher_thread_id,
+        Some(dispatcher_source),
+        dispatcher_thread_id.to_string(),
+        None,
+    );
+
+    let worker_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: dispatcher_thread_id,
+        depth: 2,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: Some("worker".to_string()),
+    });
+    let _worker_thread = harness
+        .manager
+        .spawn_new_thread_with_source_for_tests(
+            dispatcher_config,
+            harness.control.clone(),
+            worker_source,
+            /*persist_extended_history*/ false,
+            /*metrics_service_name*/ None,
+            /*inherited_shell_snapshot*/ None,
+            /*inherited_exec_policy*/ None,
+        )
+        .await
+        .expect("worker thread should start");
+
+    let first_turn = dispatcher_thread.codex.session.new_default_turn().await;
+    dispatcher_thread
+        .codex
+        .session
+        .send_event(
+            first_turn.as_ref(),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: first_turn.sub_id.clone(),
+                model_context_window: None,
+                collaboration_mode_kind: ModeKind::Default,
+            }),
+        )
+        .await;
+    dispatcher_thread
+        .codex
+        .session
+        .send_event(
+            first_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: first_turn.sub_id.clone(),
+                last_agent_message: Some("delegated".to_string()),
+            }),
+        )
+        .await;
+
+    sleep(Duration::from_millis(150)).await;
+    assert!(
+        !has_subagent_notification(
+            parent_thread
+                .codex
+                .session
+                .clone_history()
+                .await
+                .raw_items()
+        ),
+        "leaf_only child should not wake parent before descendants finish"
+    );
+
+    let descendants = harness
+        .control
+        .live_thread_spawn_descendants(dispatcher_thread_id)
+        .await
+        .expect("descendants should list worker");
+    assert_eq!(descendants.len(), 1);
+    harness
+        .control
+        .shutdown_live_agent(descendants[0])
+        .await
+        .expect("worker shutdown should succeed");
+
+    let second_turn = dispatcher_thread.codex.session.new_default_turn().await;
+    dispatcher_thread
+        .codex
+        .session
+        .send_event(
+            second_turn.as_ref(),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: second_turn.sub_id.clone(),
+                model_context_window: None,
+                collaboration_mode_kind: ModeKind::Default,
+            }),
+        )
+        .await;
+    dispatcher_thread
+        .codex
+        .session
+        .send_event(
+            second_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: second_turn.sub_id.clone(),
+                last_agent_message: Some("reconciled".to_string()),
+            }),
+        )
+        .await;
+
+    assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);
 }
 
 #[tokio::test]

@@ -40,8 +40,10 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Weak;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
+use tokio::time::sleep;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -849,14 +851,24 @@ impl AgentControl {
             let status = match control.subscribe_status(child_thread_id).await {
                 Ok(mut status_rx) => {
                     let mut status = status_rx.borrow().clone();
-                    while !is_final(&status) {
-                        if status_rx.changed().await.is_err() {
-                            status = control.get_status(child_thread_id).await;
-                            break;
+                    loop {
+                        while !is_final(&status) {
+                            if status_rx.changed().await.is_err() {
+                                status = control.get_status(child_thread_id).await;
+                                break;
+                            }
+                            status = status_rx.borrow().clone();
                         }
-                        status = status_rx.borrow().clone();
+                        if !is_final(&status) {
+                            return;
+                        }
+                        if !control.leaf_only_wake_blocked(child_thread_id).await {
+                            break status;
+                        }
+                        status = control
+                            .wait_for_wakeable_leaf_only_status(child_thread_id, &mut status_rx)
+                            .await;
                     }
-                    status
                 }
                 Err(_) => control.get_status(child_thread_id).await,
             };
@@ -876,16 +888,6 @@ impl AgentControl {
                 return;
             };
             let child_thread = state.get_thread(child_thread_id).await.ok();
-            if let Some(child_thread) = child_thread.as_ref() {
-                let child_snapshot = child_thread.config_snapshot().await;
-                if matches!(
-                    child_snapshot.agent_wake_descendant_policy,
-                    AgentWakeDescendantPolicy::LeafOnly
-                ) && control.has_active_descendants(child_thread_id).await
-                {
-                    return;
-                }
-            }
             let message = format_subagent_notification_message(child_reference.as_str(), &status);
             if child_agent_path.is_some()
                 && child_thread
@@ -923,6 +925,45 @@ impl AgentControl {
                 )
                 .await;
         });
+    }
+
+    async fn leaf_only_wake_blocked(&self, child_thread_id: ThreadId) -> bool {
+        let Ok(state) = self.upgrade() else {
+            return false;
+        };
+        let Ok(child_thread) = state.get_thread(child_thread_id).await else {
+            return false;
+        };
+        let child_snapshot = child_thread.config_snapshot().await;
+        matches!(
+            child_snapshot.agent_wake_descendant_policy,
+            AgentWakeDescendantPolicy::LeafOnly
+        ) && self.has_active_descendants(child_thread_id).await
+    }
+
+    async fn wait_for_wakeable_leaf_only_status(
+        &self,
+        child_thread_id: ThreadId,
+        status_rx: &mut watch::Receiver<AgentStatus>,
+    ) -> AgentStatus {
+        loop {
+            if !self.leaf_only_wake_blocked(child_thread_id).await {
+                return self.get_status(child_thread_id).await;
+            }
+
+            tokio::select! {
+                changed = status_rx.changed() => {
+                    if changed.is_err() {
+                        return self.get_status(child_thread_id).await;
+                    }
+                    let status = status_rx.borrow().clone();
+                    if !is_final(&status) || !self.leaf_only_wake_blocked(child_thread_id).await {
+                        return status;
+                    }
+                }
+                _ = sleep(Duration::from_millis(25)) => {}
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

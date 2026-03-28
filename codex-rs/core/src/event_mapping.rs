@@ -15,11 +15,13 @@ use codex_protocol::models::is_image_open_tag_text;
 use codex_protocol::models::is_local_image_close_tag_text;
 use codex_protocol::models::is_local_image_open_tag_text;
 use codex_protocol::protocol::COLLABORATION_MODE_OPEN_TAG;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::REALTIME_CONVERSATION_OPEN_TAG;
 use codex_protocol::user_input::UserInput;
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::contextual_user_message::SUBAGENT_NOTIFICATION_FRAGMENT;
 use crate::contextual_user_message::is_contextual_user_fragment;
 use crate::contextual_user_message::parse_visible_hook_prompt_message;
 use crate::web_search::web_search_action_detail;
@@ -104,6 +106,50 @@ fn parse_user_message(message: &[ContentItem]) -> Option<UserMessageItem> {
     Some(UserMessageItem::new(&content))
 }
 
+fn parse_subagent_notification_message(
+    id: Option<&String>,
+    role: &str,
+    message: &[ContentItem],
+) -> Option<UserMessageItem> {
+    let text = match role {
+        "user" => match message {
+            [ContentItem::InputText { text }]
+                if SUBAGENT_NOTIFICATION_FRAGMENT.matches_text(text) =>
+            {
+                text.clone()
+            }
+            _ => return None,
+        },
+        "assistant" => {
+            let communication = InterAgentCommunication::from_message_content(message)?;
+            if SUBAGENT_NOTIFICATION_FRAGMENT.matches_text(&communication.content) {
+                communication.content
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+
+    Some(UserMessageItem {
+        id: id.cloned().unwrap_or_else(|| Uuid::new_v4().to_string()),
+        content: vec![UserInput::Text {
+            text,
+            text_elements: Vec::new(),
+        }],
+    })
+}
+
+pub(crate) fn is_visible_subagent_notification_response_item(item: &ResponseItem) -> bool {
+    let ResponseItem::Message {
+        role, content, id, ..
+    } = item
+    else {
+        return false;
+    };
+    parse_subagent_notification_message(id.as_ref(), role, content).is_some()
+}
+
 fn parse_agent_message(
     id: Option<&String>,
     message: &[ContentItem],
@@ -143,12 +189,20 @@ pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
         } => match role.as_str() {
             "user" => parse_visible_hook_prompt_message(id.as_ref(), content)
                 .map(TurnItem::HookPrompt)
+                .or_else(|| {
+                    parse_subagent_notification_message(id.as_ref(), role, content)
+                        .map(TurnItem::UserMessage)
+                })
                 .or_else(|| parse_user_message(content).map(TurnItem::UserMessage)),
-            "assistant" => Some(TurnItem::AgentMessage(parse_agent_message(
-                id.as_ref(),
-                content,
-                phase.clone(),
-            ))),
+            "assistant" => parse_subagent_notification_message(id.as_ref(), role, content)
+                .map(TurnItem::UserMessage)
+                .or_else(|| {
+                    Some(TurnItem::AgentMessage(parse_agent_message(
+                        id.as_ref(),
+                        content,
+                        phase.clone(),
+                    )))
+                }),
             "system" => None,
             _ => None,
         },

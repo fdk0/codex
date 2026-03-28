@@ -24,6 +24,7 @@ use serde_json::Value;
 
 use crate::codex::Session;
 use crate::codex::TurnContext;
+use crate::event_mapping::is_visible_subagent_notification_response_item;
 use crate::event_mapping::parse_turn_item;
 
 pub(crate) struct HookRuntimeOutcome {
@@ -251,6 +252,12 @@ pub(crate) async fn inspect_pending_input(
     pending_input_item: ResponseInputItem,
 ) -> PendingInputHookDisposition {
     let response_item = ResponseItem::from(pending_input_item);
+    if is_visible_subagent_notification_response_item(&response_item) {
+        return PendingInputHookDisposition::Accepted(Box::new(
+            PendingInputRecord::ConversationItem { response_item },
+        ));
+    }
+
     if let Some(TurnItem::UserMessage(user_message)) = parse_turn_item(&response_item) {
         let user_prompt_submit_outcome =
             run_user_prompt_submit_hooks(sess, turn_context, user_message.message()).await;
@@ -292,8 +299,13 @@ pub(crate) async fn record_pending_input(
             record_additional_contexts(sess, turn_context, additional_contexts).await;
         }
         PendingInputRecord::ConversationItem { response_item } => {
-            sess.record_conversation_items(turn_context, std::slice::from_ref(&response_item))
-                .await;
+            if is_visible_subagent_notification_response_item(&response_item) {
+                sess.record_response_item_and_emit_turn_item(turn_context, response_item)
+                    .await;
+            } else {
+                sess.record_conversation_items(turn_context, std::slice::from_ref(&response_item))
+                    .await;
+            }
         }
     }
 }

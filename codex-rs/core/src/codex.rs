@@ -4541,6 +4541,8 @@ mod handlers {
     use crate::tasks::UserShellCommandTask;
     use crate::tasks::execute_user_shell_command;
     use codex_protocol::custom_prompts::CustomPrompt;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseInputItem;
     use codex_protocol::protocol::CodexErrorInfo;
     use codex_protocol::protocol::ErrorEvent;
     use codex_protocol::protocol::Event;
@@ -4562,6 +4564,7 @@ mod handlers {
     use codex_protocol::request_user_input::RequestUserInputResponse;
 
     use crate::context_manager::is_user_turn_boundary;
+    use crate::contextual_user_message::SUBAGENT_NOTIFICATION_FRAGMENT;
     use codex_protocol::config_types::CollaborationMode;
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::config_types::Settings;
@@ -4691,12 +4694,27 @@ mod handlers {
 
     /// Records an inter-agent assistant envelope and, when requested, wakes the recipient by
     /// starting a regular turn if the session is currently idle.
+    fn response_input_for_inter_agent_communication(
+        communication: &InterAgentCommunication,
+    ) -> ResponseInputItem {
+        if SUBAGENT_NOTIFICATION_FRAGMENT.matches_text(&communication.content) {
+            return ResponseInputItem::Message {
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: communication.content.clone(),
+                }],
+            };
+        }
+
+        communication.to_response_input_item()
+    }
+
     pub async fn inter_agent_communication(
         sess: &Arc<Session>,
         sub_id: String,
         communication: InterAgentCommunication,
     ) {
-        let pending_item = communication.to_response_input_item();
+        let pending_item = response_input_for_inter_agent_communication(&communication);
         if let Ok(()) = sess.inject_response_items(vec![pending_item.clone()]).await {
             return;
         }

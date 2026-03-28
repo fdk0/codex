@@ -68,6 +68,7 @@ use codex_execpolicy::NetworkRuleProtocol;
 use codex_execpolicy::Policy;
 use codex_network_proxy::NetworkProxyConfig;
 use codex_otel::TelemetryAuthMode;
+use codex_protocol::AgentPath;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
@@ -79,6 +80,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ConversationAudioParams;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::RealtimeAudioFrame;
 use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::W3cTraceContext;
@@ -4751,6 +4753,60 @@ async fn queued_response_items_for_next_turn_move_into_next_active_turn() {
     .await;
 
     assert_eq!(sess.get_pending_input().await, vec![queued_item]);
+}
+
+#[tokio::test]
+async fn inter_agent_subagent_notification_queues_user_message_for_next_turn() {
+    let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+    let wake_message = crate::session_prefix::format_subagent_notification_message(
+        "/root/dispatcher",
+        &codex_protocol::protocol::AgentStatus::Completed(None),
+    );
+    let communication = InterAgentCommunication::new(
+        AgentPath::root()
+            .join("dispatcher")
+            .expect("dispatcher path"),
+        AgentPath::root(),
+        Vec::new(),
+        wake_message.clone(),
+        false,
+    );
+
+    handlers::inter_agent_communication(&sess, "agent-wake-test".to_string(), communication).await;
+
+    assert_eq!(
+        sess.queued_response_items_for_next_turn_snapshot().await,
+        vec![ResponseInputItem::Message {
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText { text: wake_message }],
+        }]
+    );
+}
+
+#[tokio::test]
+async fn inter_agent_generic_message_keeps_assistant_envelope_for_next_turn() {
+    let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::root()
+            .join("dispatcher")
+            .expect("dispatcher path"),
+        AgentPath::root(),
+        Vec::new(),
+        "regular inbox message".to_string(),
+        false,
+    );
+
+    handlers::inter_agent_communication(
+        &sess,
+        "agent-message-test".to_string(),
+        communication.clone(),
+    )
+    .await;
+
+    assert_eq!(
+        sess.queued_response_items_for_next_turn_snapshot().await,
+        vec![communication.to_response_input_item()]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
