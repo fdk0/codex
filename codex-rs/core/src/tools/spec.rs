@@ -46,6 +46,7 @@ use codex_protocol::openai_models::WebSearchToolType;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_tools::AdditionalProperties;
 use codex_tools::parse_mcp_tool;
 pub use codex_tools::parse_tool_input_schema;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -1163,6 +1164,16 @@ fn spawn_agent_common_properties(config: &ToolsConfig) -> BTreeMap<String, JsonS
                     "When true, Codex wakes the spawning parent thread after this child reaches a terminal status so the parent can continue without polling. When omitted, Codex uses the configured agents.wake_parent_on_completion_default policy."
                         .to_string(),
                 ),
+            },
+        ),
+        (
+            "env".to_string(),
+            JsonSchema::Object {
+                properties: BTreeMap::new(),
+                additional_properties: Some(AdditionalProperties::Schema(Box::new(
+                    JsonSchema::String { description: None },
+                ))),
+                required: None,
             },
         ),
     ])

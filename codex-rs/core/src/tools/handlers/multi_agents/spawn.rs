@@ -5,6 +5,7 @@ use crate::agent::role::apply_role_to_config;
 
 use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
+use std::collections::HashMap;
 
 pub(crate) struct Handler;
 
@@ -72,6 +73,7 @@ impl ToolHandler for Handler {
             .await
             .map_err(FunctionCallError::RespondToModel)?;
         apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+        apply_spawn_agent_env_overrides(&mut config, args.env.as_ref());
         apply_spawn_agent_overrides(&mut config, child_depth);
 
         let result = session
@@ -175,6 +177,7 @@ struct SpawnAgentArgs {
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
     wake_parent_on_completion: Option<bool>,
+    env: Option<HashMap<String, String>>,
     #[serde(default)]
     fork_context: bool,
 }

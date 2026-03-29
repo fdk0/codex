@@ -3,8 +3,6 @@ use codex_protocol::protocol::GranularApprovalConfig;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 #[cfg(not(target_os = "windows"))]
-use std::path::PathBuf;
-#[cfg(not(target_os = "windows"))]
 use tempfile::tempdir;
 
 #[test]
@@ -95,7 +93,9 @@ fn build_sandbox_command_prefers_configured_codex_self_exe_for_apply_patch() {
         permissions_preapproved: false,
         timeout_ms: None,
     };
-    let codex_self_exe = PathBuf::from("/tmp/codex");
+    let temp = tempdir().expect("tempdir");
+    let codex_self_exe = temp.path().join("codex");
+    std::fs::write(&codex_self_exe, []).expect("stub codex self exe");
 
     let command = ApplyPatchRuntime::build_sandbox_command(&request, Some(&codex_self_exe))
         .expect("build sandbox command");

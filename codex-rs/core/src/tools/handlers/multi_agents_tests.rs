@@ -466,6 +466,196 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
 }
 
 #[tokio::test]
+async fn spawn_agent_env_overrides_extend_runtime_shell_environment_policy() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    turn.shell_environment_policy.r#set = HashMap::from([
+        ("OVERRIDE_ME".to_string(), "parent".to_string()),
+        ("PARENT_ONLY".to_string(), "present".to_string()),
+    ]);
+
+    let output = SpawnAgentHandler
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "env": {
+                    "OVERRIDE_ME": "child",
+                    "CHILD_ONLY": "present"
+                }
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+    let (content, _) = expect_text_output(output);
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let child_thread = manager
+        .get_thread(parse_agent_id(&result.agent_id))
+        .await
+        .expect("child thread should exist");
+    let child_turn = child_thread.codex.session.new_default_turn().await;
+
+    assert_eq!(
+        child_turn.shell_environment_policy.r#set,
+        HashMap::from([
+            ("OVERRIDE_ME".to_string(), "child".to_string()),
+            ("PARENT_ONLY".to_string(), "present".to_string()),
+            ("CHILD_ONLY".to_string(), "present".to_string()),
+        ])
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_agent_env_overrides_extend_runtime_shell_environment_policy() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        task_name: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    turn.shell_environment_policy.r#set = HashMap::from([
+        ("OVERRIDE_ME".to_string(), "parent".to_string()),
+        ("PARENT_ONLY".to_string(), "present".to_string()),
+    ]);
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let output = SpawnAgentHandlerV2
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "test_process",
+                "env": {
+                    "OVERRIDE_ME": "child",
+                    "CHILD_ONLY": "present"
+                }
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+    let (content, _) = expect_text_output(output);
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    assert_eq!(result.task_name, "/root/test_process");
+
+    let child_thread_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(
+            session.conversation_id,
+            &turn.session_source,
+            "test_process",
+        )
+        .await
+        .expect("relative path should resolve");
+    let child_thread = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist");
+    let child_turn = child_thread.codex.session.new_default_turn().await;
+
+    assert_eq!(
+        child_turn.shell_environment_policy.r#set,
+        HashMap::from([
+            ("OVERRIDE_ME".to_string(), "child".to_string()),
+            ("PARENT_ONLY".to_string(), "present".to_string()),
+            ("CHILD_ONLY".to_string(), "present".to_string()),
+        ])
+    );
+}
+
+#[tokio::test]
+async fn spawn_agent_rejects_non_string_env_values() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+
+    let err = SpawnAgentHandler
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "env": {
+                    "RESOURCE_ENFORCE": true
+                }
+            })),
+        ))
+        .await
+        .expect_err("non-string env values should be rejected");
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("expected respond-to-model error");
+    };
+    assert!(message.contains("invalid type"));
+    assert!(message.contains("expected a string"));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_agent_rejects_non_string_env_values() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+
+    let err = SpawnAgentHandlerV2
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "test_process",
+                "env": {
+                    "RESOURCE_ENFORCE": true
+                }
+            })),
+        ))
+        .await
+        .expect_err("non-string env values should be rejected");
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("expected respond-to-model error");
+    };
+    assert!(message.contains("invalid type"));
+    assert!(message.contains("expected a string"));
+}
+
+#[tokio::test]
 async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();

@@ -454,6 +454,20 @@ fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
         panic!("spawn_agent should use object params");
     };
     assert!(properties.contains_key("task_name"));
+    let Some(JsonSchema::Object {
+        properties: env_properties,
+        additional_properties: Some(AdditionalProperties::Schema(env_schema)),
+        required: env_required,
+    }) = properties.get("env")
+    else {
+        panic!("spawn_agent env should be an object with string values");
+    };
+    assert!(env_properties.is_empty());
+    assert!(env_required.is_none());
+    assert_eq!(
+        env_schema.as_ref(),
+        &JsonSchema::String { description: None }
+    );
     assert!(properties.contains_key("wake_parent_on_completion"));
     assert_eq!(required.as_ref(), Some(&vec!["task_name".to_string()]));
     let output_schema = output_schema
@@ -564,6 +578,44 @@ fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
     );
     assert_lacks_tool_name(&tools, "send_input");
     assert_lacks_tool_name(&tools, "resume_agent");
+}
+
+#[test]
+fn spawn_agent_tool_v1_includes_child_env_schema() {
+    let model_info = model_info_from_models_json("gpt-5-codex");
+    let available_models = Vec::new();
+    let features = Features::with_defaults();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) =
+        create_spawn_agent_tool_v1(&tools_config)
+    else {
+        panic!("expected function tool");
+    };
+    let JsonSchema::Object { properties, .. } = parameters else {
+        panic!("spawn_agent should use object params");
+    };
+    let Some(JsonSchema::Object {
+        properties: env_properties,
+        additional_properties: Some(AdditionalProperties::Schema(env_schema)),
+        required: env_required,
+    }) = properties.get("env")
+    else {
+        panic!("spawn_agent env should be an object with string values");
+    };
+    assert!(env_properties.is_empty());
+    assert!(env_required.is_none());
+    assert_eq!(
+        env_schema.as_ref(),
+        &JsonSchema::String { description: None }
+    );
 }
 
 #[test]
