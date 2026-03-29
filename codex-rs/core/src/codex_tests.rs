@@ -4809,6 +4809,71 @@ async fn inter_agent_generic_message_keeps_assistant_envelope_for_next_turn() {
     );
 }
 
+#[tokio::test]
+async fn inter_agent_triggered_message_uses_user_message_input() {
+    let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::root()
+            .join("dispatcher")
+            .expect("dispatcher path"),
+        AgentPath::root(),
+        Vec::new(),
+        "follow up and re-check state".to_string(),
+        true,
+    );
+
+    handlers::inter_agent_communication(
+        &sess,
+        "agent-triggered-message-test".to_string(),
+        communication.clone(),
+    )
+    .await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let history_items = sess.clone_history().await.raw_items().to_vec();
+            let saw_user_message = history_items.iter().any(|item| {
+                matches!(
+                    item,
+                    ResponseItem::Message { role, content, .. }
+                        if role == "user"
+                            && content.iter().any(|content_item| matches!(
+                                content_item,
+                                ContentItem::InputText { text } if text == &communication.content
+                            ))
+                )
+            });
+            let saw_assistant_envelope = history_items.iter().any(|item| {
+                matches!(
+                    item,
+                    ResponseItem::Message { role, content, .. }
+                        if role == "assistant"
+                            && content.iter().any(|content_item| matches!(
+                                content_item,
+                                ContentItem::OutputText { text }
+                                    if serde_json::from_str::<InterAgentCommunication>(text).ok().as_ref()
+                                        == Some(&communication)
+                            ))
+                )
+            });
+            if saw_assistant_envelope {
+                panic!("triggered inter-agent messages should not persist the assistant envelope");
+            }
+            if saw_user_message {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("triggered inter-agent message should be recorded as a user message");
+
+    assert_eq!(
+        sess.queued_response_items_for_next_turn_snapshot().await,
+        Vec::<ResponseInputItem>::new()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
     let (sess, tc, rx) = make_session_and_context_with_rx().await;

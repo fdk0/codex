@@ -4692,12 +4692,16 @@ mod handlers {
         }
     }
 
-    /// Records an inter-agent assistant envelope and, when requested, wakes the recipient by
-    /// starting a regular turn if the session is currently idle.
+    /// Records an inter-agent message. Wake-triggering deliveries are surfaced as user-role text
+    /// so the recipient model treats them as fresh instructions instead of prior assistant output.
+    /// Background deliveries keep the assistant envelope so they remain queued metadata until a
+    /// later turn inspects them.
     fn response_input_for_inter_agent_communication(
         communication: &InterAgentCommunication,
     ) -> ResponseInputItem {
-        if SUBAGENT_NOTIFICATION_FRAGMENT.matches_text(&communication.content) {
+        if communication.trigger_turn
+            || SUBAGENT_NOTIFICATION_FRAGMENT.matches_text(&communication.content)
+        {
             return ResponseInputItem::Message {
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {

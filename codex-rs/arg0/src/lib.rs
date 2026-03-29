@@ -11,6 +11,7 @@ use std::os::unix::fs::symlink;
 use tempfile::TempDir;
 
 const APPLY_PATCH_ARG0: &str = "apply_patch";
+const CODEX_ARG0: &str = "codex";
 const MISSPELLED_APPLY_PATCH_ARG0: &str = "applypatch";
 #[cfg(unix)]
 const EXECVE_WRAPPER_ARG0: &str = "codex-execve-wrapper";
@@ -166,7 +167,10 @@ where
     runtime.block_on(async move {
         let current_exe = std::env::current_exe().ok();
         let paths = Arg0DispatchPaths {
-            codex_self_exe: current_exe.clone(),
+            codex_self_exe: codex_self_exe_for_launch(
+                path_entry_guard.as_ref(),
+                current_exe.clone(),
+            ),
             codex_linux_sandbox_exe: if cfg!(target_os = "linux") {
                 linux_sandbox_exe_path(path_entry_guard.as_ref(), current_exe)
             } else {
@@ -179,6 +183,15 @@ where
 
         main_fn(paths).await
     })
+}
+
+fn codex_self_exe_for_launch(
+    path_entry_guard: Option<&Arg0PathEntryGuard>,
+    current_exe: Option<PathBuf>,
+) -> Option<PathBuf> {
+    path_entry_guard
+        .and_then(|path_entry| path_entry.paths().codex_self_exe.clone())
+        .or(current_exe)
 }
 
 fn linux_sandbox_exe_path(
@@ -290,6 +303,7 @@ pub fn prepend_path_entry_for_codex_aliases() -> std::io::Result<Arg0PathEntryGu
     lock_file.try_lock()?;
 
     for filename in &[
+        CODEX_ARG0,
         APPLY_PATCH_ARG0,
         MISSPELLED_APPLY_PATCH_ARG0,
         #[cfg(target_os = "linux")]
@@ -302,7 +316,7 @@ pub fn prepend_path_entry_for_codex_aliases() -> std::io::Result<Arg0PathEntryGu
         #[cfg(unix)]
         {
             let link = path.join(filename);
-            symlink(&exe, &link)?;
+            create_unix_alias(&exe, &link)?;
         }
 
         #[cfg(windows)]
@@ -343,7 +357,7 @@ pub fn prepend_path_entry_for_codex_aliases() -> std::io::Result<Arg0PathEntryGu
     }
 
     let paths = Arg0DispatchPaths {
-        codex_self_exe: std::env::current_exe().ok(),
+        codex_self_exe: codex_self_exe_path(path),
         codex_linux_sandbox_exe: {
             #[cfg(target_os = "linux")]
             {
@@ -367,6 +381,27 @@ pub fn prepend_path_entry_for_codex_aliases() -> std::io::Result<Arg0PathEntryGu
     };
 
     Ok(Arg0PathEntryGuard::new(temp_dir, lock_file, paths))
+}
+
+fn codex_self_exe_path(path: &Path) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        Some(path.join(CODEX_ARG0))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        std::env::current_exe().ok()
+    }
+}
+
+#[cfg(unix)]
+fn create_unix_alias(exe: &Path, link: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(exe, link) {
+        Ok(()) => Ok(()),
+        Err(_) => symlink(exe, link),
+    }
 }
 
 fn janitor_cleanup(temp_root: &Path) -> std::io::Result<()> {
@@ -417,7 +452,10 @@ fn try_lock_dir(dir: &Path) -> std::io::Result<Option<File>> {
 mod tests {
     use super::Arg0DispatchPaths;
     use super::Arg0PathEntryGuard;
+    use super::CODEX_ARG0;
     use super::LOCK_FILENAME;
+    use super::codex_self_exe_for_launch;
+    use super::codex_self_exe_path;
     use super::janitor_cleanup;
     use super::linux_sandbox_exe_path;
     use std::fs;
@@ -453,6 +491,38 @@ mod tests {
 
         assert_eq!(
             linux_sandbox_exe_path(Some(&path_entry), Some(PathBuf::from("/usr/bin/codex"))),
+            Some(alias_path),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codex_self_exe_path_prefers_stable_codex_alias() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        assert_eq!(
+            codex_self_exe_path(temp_dir.path()),
+            Some(temp_dir.path().join(CODEX_ARG0))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codex_self_exe_for_launch_prefers_stable_codex_alias() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let lock_file = create_lock(temp_dir.path())?;
+        let alias_path = temp_dir.path().join(CODEX_ARG0);
+        let path_entry = Arg0PathEntryGuard::new(
+            temp_dir,
+            lock_file,
+            Arg0DispatchPaths {
+                codex_self_exe: Some(alias_path.clone()),
+                codex_linux_sandbox_exe: None,
+                main_execve_wrapper_exe: None,
+            },
+        );
+
+        assert_eq!(
+            codex_self_exe_for_launch(Some(&path_entry), Some(PathBuf::from("/usr/bin/codex"))),
             Some(alias_path),
         );
         Ok(())

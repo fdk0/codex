@@ -1285,6 +1285,9 @@ async fn multi_agent_v2_assign_task_interrupts_busy_child_without_losing_message
                 )
             });
             if saw_envelope && !saw_user_message {
+                panic!("assign_task should not preserve the assistant envelope in history");
+            }
+            if saw_user_message {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

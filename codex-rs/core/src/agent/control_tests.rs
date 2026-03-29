@@ -3,6 +3,7 @@ use crate::CodexAuth;
 use crate::CodexThread;
 use crate::ThreadManager;
 use crate::agent::agent_status_from_event;
+use crate::codex::TurnContext;
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::ConfigBuilder;
@@ -171,6 +172,19 @@ async fn wait_for_subagent_notification(parent_thread: &Arc<CodexThread>) -> boo
         }
     };
     timeout(Duration::from_secs(2), wait).await.is_ok()
+}
+
+async fn wait_for_turn_context(thread: &Arc<CodexThread>, sub_id: &str) -> Arc<TurnContext> {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(turn_context) = thread.codex.session.turn_context_for_sub_id(sub_id).await {
+                return turn_context;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("turn context should become active")
 }
 
 async fn persist_thread_for_tree_resume(thread: &Arc<CodexThread>, message: &str) {
@@ -1072,7 +1086,7 @@ async fn completion_watcher_wakes_root_parent_for_legacy_child() {
         .register_parent_wake_subscription(
             child_thread_id,
             Some(&session_source),
-            /*wake_parent_on_completion*/ true,
+            /*wake_parent_on_completion*/ false,
         )
         .await;
     harness.control.maybe_start_completion_watcher(
@@ -1080,6 +1094,7 @@ async fn completion_watcher_wakes_root_parent_for_legacy_child() {
         Some(session_source),
         child_thread_id.to_string(),
         None,
+        CompletionWatcherMode::CurrentOrNextTerminal,
     );
 
     let child_turn = child_thread.codex.session.new_default_turn().await;
@@ -1096,6 +1111,79 @@ async fn completion_watcher_wakes_root_parent_for_legacy_child() {
         .await;
 
     assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);
+}
+
+#[tokio::test]
+async fn completion_watcher_rearm_for_legacy_child_marks_current_status_seen() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+    let child_thread_id = harness
+        .manager
+        .start_thread(harness.config.clone())
+        .await
+        .expect("child thread should start")
+        .thread_id;
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist");
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: Some("dispatcher".to_string()),
+    });
+    harness
+        .control
+        .register_parent_wake_subscription(
+            child_thread_id,
+            Some(&session_source),
+            /*wake_parent_on_completion*/ true,
+        )
+        .await;
+    harness.control.maybe_start_completion_watcher(
+        child_thread_id,
+        Some(session_source),
+        child_thread_id.to_string(),
+        None,
+        CompletionWatcherMode::CurrentOrNextTerminal,
+    );
+
+    let first_turn = child_thread.codex.session.new_default_turn().await;
+    child_thread
+        .codex
+        .session
+        .send_event(
+            first_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: first_turn.sub_id.clone(),
+                last_agent_message: Some("done-1".to_string()),
+            }),
+        )
+        .await;
+    let mut completion_watcher = harness
+        .control
+        .maybe_prepare_completion_watcher_rearm(child_thread_id, /*trigger_turn*/ true)
+        .await
+        .expect("completed child should arm a replacement watcher");
+
+    assert_eq!(completion_watcher.parent_thread_id, parent_thread_id);
+    assert_eq!(
+        completion_watcher.child_reference,
+        child_thread_id.to_string()
+    );
+    assert_eq!(completion_watcher.child_agent_path, None);
+    assert_eq!(
+        timeout(
+            Duration::from_millis(50),
+            completion_watcher.status_rx.changed()
+        )
+        .await
+        .is_err(),
+        true
+    );
 }
 
 #[tokio::test]
@@ -1230,6 +1318,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
         })),
         tester_path.to_string(),
         Some(tester_path.clone()),
+        CompletionWatcherMode::CurrentOrNextTerminal,
     );
     let tester_turn = tester_thread.codex.session.new_default_turn().await;
     tester_thread
@@ -1336,6 +1425,7 @@ async fn multi_agent_v2_completion_triggers_turn_when_child_is_wake_enabled() {
         Some(session_source),
         tester_path.to_string(),
         Some(tester_path.clone()),
+        CompletionWatcherMode::CurrentOrNextTerminal,
     );
     let tester_turn = tester_thread.codex.session.new_default_turn().await;
     tester_thread
@@ -1403,6 +1493,153 @@ async fn multi_agent_v2_completion_triggers_turn_when_child_is_wake_enabled() {
 }
 
 #[tokio::test]
+async fn trigger_turn_inter_agent_message_rearms_completion_watcher_for_reused_child() {
+    let harness = AgentControlHarness::new().await;
+    let (_root_thread_id, _root_thread) = harness.start_thread().await;
+    let (worker_thread_id, _worker_thread) = harness.start_thread().await;
+    let mut tester_config = harness.config.clone();
+    let _ = tester_config.features.enable(Feature::MultiAgentV2);
+    let tester_thread_id = harness
+        .manager
+        .start_thread(tester_config)
+        .await
+        .expect("tester thread should start")
+        .thread_id;
+    let tester_thread = harness
+        .manager
+        .get_thread(tester_thread_id)
+        .await
+        .expect("tester thread should exist");
+    let worker_path = AgentPath::root().join("worker_a").expect("worker path");
+    let tester_path = worker_path.join("tester").expect("tester path");
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: worker_thread_id,
+        depth: 2,
+        agent_path: Some(tester_path.clone()),
+        agent_nickname: None,
+        agent_role: Some("explorer".to_string()),
+    });
+    harness
+        .control
+        .register_parent_wake_subscription(
+            tester_thread_id,
+            Some(&session_source),
+            /*wake_parent_on_completion*/ true,
+        )
+        .await;
+    harness.control.maybe_start_completion_watcher(
+        tester_thread_id,
+        Some(session_source),
+        tester_path.to_string(),
+        Some(tester_path.clone()),
+        CompletionWatcherMode::CurrentOrNextTerminal,
+    );
+
+    let first_turn = tester_thread.codex.session.new_default_turn().await;
+    tester_thread
+        .codex
+        .session
+        .send_event(
+            first_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: first_turn.sub_id.clone(),
+                last_agent_message: Some("done-1".to_string()),
+            }),
+        )
+        .await;
+
+    let first_message = crate::session_prefix::format_subagent_notification_message(
+        tester_path.as_str(),
+        &AgentStatus::Completed(Some("done-1".to_string())),
+    );
+    let first_expected = (
+        worker_thread_id,
+        Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                tester_path.clone(),
+                worker_path.clone(),
+                Vec::new(),
+                first_message,
+                true,
+            ),
+        },
+    );
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if harness
+                .manager
+                .captured_ops()
+                .into_iter()
+                .any(|entry| entry == first_expected)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first completion wake should reach the direct parent");
+
+    let communication = InterAgentCommunication::new(
+        worker_path.clone(),
+        tester_path.clone(),
+        Vec::new(),
+        "follow up".to_string(),
+        true,
+    );
+    let submission_id = harness
+        .control
+        .send_inter_agent_communication(tester_thread_id, communication)
+        .await
+        .expect("trigger_turn follow-up should succeed for completed child");
+
+    let second_turn = wait_for_turn_context(&tester_thread, &submission_id).await;
+    tester_thread
+        .codex
+        .session
+        .send_event(
+            second_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: second_turn.sub_id.clone(),
+                last_agent_message: Some("done-2".to_string()),
+            }),
+        )
+        .await;
+
+    let second_message = crate::session_prefix::format_subagent_notification_message(
+        tester_path.as_str(),
+        &AgentStatus::Completed(Some("done-2".to_string())),
+    );
+    let second_expected = (
+        worker_thread_id,
+        Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                tester_path,
+                worker_path,
+                Vec::new(),
+                second_message,
+                true,
+            ),
+        },
+    );
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if harness
+                .manager
+                .captured_ops()
+                .into_iter()
+                .any(|entry| entry == second_expected)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("second completion wake should reach the direct parent after reuse");
+}
+
+#[tokio::test]
 async fn leaf_only_completion_suppresses_parent_wake_while_descendant_is_active() {
     let harness = AgentControlHarness::new().await;
     let (_root_thread_id, _root_thread) = harness.start_thread().await;
@@ -1443,6 +1680,7 @@ async fn leaf_only_completion_suppresses_parent_wake_while_descendant_is_active(
         Some(tester_source),
         tester_path.to_string(),
         Some(tester_path.clone()),
+        CompletionWatcherMode::CurrentOrNextTerminal,
     );
 
     let leaf_path = tester_path.join("leaf").expect("leaf path");
@@ -1532,6 +1770,7 @@ async fn leaf_only_completion_wakes_parent_after_descendants_finish() {
         Some(dispatcher_source),
         dispatcher_thread_id.to_string(),
         None,
+        CompletionWatcherMode::CurrentOrNextTerminal,
     );
 
     let worker_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
@@ -1650,6 +1889,7 @@ async fn completion_watcher_notifies_parent_when_child_is_missing() {
         })),
         child_thread_id.to_string(),
         None,
+        CompletionWatcherMode::CurrentOrNextTerminal,
     );
 
     assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);

@@ -61,11 +61,27 @@ pub(crate) struct SpawnAgentOptions {
 struct ParentWakeSubscription {
     parent_thread_id: ThreadId,
     wake_parent_on_completion: bool,
+    child_reference: String,
+    child_agent_path: Option<AgentPath>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ParentWakePreference {
     wake_parent_on_completion: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CompletionWatcherMode {
+    CurrentOrNextTerminal,
+    NextStatusChangeThenTerminal,
+}
+
+#[derive(Debug)]
+struct CompletionWatcherArm {
+    parent_thread_id: ThreadId,
+    child_reference: String,
+    child_agent_path: Option<AgentPath>,
+    status_rx: watch::Receiver<AgentStatus>,
 }
 
 #[derive(Clone, Debug)]
@@ -314,6 +330,7 @@ impl AgentControl {
             notification_source,
             child_reference,
             agent_metadata.agent_path.clone(),
+            CompletionWatcherMode::CurrentOrNextTerminal,
         );
 
         Ok(LiveAgent {
@@ -500,6 +517,7 @@ impl AgentControl {
             Some(notification_source.clone()),
             child_reference,
             agent_metadata.agent_path.clone(),
+            CompletionWatcherMode::CurrentOrNextTerminal,
         );
         self.persist_thread_spawn_edge_for_source(
             resumed_thread.thread.as_ref(),
@@ -517,6 +535,9 @@ impl AgentControl {
         agent_id: ThreadId,
         items: Vec<UserInput>,
     ) -> CodexResult<String> {
+        let completion_watcher = self
+            .maybe_prepare_completion_watcher_rearm(agent_id, /*trigger_turn*/ true)
+            .await;
         let last_task_message = render_input_preview(&items);
         let state = self.upgrade()?;
         let result = self
@@ -537,6 +558,16 @@ impl AgentControl {
         if result.is_ok() {
             self.state
                 .update_last_task_message(agent_id, last_task_message);
+            if let Some(completion_watcher) = completion_watcher {
+                self.spawn_completion_watcher(
+                    agent_id,
+                    completion_watcher.parent_thread_id,
+                    completion_watcher.child_reference,
+                    completion_watcher.child_agent_path,
+                    CompletionWatcherMode::NextStatusChangeThenTerminal,
+                    Some(completion_watcher.status_rx),
+                );
+            }
         }
         result
     }
@@ -562,6 +593,9 @@ impl AgentControl {
         agent_id: ThreadId,
         communication: InterAgentCommunication,
     ) -> CodexResult<String> {
+        let completion_watcher = self
+            .maybe_prepare_completion_watcher_rearm(agent_id, communication.trigger_turn)
+            .await;
         let last_task_message = communication.content.clone();
         let state = self.upgrade()?;
         let result = self
@@ -576,6 +610,16 @@ impl AgentControl {
         if result.is_ok() {
             self.state
                 .update_last_task_message(agent_id, last_task_message);
+            if let Some(completion_watcher) = completion_watcher {
+                self.spawn_completion_watcher(
+                    agent_id,
+                    completion_watcher.parent_thread_id,
+                    completion_watcher.child_reference,
+                    completion_watcher.child_agent_path,
+                    CompletionWatcherMode::NextStatusChangeThenTerminal,
+                    Some(completion_watcher.status_rx),
+                );
+            }
         }
         result
     }
@@ -839,6 +883,7 @@ impl AgentControl {
         session_source: Option<SessionSource>,
         child_reference: String,
         child_agent_path: Option<AgentPath>,
+        mode: CompletionWatcherMode,
     ) {
         let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id, ..
@@ -846,85 +891,185 @@ impl AgentControl {
         else {
             return;
         };
+        self.spawn_completion_watcher(
+            child_thread_id,
+            parent_thread_id,
+            child_reference,
+            child_agent_path,
+            mode,
+            /*status_rx*/ None,
+        );
+    }
+
+    async fn maybe_prepare_completion_watcher_rearm(
+        &self,
+        child_thread_id: ThreadId,
+        trigger_turn: bool,
+    ) -> Option<CompletionWatcherArm> {
+        if !trigger_turn {
+            return None;
+        }
+
+        let mut status_rx = self.subscribe_status(child_thread_id).await.ok()?;
+        if !is_final(&status_rx.borrow().clone()) {
+            return None;
+        }
+        let _ = status_rx.borrow_and_update();
+
+        let subscription = self
+            .parent_wake_subscriptions
+            .lock()
+            .await
+            .get(&child_thread_id)
+            .cloned()?;
+        let child_agent_path = subscription.child_agent_path.clone();
+        let child_reference = subscription.child_reference.clone();
+
+        Some(CompletionWatcherArm {
+            parent_thread_id: subscription.parent_thread_id,
+            child_reference,
+            child_agent_path,
+            status_rx,
+        })
+    }
+
+    fn spawn_completion_watcher(
+        &self,
+        child_thread_id: ThreadId,
+        parent_thread_id: ThreadId,
+        child_reference: String,
+        child_agent_path: Option<AgentPath>,
+        mode: CompletionWatcherMode,
+        status_rx: Option<watch::Receiver<AgentStatus>>,
+    ) {
         let control = self.clone();
         tokio::spawn(async move {
-            let status = match control.subscribe_status(child_thread_id).await {
-                Ok(mut status_rx) => {
-                    let mut status = status_rx.borrow().clone();
-                    loop {
-                        while !is_final(&status) {
-                            if status_rx.changed().await.is_err() {
-                                status = control.get_status(child_thread_id).await;
-                                break;
-                            }
-                            status = status_rx.borrow().clone();
-                        }
-                        if !is_final(&status) {
-                            return;
-                        }
-                        if !control.leaf_only_wake_blocked(child_thread_id).await {
-                            break status;
-                        }
-                        status = control
-                            .wait_for_wakeable_leaf_only_status(child_thread_id, &mut status_rx)
+            let status_rx = match status_rx {
+                Some(status_rx) => status_rx,
+                None => match control.subscribe_status(child_thread_id).await {
+                    Ok(status_rx) => status_rx,
+                    Err(_) => {
+                        control
+                            .notify_completion_to_parent(
+                                child_thread_id,
+                                parent_thread_id,
+                                child_reference,
+                                child_agent_path,
+                                control.get_status(child_thread_id).await,
+                            )
                             .await;
+                        return;
                     }
-                }
-                Err(_) => control.get_status(child_thread_id).await,
+                },
             };
+            let status = control
+                .wait_for_completion_status(child_thread_id, status_rx, mode)
+                .await;
             if !is_final(&status) {
                 return;
             }
-
-            let wake_parent_on_completion = control
-                .parent_wake_subscriptions
-                .lock()
-                .await
-                .get(&child_thread_id)
-                .map(|subscription| subscription.wake_parent_on_completion)
-                .unwrap_or(false);
-
-            let Ok(state) = control.upgrade() else {
-                return;
-            };
-            let child_thread = state.get_thread(child_thread_id).await.ok();
-            let message = format_subagent_notification_message(child_reference.as_str(), &status);
-            if child_agent_path.is_some()
-                && child_thread
-                    .as_ref()
-                    .map(|thread| thread.enabled(Feature::MultiAgentV2))
-                    .unwrap_or(true)
-            {
-                let Some(child_agent_path) = child_agent_path.clone() else {
-                    return;
-                };
-                let Some(parent_agent_path) = child_agent_path
-                    .as_str()
-                    .rsplit_once('/')
-                    .and_then(|(parent, _)| AgentPath::try_from(parent).ok())
-                else {
-                    return;
-                };
-                let communication = InterAgentCommunication::new(
-                    child_agent_path,
-                    parent_agent_path,
-                    Vec::new(),
-                    message,
-                    wake_parent_on_completion,
-                );
-                let _ = control
-                    .send_inter_agent_communication(parent_thread_id, communication)
-                    .await;
-                return;
-            }
             control
-                .notify_parent_with_contextual_message(
+                .notify_completion_to_parent(
+                    child_thread_id,
                     parent_thread_id,
-                    message,
-                    wake_parent_on_completion,
+                    child_reference,
+                    child_agent_path,
+                    status,
                 )
                 .await;
         });
+    }
+
+    async fn wait_for_completion_status(
+        &self,
+        child_thread_id: ThreadId,
+        mut status_rx: watch::Receiver<AgentStatus>,
+        mode: CompletionWatcherMode,
+    ) -> AgentStatus {
+        let mut status = status_rx.borrow().clone();
+        if matches!(mode, CompletionWatcherMode::NextStatusChangeThenTerminal) && is_final(&status)
+        {
+            if status_rx.changed().await.is_err() {
+                return self.get_status(child_thread_id).await;
+            }
+            status = status_rx.borrow().clone();
+        }
+
+        loop {
+            while !is_final(&status) {
+                if status_rx.changed().await.is_err() {
+                    return self.get_status(child_thread_id).await;
+                }
+                status = status_rx.borrow().clone();
+            }
+            if !self.leaf_only_wake_blocked(child_thread_id).await {
+                return status;
+            }
+            status = self
+                .wait_for_wakeable_leaf_only_status(child_thread_id, &mut status_rx)
+                .await;
+        }
+    }
+
+    async fn notify_completion_to_parent(
+        &self,
+        child_thread_id: ThreadId,
+        parent_thread_id: ThreadId,
+        child_reference: String,
+        child_agent_path: Option<AgentPath>,
+        status: AgentStatus,
+    ) {
+        if !is_final(&status) {
+            return;
+        }
+
+        let wake_parent_on_completion = self
+            .parent_wake_subscriptions
+            .lock()
+            .await
+            .get(&child_thread_id)
+            .map(|subscription| subscription.wake_parent_on_completion)
+            .unwrap_or(false);
+
+        let Ok(state) = self.upgrade() else {
+            return;
+        };
+        let child_thread = state.get_thread(child_thread_id).await.ok();
+        let message = format_subagent_notification_message(child_reference.as_str(), &status);
+        if child_agent_path.is_some()
+            && child_thread
+                .as_ref()
+                .map(|thread| thread.enabled(Feature::MultiAgentV2))
+                .unwrap_or(true)
+        {
+            let Some(child_agent_path) = child_agent_path.clone() else {
+                return;
+            };
+            let Some(parent_agent_path) = child_agent_path
+                .as_str()
+                .rsplit_once('/')
+                .and_then(|(parent, _)| AgentPath::try_from(parent).ok())
+            else {
+                return;
+            };
+            let communication = InterAgentCommunication::new(
+                child_agent_path,
+                parent_agent_path,
+                Vec::new(),
+                message,
+                wake_parent_on_completion,
+            );
+            let _ = self
+                .send_inter_agent_communication(parent_thread_id, communication)
+                .await;
+            return;
+        }
+        self.notify_parent_with_contextual_message(
+            parent_thread_id,
+            message,
+            wake_parent_on_completion,
+        )
+        .await;
     }
 
     async fn leaf_only_wake_blocked(&self, child_thread_id: ThreadId) -> bool {
@@ -1018,6 +1163,16 @@ impl AgentControl {
         else {
             return;
         };
+        let child_agent_path = match session_source {
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_path, .. })) => {
+                agent_path.clone()
+            }
+            _ => None,
+        };
+        let child_reference = child_agent_path
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| child_thread_id.to_string());
         self.parent_wake_preferences.lock().await.insert(
             child_thread_id,
             ParentWakePreference {
@@ -1029,6 +1184,8 @@ impl AgentControl {
             ParentWakeSubscription {
                 parent_thread_id: *parent_thread_id,
                 wake_parent_on_completion,
+                child_reference,
+                child_agent_path,
             },
         );
     }
