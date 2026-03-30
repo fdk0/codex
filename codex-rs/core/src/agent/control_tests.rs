@@ -1089,13 +1089,16 @@ async fn completion_watcher_wakes_root_parent_for_legacy_child() {
             /*wake_parent_on_completion*/ false,
         )
         .await;
-    harness.control.maybe_start_completion_watcher(
-        child_thread_id,
-        Some(session_source),
-        child_thread_id.to_string(),
-        None,
-        CompletionWatcherMode::CurrentOrNextTerminal,
-    );
+    harness
+        .control
+        .maybe_start_completion_watcher(
+            child_thread_id,
+            Some(session_source),
+            child_thread_id.to_string(),
+            None,
+            CompletionWatcherMode::CurrentOrNextTerminal,
+        )
+        .await;
 
     let child_turn = child_thread.codex.session.new_default_turn().await;
     child_thread
@@ -1143,13 +1146,16 @@ async fn completion_watcher_rearm_for_legacy_child_marks_current_status_seen() {
             /*wake_parent_on_completion*/ true,
         )
         .await;
-    harness.control.maybe_start_completion_watcher(
-        child_thread_id,
-        Some(session_source),
-        child_thread_id.to_string(),
-        None,
-        CompletionWatcherMode::CurrentOrNextTerminal,
-    );
+    harness
+        .control
+        .maybe_start_completion_watcher(
+            child_thread_id,
+            Some(session_source),
+            child_thread_id.to_string(),
+            None,
+            CompletionWatcherMode::CurrentOrNextTerminal,
+        )
+        .await;
 
     let first_turn = child_thread.codex.session.new_default_turn().await;
     child_thread
@@ -1307,19 +1313,22 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
         .expect("tester thread should exist");
     let worker_path = AgentPath::root().join("worker_a").expect("worker path");
     let tester_path = worker_path.join("tester").expect("tester path");
-    harness.control.maybe_start_completion_watcher(
-        tester_thread_id,
-        Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id: worker_thread_id,
-            depth: 2,
-            agent_path: Some(tester_path.clone()),
-            agent_nickname: None,
-            agent_role: Some("explorer".to_string()),
-        })),
-        tester_path.to_string(),
-        Some(tester_path.clone()),
-        CompletionWatcherMode::CurrentOrNextTerminal,
-    );
+    harness
+        .control
+        .maybe_start_completion_watcher(
+            tester_thread_id,
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: worker_thread_id,
+                depth: 2,
+                agent_path: Some(tester_path.clone()),
+                agent_nickname: None,
+                agent_role: Some("explorer".to_string()),
+            })),
+            tester_path.to_string(),
+            Some(tester_path.clone()),
+            CompletionWatcherMode::CurrentOrNextTerminal,
+        )
+        .await;
     let tester_turn = tester_thread.codex.session.new_default_turn().await;
     tester_thread
         .codex
@@ -1420,13 +1429,16 @@ async fn multi_agent_v2_completion_triggers_turn_when_child_is_wake_enabled() {
             /*wake_parent_on_completion*/ true,
         )
         .await;
-    harness.control.maybe_start_completion_watcher(
-        tester_thread_id,
-        Some(session_source),
-        tester_path.to_string(),
-        Some(tester_path.clone()),
-        CompletionWatcherMode::CurrentOrNextTerminal,
-    );
+    harness
+        .control
+        .maybe_start_completion_watcher(
+            tester_thread_id,
+            Some(session_source),
+            tester_path.to_string(),
+            Some(tester_path.clone()),
+            CompletionWatcherMode::CurrentOrNextTerminal,
+        )
+        .await;
     let tester_turn = tester_thread.codex.session.new_default_turn().await;
     tester_thread
         .codex
@@ -1527,13 +1539,16 @@ async fn trigger_turn_inter_agent_message_rearms_completion_watcher_for_reused_c
             /*wake_parent_on_completion*/ true,
         )
         .await;
-    harness.control.maybe_start_completion_watcher(
-        tester_thread_id,
-        Some(session_source),
-        tester_path.to_string(),
-        Some(tester_path.clone()),
-        CompletionWatcherMode::CurrentOrNextTerminal,
-    );
+    harness
+        .control
+        .maybe_start_completion_watcher(
+            tester_thread_id,
+            Some(session_source),
+            tester_path.to_string(),
+            Some(tester_path.clone()),
+            CompletionWatcherMode::CurrentOrNextTerminal,
+        )
+        .await;
 
     let first_turn = tester_thread.codex.session.new_default_turn().await;
     tester_thread
@@ -1675,13 +1690,16 @@ async fn leaf_only_completion_suppresses_parent_wake_while_descendant_is_active(
             /*wake_parent_on_completion*/ true,
         )
         .await;
-    harness.control.maybe_start_completion_watcher(
-        tester_thread_id,
-        Some(tester_source),
-        tester_path.to_string(),
-        Some(tester_path.clone()),
-        CompletionWatcherMode::CurrentOrNextTerminal,
-    );
+    harness
+        .control
+        .maybe_start_completion_watcher(
+            tester_thread_id,
+            Some(tester_source),
+            tester_path.to_string(),
+            Some(tester_path.clone()),
+            CompletionWatcherMode::CurrentOrNextTerminal,
+        )
+        .await;
 
     let leaf_path = tester_path.join("leaf").expect("leaf path");
     let leaf_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
@@ -1765,13 +1783,16 @@ async fn leaf_only_completion_wakes_parent_after_descendants_finish() {
             /*wake_parent_on_completion*/ true,
         )
         .await;
-    harness.control.maybe_start_completion_watcher(
-        dispatcher_thread_id,
-        Some(dispatcher_source),
-        dispatcher_thread_id.to_string(),
-        None,
-        CompletionWatcherMode::CurrentOrNextTerminal,
-    );
+    harness
+        .control
+        .maybe_start_completion_watcher(
+            dispatcher_thread_id,
+            Some(dispatcher_source),
+            dispatcher_thread_id.to_string(),
+            None,
+            CompletionWatcherMode::CurrentOrNextTerminal,
+        )
+        .await;
 
     let worker_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id: dispatcher_thread_id,
@@ -1873,24 +1894,206 @@ async fn leaf_only_completion_wakes_parent_after_descendants_finish() {
 }
 
 #[tokio::test]
+async fn leaf_only_reused_child_wakes_parent_only_once_after_descendants_finish() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+    let parent_path = AgentPath::root().join("driver").expect("parent path");
+    let mut dispatcher_config = harness.config.clone();
+    let _ = dispatcher_config.features.enable(Feature::MultiAgentV2);
+    dispatcher_config.agent_wake_descendant_policy = AgentWakeDescendantPolicy::LeafOnly;
+    let dispatcher_thread_id = harness
+        .manager
+        .start_thread(dispatcher_config.clone())
+        .await
+        .expect("dispatcher thread should start")
+        .thread_id;
+    let dispatcher_thread = harness
+        .manager
+        .get_thread(dispatcher_thread_id)
+        .await
+        .expect("dispatcher thread should exist");
+    let dispatcher_path = parent_path.join("dispatcher").expect("dispatcher path");
+    let dispatcher_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 2,
+        agent_path: Some(dispatcher_path.clone()),
+        agent_nickname: None,
+        agent_role: Some("dispatcher".to_string()),
+    });
+    harness
+        .control
+        .register_parent_wake_subscription(
+            dispatcher_thread_id,
+            Some(&dispatcher_source),
+            /*wake_parent_on_completion*/ true,
+        )
+        .await;
+    harness
+        .control
+        .maybe_start_completion_watcher(
+            dispatcher_thread_id,
+            Some(dispatcher_source),
+            dispatcher_path.to_string(),
+            Some(dispatcher_path.clone()),
+            CompletionWatcherMode::CurrentOrNextTerminal,
+        )
+        .await;
+
+    let worker_path = dispatcher_path.join("worker_1").expect("worker path");
+    let worker_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: dispatcher_thread_id,
+        depth: 3,
+        agent_path: Some(worker_path.clone()),
+        agent_nickname: None,
+        agent_role: Some("worker".to_string()),
+    });
+    let _worker_thread = harness
+        .manager
+        .spawn_new_thread_with_source_for_tests(
+            dispatcher_config,
+            harness.control.clone(),
+            worker_source,
+            /*persist_extended_history*/ false,
+            /*metrics_service_name*/ None,
+            /*inherited_shell_snapshot*/ None,
+            /*inherited_exec_policy*/ None,
+        )
+        .await
+        .expect("worker thread should start");
+
+    let first_turn = dispatcher_thread.codex.session.new_default_turn().await;
+    dispatcher_thread
+        .codex
+        .session
+        .send_event(
+            first_turn.as_ref(),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: first_turn.sub_id.clone(),
+                model_context_window: None,
+                collaboration_mode_kind: ModeKind::Default,
+            }),
+        )
+        .await;
+    dispatcher_thread
+        .codex
+        .session
+        .send_event(
+            first_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: first_turn.sub_id.clone(),
+                last_agent_message: Some("delegated".to_string()),
+            }),
+        )
+        .await;
+
+    sleep(Duration::from_millis(150)).await;
+
+    let reuse_submission_id = harness
+        .control
+        .send_inter_agent_communication(
+            dispatcher_thread_id,
+            InterAgentCommunication::new(
+                parent_path.clone(),
+                dispatcher_path.clone(),
+                Vec::new(),
+                "resume work".to_string(),
+                true,
+            ),
+        )
+        .await
+        .expect("reusing completed dispatcher should succeed");
+
+    let descendants = harness
+        .control
+        .live_thread_spawn_descendants(dispatcher_thread_id)
+        .await
+        .expect("descendants should list worker");
+    assert_eq!(descendants.len(), 1);
+    harness
+        .control
+        .shutdown_live_agent(descendants[0])
+        .await
+        .expect("worker shutdown should succeed");
+
+    let second_turn = wait_for_turn_context(&dispatcher_thread, &reuse_submission_id).await;
+    dispatcher_thread
+        .codex
+        .session
+        .send_event(
+            second_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: second_turn.sub_id.clone(),
+                last_agent_message: Some("reconciled".to_string()),
+            }),
+        )
+        .await;
+
+    let expected_message = crate::session_prefix::format_subagent_notification_message(
+        dispatcher_path.as_str(),
+        &AgentStatus::Completed(Some("reconciled".to_string())),
+    );
+    let expected_parent_wake = (
+        parent_thread_id,
+        Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                dispatcher_path,
+                parent_path,
+                Vec::new(),
+                expected_message,
+                true,
+            ),
+        },
+    );
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let wake_count = harness
+                .manager
+                .captured_ops()
+                .into_iter()
+                .filter(|entry| *entry == expected_parent_wake)
+                .count();
+            if wake_count >= 1 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("reused leaf_only child should wake the parent");
+
+    sleep(Duration::from_millis(150)).await;
+
+    let wake_count = harness
+        .manager
+        .captured_ops()
+        .into_iter()
+        .filter(|entry| *entry == expected_parent_wake)
+        .count();
+    assert_eq!(wake_count, 1);
+}
+
+#[tokio::test]
 async fn completion_watcher_notifies_parent_when_child_is_missing() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
     let child_thread_id = ThreadId::new();
 
-    harness.control.maybe_start_completion_watcher(
-        child_thread_id,
-        Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id,
-            depth: 1,
-            agent_path: None,
-            agent_nickname: None,
-            agent_role: Some("explorer".to_string()),
-        })),
-        child_thread_id.to_string(),
-        None,
-        CompletionWatcherMode::CurrentOrNextTerminal,
-    );
+    harness
+        .control
+        .maybe_start_completion_watcher(
+            child_thread_id,
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("explorer".to_string()),
+            })),
+            child_thread_id.to_string(),
+            None,
+            CompletionWatcherMode::CurrentOrNextTerminal,
+        )
+        .await;
 
     assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);
 

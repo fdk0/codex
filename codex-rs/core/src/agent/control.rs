@@ -63,6 +63,7 @@ struct ParentWakeSubscription {
     wake_parent_on_completion: bool,
     child_reference: String,
     child_agent_path: Option<AgentPath>,
+    completion_watcher_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -81,6 +82,7 @@ struct CompletionWatcherArm {
     parent_thread_id: ThreadId,
     child_reference: String,
     child_agent_path: Option<AgentPath>,
+    completion_watcher_generation: u64,
     status_rx: watch::Receiver<AgentStatus>,
 }
 
@@ -331,7 +333,8 @@ impl AgentControl {
             child_reference,
             agent_metadata.agent_path.clone(),
             CompletionWatcherMode::CurrentOrNextTerminal,
-        );
+        )
+        .await;
 
         Ok(LiveAgent {
             thread_id: new_thread.thread_id,
@@ -518,7 +521,8 @@ impl AgentControl {
             child_reference,
             agent_metadata.agent_path.clone(),
             CompletionWatcherMode::CurrentOrNextTerminal,
-        );
+        )
+        .await;
         self.persist_thread_spawn_edge_for_source(
             resumed_thread.thread.as_ref(),
             resumed_thread.thread_id,
@@ -564,6 +568,7 @@ impl AgentControl {
                     completion_watcher.parent_thread_id,
                     completion_watcher.child_reference,
                     completion_watcher.child_agent_path,
+                    completion_watcher.completion_watcher_generation,
                     CompletionWatcherMode::NextStatusChangeThenTerminal,
                     Some(completion_watcher.status_rx),
                 );
@@ -616,6 +621,7 @@ impl AgentControl {
                     completion_watcher.parent_thread_id,
                     completion_watcher.child_reference,
                     completion_watcher.child_agent_path,
+                    completion_watcher.completion_watcher_generation,
                     CompletionWatcherMode::NextStatusChangeThenTerminal,
                     Some(completion_watcher.status_rx),
                 );
@@ -877,7 +883,7 @@ impl AgentControl {
     ///
     /// This is only enabled for `SubAgentSource::ThreadSpawn`, where a parent thread exists and
     /// can receive completion notifications.
-    fn maybe_start_completion_watcher(
+    async fn maybe_start_completion_watcher(
         &self,
         child_thread_id: ThreadId,
         session_source: Option<SessionSource>,
@@ -891,11 +897,30 @@ impl AgentControl {
         else {
             return;
         };
+        self.parent_wake_subscriptions
+            .lock()
+            .await
+            .entry(child_thread_id)
+            .or_insert_with(|| ParentWakeSubscription {
+                parent_thread_id,
+                wake_parent_on_completion: false,
+                child_reference: child_reference.clone(),
+                child_agent_path: child_agent_path.clone(),
+                completion_watcher_generation: 0,
+            });
+        self.parent_wake_preferences
+            .lock()
+            .await
+            .entry(child_thread_id)
+            .or_insert(ParentWakePreference {
+                wake_parent_on_completion: false,
+            });
         self.spawn_completion_watcher(
             child_thread_id,
             parent_thread_id,
             child_reference,
             child_agent_path,
+            /*completion_watcher_generation*/ 0,
             mode,
             /*status_rx*/ None,
         );
@@ -916,29 +941,31 @@ impl AgentControl {
         }
         let _ = status_rx.borrow_and_update();
 
-        let subscription = self
-            .parent_wake_subscriptions
-            .lock()
-            .await
-            .get(&child_thread_id)
-            .cloned()?;
+        let mut subscriptions = self.parent_wake_subscriptions.lock().await;
+        let subscription = subscriptions.get_mut(&child_thread_id)?;
         let child_agent_path = subscription.child_agent_path.clone();
         let child_reference = subscription.child_reference.clone();
+        subscription.completion_watcher_generation =
+            subscription.completion_watcher_generation.saturating_add(1);
+        let completion_watcher_generation = subscription.completion_watcher_generation;
 
         Some(CompletionWatcherArm {
             parent_thread_id: subscription.parent_thread_id,
             child_reference,
             child_agent_path,
+            completion_watcher_generation,
             status_rx,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_completion_watcher(
         &self,
         child_thread_id: ThreadId,
         parent_thread_id: ThreadId,
         child_reference: String,
         child_agent_path: Option<AgentPath>,
+        completion_watcher_generation: u64,
         mode: CompletionWatcherMode,
         status_rx: Option<watch::Receiver<AgentStatus>>,
     ) {
@@ -962,10 +989,24 @@ impl AgentControl {
                     }
                 },
             };
-            let status = control
-                .wait_for_completion_status(child_thread_id, status_rx, mode)
-                .await;
+            let Some(status) = control
+                .wait_for_completion_status(
+                    child_thread_id,
+                    status_rx,
+                    mode,
+                    completion_watcher_generation,
+                )
+                .await
+            else {
+                return;
+            };
             if !is_final(&status) {
+                return;
+            }
+            if control
+                .completion_watcher_superseded(child_thread_id, completion_watcher_generation)
+                .await
+            {
                 return;
             }
             control
@@ -985,29 +1026,64 @@ impl AgentControl {
         child_thread_id: ThreadId,
         mut status_rx: watch::Receiver<AgentStatus>,
         mode: CompletionWatcherMode,
-    ) -> AgentStatus {
+        completion_watcher_generation: u64,
+    ) -> Option<AgentStatus> {
         let mut status = status_rx.borrow().clone();
         if matches!(mode, CompletionWatcherMode::NextStatusChangeThenTerminal) && is_final(&status)
         {
             if status_rx.changed().await.is_err() {
-                return self.get_status(child_thread_id).await;
+                return if self
+                    .completion_watcher_superseded(child_thread_id, completion_watcher_generation)
+                    .await
+                {
+                    None
+                } else {
+                    Some(self.get_status(child_thread_id).await)
+                };
             }
             status = status_rx.borrow().clone();
         }
 
         loop {
+            if self
+                .completion_watcher_superseded(child_thread_id, completion_watcher_generation)
+                .await
+            {
+                return None;
+            }
             while !is_final(&status) {
                 if status_rx.changed().await.is_err() {
-                    return self.get_status(child_thread_id).await;
+                    return if self
+                        .completion_watcher_superseded(
+                            child_thread_id,
+                            completion_watcher_generation,
+                        )
+                        .await
+                    {
+                        None
+                    } else {
+                        Some(self.get_status(child_thread_id).await)
+                    };
                 }
                 status = status_rx.borrow().clone();
+                if self
+                    .completion_watcher_superseded(child_thread_id, completion_watcher_generation)
+                    .await
+                {
+                    return None;
+                }
             }
             if !self.leaf_only_wake_blocked(child_thread_id).await {
-                return status;
+                return Some(status);
             }
-            status = self
-                .wait_for_wakeable_leaf_only_status(child_thread_id, &mut status_rx)
-                .await;
+            let next_status = self
+                .wait_for_wakeable_leaf_only_status(
+                    child_thread_id,
+                    &mut status_rx,
+                    completion_watcher_generation,
+                )
+                .await?;
+            status = next_status;
         }
     }
 
@@ -1090,20 +1166,36 @@ impl AgentControl {
         &self,
         child_thread_id: ThreadId,
         status_rx: &mut watch::Receiver<AgentStatus>,
-    ) -> AgentStatus {
+        completion_watcher_generation: u64,
+    ) -> Option<AgentStatus> {
         loop {
+            if self
+                .completion_watcher_superseded(child_thread_id, completion_watcher_generation)
+                .await
+            {
+                return None;
+            }
             if !self.leaf_only_wake_blocked(child_thread_id).await {
-                return self.get_status(child_thread_id).await;
+                return Some(self.get_status(child_thread_id).await);
             }
 
             tokio::select! {
                 changed = status_rx.changed() => {
                     if changed.is_err() {
-                        return self.get_status(child_thread_id).await;
+                        return Some(self.get_status(child_thread_id).await);
                     }
                     let status = status_rx.borrow().clone();
+                    if self
+                        .completion_watcher_superseded(
+                            child_thread_id,
+                            completion_watcher_generation,
+                        )
+                        .await
+                    {
+                        return None;
+                    }
                     if !is_final(&status) || !self.leaf_only_wake_blocked(child_thread_id).await {
-                        return status;
+                        return Some(status);
                     }
                 }
                 _ = sleep(Duration::from_millis(25)) => {}
@@ -1186,6 +1278,7 @@ impl AgentControl {
                 wake_parent_on_completion,
                 child_reference,
                 child_agent_path,
+                completion_watcher_generation: 0,
             },
         );
     }
@@ -1221,6 +1314,21 @@ impl AgentControl {
             .lock()
             .await
             .remove(&child_thread_id);
+    }
+
+    async fn completion_watcher_superseded(
+        &self,
+        child_thread_id: ThreadId,
+        completion_watcher_generation: u64,
+    ) -> bool {
+        self.parent_wake_subscriptions
+            .lock()
+            .await
+            .get(&child_thread_id)
+            .map(|subscription| {
+                subscription.completion_watcher_generation != completion_watcher_generation
+            })
+            .unwrap_or(true)
     }
 
     pub(crate) async fn wake_enabled_children_for_parent(
