@@ -1616,6 +1616,7 @@ impl App {
     fn open_agent_count(&self) -> usize {
         self.agent_navigation
             .open_agent_count(self.primary_thread_id)
+            + usize::from(self.primary_thread_id.is_some())
     }
 
     fn active_agent_status_summary(&self) -> Option<ActiveAgentStatusSummary> {
@@ -2080,25 +2081,31 @@ impl App {
                             }
                         }
                     }
-                } else {
-                    app_server
-                        .turn_start(
-                            thread_id,
-                            items.to_vec(),
-                            cwd.clone(),
-                            approval_policy,
-                            approvals_reviewer
-                                .unwrap_or(self.chat_widget.config_ref().approvals_reviewer),
-                            sandbox_policy.clone(),
-                            model.to_string(),
-                            effort,
-                            *summary,
-                            *service_tier,
-                            collaboration_mode.clone(),
-                            *personality,
-                            final_output_json_schema.clone(),
-                        )
-                        .await?;
+                } else if let Err(error) = app_server
+                    .turn_start(
+                        thread_id,
+                        items.to_vec(),
+                        cwd.clone(),
+                        approval_policy,
+                        approvals_reviewer
+                            .unwrap_or(self.chat_widget.config_ref().approvals_reviewer),
+                        sandbox_policy.clone(),
+                        model.to_string(),
+                        effort,
+                        *summary,
+                        *service_tier,
+                        collaboration_mode.clone(),
+                        *personality,
+                        final_output_json_schema.clone(),
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        error = %error,
+                        %thread_id,
+                        "turn/start failed in app-server TUI"
+                    );
+                    self.chat_widget.add_error_message(error.to_string());
                 }
                 Ok(true)
             }
@@ -6660,7 +6667,7 @@ mod tests {
 
         assert_eq!(
             app.chat_widget.status_line_text(),
-            Some("Main [default] • 1 open agent".to_string())
+            Some("Main [default] • 2 open agents".to_string())
         );
 
         app.active_thread_id = Some(agent_thread_id);
@@ -6668,7 +6675,7 @@ mod tests {
 
         assert_eq!(
             app.chat_widget.status_line_text(),
-            Some("Robie [explorer] • 1 open agent".to_string())
+            Some("Robie [explorer] • 2 open agents".to_string())
         );
     }
 
@@ -6687,7 +6694,7 @@ mod tests {
         app.sync_active_agent_status_summary();
         assert_eq!(
             app.chat_widget.status_line_text(),
-            Some("Main [default]".to_string())
+            Some("Main [default] • 1 open agent".to_string())
         );
 
         app.upsert_agent_picker_thread(
@@ -6699,7 +6706,7 @@ mod tests {
         );
         assert_eq!(
             app.chat_widget.status_line_text(),
-            Some("Main [default] • 1 open agent".to_string())
+            Some("Main [default] • 2 open agents".to_string())
         );
 
         app.upsert_agent_picker_thread(
@@ -6711,19 +6718,19 @@ mod tests {
         );
         assert_eq!(
             app.chat_widget.status_line_text(),
-            Some("Main [default] • 2 open agents".to_string())
+            Some("Main [default] • 3 open agents".to_string())
         );
 
         app.mark_agent_picker_thread_closed(first_agent_id);
         assert_eq!(
             app.chat_widget.status_line_text(),
-            Some("Main [default] • 1 open agent".to_string())
+            Some("Main [default] • 2 open agents".to_string())
         );
 
         app.mark_agent_picker_thread_closed(second_agent_id);
         assert_eq!(
             app.chat_widget.status_line_text(),
-            Some("Main [default]".to_string())
+            Some("Main [default] • 1 open agent".to_string())
         );
     }
 
@@ -6746,7 +6753,7 @@ mod tests {
         );
         assert_eq!(
             app.chat_widget.status_line_text(),
-            Some("Main [default] • 1 open agent".to_string())
+            Some("Main [default] • 2 open agents".to_string())
         );
 
         app.enqueue_thread_notification(
@@ -6759,7 +6766,7 @@ mod tests {
 
         assert_eq!(
             app.chat_widget.status_line_text(),
-            Some("Main [default]".to_string())
+            Some("Main [default] • 1 open agent".to_string())
         );
         assert_eq!(
             app.agent_navigation

@@ -633,8 +633,9 @@ fn footer_from_props_lines(
 /// Returns the contextual footer row when the footer is not busy showing an instructional hint.
 ///
 /// The returned line may contain the configured status line, the currently viewed agent label, or
-/// both combined. Active instructional states such as quit reminders, shortcut overlays, and queue
-/// prompts deliberately return `None` so those call-to-action hints stay visible.
+/// both combined when they provide distinct context. Active instructional states such as quit
+/// reminders, shortcut overlays, and queue prompts deliberately return `None` so those
+/// call-to-action hints stay visible.
 pub(crate) fn passive_footer_status_line(props: &FooterProps) -> Option<Line<'static>> {
     if !shows_passive_footer_line(props) {
         return None;
@@ -648,14 +649,25 @@ pub(crate) fn passive_footer_status_line(props: &FooterProps) -> Option<Line<'st
 
     if let Some(active_agent_label) = props.active_agent_label.as_ref() {
         if let Some(existing) = line.as_mut() {
-            existing.spans.push(" · ".into());
-            existing.spans.push(active_agent_label.clone().into());
+            if !line_contains_text(existing, active_agent_label) {
+                existing.spans.push(" · ".into());
+                existing.spans.push(active_agent_label.clone().into());
+            }
         } else {
             line = Some(Line::from(active_agent_label.clone()));
         }
     }
 
     line
+}
+
+fn line_contains_text(line: &Line<'_>, needle: &str) -> bool {
+    let rendered = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    rendered.contains(needle)
 }
 
 /// Whether the current footer mode allows contextual information to replace instructional hints.
@@ -1701,6 +1713,32 @@ mod tests {
             screen.contains('…'),
             "status line should be truncated with ellipsis to keep mode indicator"
         );
+    }
+
+    #[test]
+    fn footer_status_line_does_not_duplicate_active_agent_label() {
+        let props = FooterProps {
+            mode: FooterMode::ComposerEmpty,
+            esc_backtrack_hint: false,
+            use_shift_enter_hint: false,
+            is_task_running: false,
+            collaboration_modes_enabled: false,
+            is_wsl: false,
+            quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
+            context_window_percent: None,
+            context_window_used_tokens: None,
+            status_line_value: Some(Line::from("Main [default] • 2 open agents".to_string())),
+            status_line_enabled: true,
+            active_agent_label: Some("Main [default]".to_string()),
+        };
+
+        let line = passive_footer_status_line(&props).expect("passive footer line");
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(rendered, "Main [default] • 2 open agents");
     }
 
     #[test]
