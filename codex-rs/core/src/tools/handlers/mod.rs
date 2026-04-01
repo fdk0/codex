@@ -44,9 +44,7 @@ pub use mcp::McpHandler;
 pub use mcp_resource::McpResourceHandler;
 pub use plan::PlanHandler;
 pub use request_permissions::RequestPermissionsHandler;
-pub(crate) use request_permissions::request_permissions_tool_description;
 pub use request_user_input::RequestUserInputHandler;
-pub(crate) use request_user_input::request_user_input_tool_description;
 pub use shell::ShellCommandHandler;
 pub use shell::ShellHandler;
 pub use test_sync::TestSyncHandler;
@@ -261,7 +259,7 @@ mod tests {
         let cwd = tempdir().expect("tempdir");
 
         let normalized = normalize_and_validate_additional_permissions(
-            false,
+            /*additional_permissions_allowed*/ false,
             AskForApproval::Granular(GranularApprovalConfig {
                 sandbox_approval: true,
                 rules: true,
@@ -271,7 +269,7 @@ mod tests {
             }),
             SandboxPermissions::WithAdditionalPermissions,
             Some(network_permissions()),
-            true,
+            /*permissions_preapproved*/ true,
             cwd.path(),
         )
         .expect("preapproved permissions should be allowed");
@@ -284,11 +282,11 @@ mod tests {
         let cwd = tempdir().expect("tempdir");
 
         let err = normalize_and_validate_additional_permissions(
-            false,
+            /*additional_permissions_allowed*/ false,
             AskForApproval::OnRequest,
             SandboxPermissions::WithAdditionalPermissions,
             Some(network_permissions()),
-            false,
+            /*permissions_preapproved*/ false,
             cwd.path(),
         )
         .expect_err("fresh inline permission requests should remain disabled");
@@ -305,7 +303,7 @@ mod tests {
         let granted_permissions = file_system_permissions(cwd.path());
         let implicit_permissions = implicit_granted_permissions(
             SandboxPermissions::UseDefault,
-            None,
+            /*additional_permissions*/ None,
             &EffectiveAdditionalPermissions {
                 sandbox_permissions: SandboxPermissions::WithAdditionalPermissions,
                 additional_permissions: Some(granted_permissions.clone()),

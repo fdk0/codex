@@ -1,6 +1,10 @@
 use super::*;
+use crate::agent::agent_resolver::resolve_agent_target;
 use crate::agent::status::is_final;
+use crate::codex::Session;
 use crate::config::types::AgentWaitOnWakeEnabledBehavior;
+use codex_protocol::ThreadId;
+use codex_protocol::protocol::CollabAgentRef;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -200,6 +204,18 @@ struct WaitArgs {
     #[serde(default)]
     targets: Vec<String>,
     timeout_ms: Option<i64>,
+}
+
+async fn resolve_agent_targets(
+    session: &std::sync::Arc<Session>,
+    turn: &std::sync::Arc<crate::codex::TurnContext>,
+    targets: Vec<String>,
+) -> Result<Vec<ThreadId>, FunctionCallError> {
+    let mut receiver_thread_ids = Vec::with_capacity(targets.len());
+    for target in targets {
+        receiver_thread_ids.push(resolve_agent_target(session, turn, &target).await?);
+    }
+    Ok(receiver_thread_ids)
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]

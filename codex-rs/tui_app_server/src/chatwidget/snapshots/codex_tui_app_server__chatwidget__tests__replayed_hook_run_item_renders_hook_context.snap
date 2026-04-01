@@ -1,9 +1,0 @@
----
-source: tui_app_server/src/chatwidget/tests.rs
-expression: combined
----
-SessionStart hook (completed)
-  warning: Heads up from the hook
-  hook context: SESSION_CONTEXT v1
-                RepoRoot: /tmp/repo
-                Queue: open=12

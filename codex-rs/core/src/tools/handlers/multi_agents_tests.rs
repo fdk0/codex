@@ -681,7 +681,8 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
             vec![UserInput::Text {
                 text: "inspect this repo".to_string(),
                 text_elements: Vec::new(),
-            }],
+            }]
+            .into(),
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: root.thread_id,
                 depth: 1,
@@ -845,7 +846,8 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
             vec![UserInput::Text {
                 text: "research".to_string(),
                 text_elements: Vec::new(),
-            }],
+            }]
+            .into(),
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: root.thread_id,
                 depth: 1,
@@ -865,7 +867,8 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
             vec![UserInput::Text {
                 text: "build".to_string(),
                 text_elements: Vec::new(),
-            }],
+            }]
+            .into(),
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: root.thread_id,
                 depth: 2,

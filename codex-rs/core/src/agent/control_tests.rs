@@ -56,11 +56,14 @@ async fn test_config() -> (TempDir, Config) {
     test_config_with_cli_overrides(Vec::new()).await
 }
 
-fn text_input(text: &str) -> Vec<UserInput> {
-    vec![UserInput::Text {
-        text: text.to_string(),
-        text_elements: Vec::new(),
-    }]
+fn text_input(text: &str) -> Op {
+    Op::UserInput {
+        items: vec![UserInput::Text {
+            text: text.to_string(),
+            text_elements: Vec::new(),
+        }],
+        final_output_json_schema: None,
+    }
 }
 
 struct AgentControlHarness {
@@ -227,13 +230,7 @@ async fn wait_for_live_thread_spawn_children(
 async fn send_input_errors_when_manager_dropped() {
     let control = AgentControl::default();
     let err = control
-        .send_input(
-            ThreadId::new(),
-            vec![UserInput::Text {
-                text: "hello".to_string(),
-                text_elements: Vec::new(),
-            }],
-        )
+        .send_input(ThreadId::new(), text_input("hello"))
         .await
         .expect_err("send_input should fail without a manager");
     assert_eq!(
@@ -331,13 +328,7 @@ async fn send_input_errors_when_thread_missing() {
     let thread_id = ThreadId::new();
     let err = harness
         .control
-        .send_input(
-            thread_id,
-            vec![UserInput::Text {
-                text: "hello".to_string(),
-                text_elements: Vec::new(),
-            }],
-        )
+        .send_input(thread_id, text_input("hello"))
         .await
         .expect_err("send_input should fail for missing thread");
     assert_matches!(err, CodexErr::ThreadNotFound(id) if id == thread_id);
@@ -397,13 +388,7 @@ async fn send_input_submits_user_message() {
 
     let submission_id = harness
         .control
-        .send_input(
-            thread_id,
-            vec![UserInput::Text {
-                text: "hello from tests".to_string(),
-                text_elements: Vec::new(),
-            }],
-        )
+        .send_input(thread_id, text_input("hello from tests"))
         .await
         .expect("send_input should succeed");
     assert!(!submission_id.is_empty());
@@ -615,6 +600,7 @@ async fn spawn_agent_can_fork_parent_thread_history() {
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id),
                 wake_parent_on_completion: None,
+                ..Default::default()
             },
         )
         .await
@@ -701,6 +687,7 @@ async fn spawn_agent_fork_injects_output_for_parent_spawn_call() {
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 wake_parent_on_completion: None,
+                ..Default::default()
             },
         )
         .await
@@ -774,6 +761,7 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 wake_parent_on_completion: None,
+                ..Default::default()
             },
         )
         .await
