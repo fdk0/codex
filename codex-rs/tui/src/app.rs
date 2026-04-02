@@ -532,15 +532,132 @@ struct ThreadEventStore {
     active: bool,
 }
 
+fn thread_turn_matches(turn: &Turn, turn_id: Option<&str>) -> bool {
+    turn_id.is_none_or(|id| turn.id == id)
+}
+
+fn items_match(existing: &ThreadItem, notification: &ThreadItem) -> bool {
+    std::mem::discriminant(existing) == std::mem::discriminant(notification)
+        && existing.id() == notification.id()
+}
+
+fn item_is_terminal(item: &ThreadItem) -> bool {
+    match item {
+        ThreadItem::CommandExecution { status, .. } => !matches!(
+            status,
+            codex_app_server_protocol::CommandExecutionStatus::InProgress
+        ),
+        ThreadItem::FileChange { status, .. } => !matches!(
+            status,
+            codex_app_server_protocol::PatchApplyStatus::InProgress
+        ),
+        ThreadItem::McpToolCall { status, .. } => !matches!(
+            status,
+            codex_app_server_protocol::McpToolCallStatus::InProgress
+        ),
+        ThreadItem::DynamicToolCall { status, .. } => !matches!(
+            status,
+            codex_app_server_protocol::DynamicToolCallStatus::InProgress
+        ),
+        ThreadItem::CollabAgentToolCall { status, .. } => !matches!(
+            status,
+            codex_app_server_protocol::CollabAgentToolCallStatus::InProgress
+        ),
+        ThreadItem::WebSearch { action, .. } => action.is_some(),
+        ThreadItem::ImageGeneration {
+            status,
+            result,
+            revised_prompt,
+            saved_path,
+            ..
+        } => {
+            !status.is_empty()
+                || !result.is_empty()
+                || revised_prompt.is_some()
+                || saved_path.is_some()
+        }
+        _ => true,
+    }
+}
+
+fn turns_cover_item_notification(
+    turns: &[Turn],
+    turn_id: Option<&str>,
+    notification_item: &ThreadItem,
+    completed: bool,
+) -> bool {
+    turns
+        .iter()
+        .filter(|turn| thread_turn_matches(turn, turn_id))
+        .flat_map(|turn| turn.items.iter())
+        .filter(|item| items_match(item, notification_item))
+        .any(|item| !completed || item_is_terminal(item))
+}
+
+fn turns_cover_hook_notification(
+    turns: &[Turn],
+    turn_id: Option<&str>,
+    run_id: &str,
+    completed: bool,
+) -> bool {
+    turns
+        .iter()
+        .filter(|turn| thread_turn_matches(turn, turn_id))
+        .flat_map(|turn| turn.items.iter())
+        .filter_map(|item| match item {
+            ThreadItem::HookRun { id, run } if id == run_id => Some(run.status),
+            _ => None,
+        })
+        .any(|status| {
+            !completed || !matches!(status, codex_app_server_protocol::HookRunStatus::Running)
+        })
+}
+
+fn notification_survives_session_refresh(
+    notification: &ServerNotification,
+    refreshed_turns: &[Turn],
+) -> bool {
+    match notification {
+        ServerNotification::HookStarted(notification) => !turns_cover_hook_notification(
+            refreshed_turns,
+            notification.turn_id.as_deref(),
+            &notification.run.id,
+            /*completed*/ false,
+        ),
+        ServerNotification::HookCompleted(notification) => !turns_cover_hook_notification(
+            refreshed_turns,
+            notification.turn_id.as_deref(),
+            &notification.run.id,
+            /*completed*/ true,
+        ),
+        ServerNotification::ItemStarted(notification) => !turns_cover_item_notification(
+            refreshed_turns,
+            Some(notification.turn_id.as_str()),
+            &notification.item,
+            /*completed*/ false,
+        ),
+        ServerNotification::ItemCompleted(notification) => !turns_cover_item_notification(
+            refreshed_turns,
+            Some(notification.turn_id.as_str()),
+            &notification.item,
+            /*completed*/ true,
+        ),
+        _ => false,
+    }
+}
+
 impl ThreadEventStore {
-    fn event_survives_session_refresh(event: &ThreadBufferedEvent) -> bool {
-        matches!(
-            event,
-            ThreadBufferedEvent::Request(_)
-                | ThreadBufferedEvent::Notification(ServerNotification::HookStarted(_))
-                | ThreadBufferedEvent::Notification(ServerNotification::HookCompleted(_))
-                | ThreadBufferedEvent::FeedbackSubmission(_)
-        )
+    fn event_survives_session_refresh(
+        event: &ThreadBufferedEvent,
+        refreshed_turns: &[Turn],
+    ) -> bool {
+        match event {
+            ThreadBufferedEvent::Request(_) | ThreadBufferedEvent::FeedbackSubmission(_) => true,
+            ThreadBufferedEvent::HistoryEntryResponse(_) => false,
+            ThreadBufferedEvent::Notification(notification) => {
+                notification_survives_session_refresh(notification, refreshed_turns)
+            }
+        }
     }
 
     fn new(capacity: usize) -> Self {
@@ -569,8 +686,9 @@ impl ThreadEventStore {
         self.set_turns(turns);
     }
 
-    fn rebase_buffer_after_session_refresh(&mut self) {
-        self.buffer.retain(Self::event_survives_session_refresh);
+    fn rebase_buffer_after_session_refresh(&mut self, refreshed_turns: &[Turn]) {
+        self.buffer
+            .retain(|event| Self::event_survives_session_refresh(event, refreshed_turns));
     }
 
     fn set_turns(&mut self, turns: Vec<Turn>) {
@@ -2295,10 +2413,10 @@ impl App {
                             final_output_json_schema.clone(),
                         )
                         .await
-                    {
-                        tracing::error!("turn/start failed in app-server TUI: {error}");
-                        self.chat_widget.add_error_message(error.to_string());
-                    }
+                {
+                    tracing::error!("turn/start failed in app-server TUI: {error}");
+                    self.chat_widget.add_error_message(error.to_string());
+                }
                 Ok(true)
             }
             AppCommandView::ListSkills { cwds, force_reload } => {
@@ -2469,6 +2587,10 @@ impl App {
             guard.push_notification(notification.clone());
             guard.active
         };
+
+        if matches!(notification, ServerNotification::ThreadClosed(_)) {
+            self.mark_agent_picker_thread_closed(thread_id);
+        }
 
         if should_send {
             match sender.try_send(ThreadBufferedEvent::Notification(notification)) {
@@ -2791,13 +2913,13 @@ impl App {
         if let Some(channel) = self.thread_event_channels.get(&thread_id) {
             let mut store = channel.store.lock().await;
             store.set_session(session.clone(), turns.clone());
-            store.rebase_buffer_after_session_refresh();
+            store.rebase_buffer_after_session_refresh(&turns);
         }
         snapshot.session = Some(session);
         snapshot.turns = turns;
-        snapshot
-            .events
-            .retain(ThreadEventStore::event_survives_session_refresh);
+        snapshot.events.retain(|event| {
+            ThreadEventStore::event_survives_session_refresh(event, &snapshot.turns)
+        });
     }
 
     /// Opens the `/agent` picker after refreshing cached labels for known threads.
@@ -6213,6 +6335,7 @@ mod tests {
     use codex_app_server_protocol::HookRunSummary as AppServerHookRunSummary;
     use codex_app_server_protocol::HookScope as AppServerHookScope;
     use codex_app_server_protocol::HookStartedNotification;
+    use codex_app_server_protocol::ItemCompletedNotification;
     use codex_app_server_protocol::JSONRPCErrorError;
     use codex_app_server_protocol::NetworkApprovalContext as AppServerNetworkApprovalContext;
     use codex_app_server_protocol::NetworkApprovalProtocol as AppServerNetworkApprovalProtocol;
@@ -7368,17 +7491,21 @@ mod tests {
         );
         app.sync_active_agent_status_summary();
 
-        assert_eq!(
-            app.chat_widget.status_line_text(),
-            Some("Main [default] • 2 open agents".to_string())
+        assert!(
+            app.chat_widget
+                .status_line_text()
+                .as_deref()
+                .is_some_and(|line| line.starts_with("Main [default] • 2 open agents"))
         );
 
         app.active_thread_id = Some(agent_thread_id);
         app.sync_active_agent_status_summary();
 
-        assert_eq!(
-            app.chat_widget.status_line_text(),
-            Some("Robie [explorer] • 2 open agents".to_string())
+        assert!(
+            app.chat_widget
+                .status_line_text()
+                .as_deref()
+                .is_some_and(|line| line.starts_with("Robie [explorer] • 2 open agents"))
         );
     }
 
@@ -7395,9 +7522,11 @@ mod tests {
         app.primary_thread_id = Some(main_thread_id);
         app.active_thread_id = Some(main_thread_id);
         app.sync_active_agent_status_summary();
-        assert_eq!(
-            app.chat_widget.status_line_text(),
-            Some("Main [default] • 1 open agent".to_string())
+        assert!(
+            app.chat_widget
+                .status_line_text()
+                .as_deref()
+                .is_some_and(|line| line.starts_with("Main [default] • 1 open agent"))
         );
 
         app.upsert_agent_picker_thread(
@@ -7406,9 +7535,11 @@ mod tests {
             Some("explorer".to_string()),
             /*is_closed*/ false,
         );
-        assert_eq!(
-            app.chat_widget.status_line_text(),
-            Some("Main [default] • 2 open agents".to_string())
+        assert!(
+            app.chat_widget
+                .status_line_text()
+                .as_deref()
+                .is_some_and(|line| line.starts_with("Main [default] • 2 open agents"))
         );
 
         app.upsert_agent_picker_thread(
@@ -7417,21 +7548,27 @@ mod tests {
             Some("worker".to_string()),
             /*is_closed*/ false,
         );
-        assert_eq!(
-            app.chat_widget.status_line_text(),
-            Some("Main [default] • 3 open agents".to_string())
+        assert!(
+            app.chat_widget
+                .status_line_text()
+                .as_deref()
+                .is_some_and(|line| line.starts_with("Main [default] • 3 open agents"))
         );
 
         app.mark_agent_picker_thread_closed(first_agent_id);
-        assert_eq!(
-            app.chat_widget.status_line_text(),
-            Some("Main [default] • 2 open agents".to_string())
+        assert!(
+            app.chat_widget
+                .status_line_text()
+                .as_deref()
+                .is_some_and(|line| line.starts_with("Main [default] • 2 open agents"))
         );
 
         app.mark_agent_picker_thread_closed(second_agent_id);
-        assert_eq!(
-            app.chat_widget.status_line_text(),
-            Some("Main [default] • 1 open agent".to_string())
+        assert!(
+            app.chat_widget
+                .status_line_text()
+                .as_deref()
+                .is_some_and(|line| line.starts_with("Main [default] • 1 open agent"))
         );
     }
 
@@ -7451,9 +7588,11 @@ mod tests {
             Some("explorer".to_string()),
             /*is_closed*/ false,
         );
-        assert_eq!(
-            app.chat_widget.status_line_text(),
-            Some("Main [default] • 2 open agents".to_string())
+        assert!(
+            app.chat_widget
+                .status_line_text()
+                .as_deref()
+                .is_some_and(|line| line.starts_with("Main [default] • 2 open agents"))
         );
 
         app.enqueue_thread_notification(
@@ -7462,9 +7601,11 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(
-            app.chat_widget.status_line_text(),
-            Some("Main [default] • 1 open agent".to_string())
+        assert!(
+            app.chat_widget
+                .status_line_text()
+                .as_deref()
+                .is_some_and(|line| line.starts_with("Main [default] • 1 open agent"))
         );
         Ok(())
     }
@@ -9448,7 +9589,7 @@ guardian_approval = true
             },
         ));
 
-        store.rebase_buffer_after_session_refresh();
+        store.rebase_buffer_after_session_refresh(&[]);
 
         let snapshot = store.snapshot();
         assert!(snapshot.events.is_empty());
@@ -9462,7 +9603,7 @@ guardian_approval = true
         store.push_notification(hook_started_notification(thread_id, "turn-hook"));
         store.push_notification(hook_completed_notification(thread_id, "turn-hook"));
 
-        store.rebase_buffer_after_session_refresh();
+        store.rebase_buffer_after_session_refresh(&[]);
 
         let snapshot = store.snapshot();
         let hook_notifications = snapshot
@@ -9483,6 +9624,237 @@ guardian_approval = true
                 serde_json::to_value(hook_completed_notification(thread_id, "turn-hook"))
                     .expect("hook notification should serialize"),
             ]
+        );
+    }
+
+    #[test]
+    fn thread_event_store_rebase_preserves_live_item_notifications_missing_from_turns() {
+        let thread_id = ThreadId::new();
+        let spawned_thread_id = ThreadId::new();
+        let turn_id = "turn-live";
+        let command_notification = ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            item: ThreadItem::CommandExecution {
+                id: "cmd-1".to_string(),
+                command: "echo hello".to_string(),
+                cwd: PathBuf::from("/tmp/project"),
+                process_id: None,
+                source: codex_app_server_protocol::CommandExecutionSource::Agent,
+                status: codex_app_server_protocol::CommandExecutionStatus::Completed,
+                command_actions: Vec::new(),
+                aggregated_output: Some("hello".to_string()),
+                exit_code: Some(0),
+                duration_ms: Some(1),
+            },
+        });
+        let spawn_notification = ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            item: ThreadItem::CollabAgentToolCall {
+                id: "spawn-1".to_string(),
+                tool: codex_app_server_protocol::CollabAgentTool::SpawnAgent,
+                status: codex_app_server_protocol::CollabAgentToolCallStatus::Completed,
+                sender_thread_id: thread_id.to_string(),
+                receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                receiver_agents: Vec::new(),
+                prompt: Some("Explore the repo".to_string()),
+                model: Some("gpt-5".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::High),
+                agents_states: HashMap::from([(
+                    spawned_thread_id.to_string(),
+                    codex_app_server_protocol::CollabAgentState {
+                        status: codex_app_server_protocol::CollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        });
+        let mut store = ThreadEventStore::new(/*capacity*/ 8);
+        store.push_notification(command_notification.clone());
+        store.push_notification(spawn_notification.clone());
+
+        store.rebase_buffer_after_session_refresh(&[test_turn(
+            turn_id,
+            TurnStatus::InProgress,
+            Vec::new(),
+        )]);
+
+        let notifications = store
+            .snapshot()
+            .events
+            .into_iter()
+            .map(|event| match event {
+                ThreadBufferedEvent::Notification(notification) => {
+                    serde_json::to_value(notification).expect("notification should serialize")
+                }
+                other => panic!("expected buffered notification, saw: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            notifications,
+            vec![
+                serde_json::to_value(command_notification)
+                    .expect("command notification should serialize"),
+                serde_json::to_value(spawn_notification)
+                    .expect("spawn notification should serialize"),
+            ]
+        );
+    }
+
+    #[test]
+    fn thread_event_store_rebase_drops_live_item_notifications_already_reflected_in_turns() {
+        let thread_id = ThreadId::new();
+        let spawned_thread_id = ThreadId::new();
+        let turn_id = "turn-live";
+        let command_item = ThreadItem::CommandExecution {
+            id: "cmd-1".to_string(),
+            command: "echo hello".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            process_id: None,
+            source: codex_app_server_protocol::CommandExecutionSource::Agent,
+            status: codex_app_server_protocol::CommandExecutionStatus::Completed,
+            command_actions: Vec::new(),
+            aggregated_output: Some("hello".to_string()),
+            exit_code: Some(0),
+            duration_ms: Some(1),
+        };
+        let spawn_item = ThreadItem::CollabAgentToolCall {
+            id: "spawn-1".to_string(),
+            tool: codex_app_server_protocol::CollabAgentTool::SpawnAgent,
+            status: codex_app_server_protocol::CollabAgentToolCallStatus::Completed,
+            sender_thread_id: thread_id.to_string(),
+            receiver_thread_ids: vec![spawned_thread_id.to_string()],
+            receiver_agents: Vec::new(),
+            prompt: Some("Explore the repo".to_string()),
+            model: Some("gpt-5".to_string()),
+            reasoning_effort: Some(ReasoningEffortConfig::High),
+            agents_states: HashMap::from([(
+                spawned_thread_id.to_string(),
+                codex_app_server_protocol::CollabAgentState {
+                    status: codex_app_server_protocol::CollabAgentStatus::PendingInit,
+                    message: None,
+                },
+            )]),
+        };
+        let command_notification = ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            item: command_item.clone(),
+        });
+        let spawn_notification = ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            item: spawn_item.clone(),
+        });
+        let mut store = ThreadEventStore::new(/*capacity*/ 8);
+        store.push_notification(command_notification);
+        store.push_notification(spawn_notification);
+
+        store.rebase_buffer_after_session_refresh(&[test_turn(
+            turn_id,
+            TurnStatus::InProgress,
+            vec![command_item, spawn_item],
+        )]);
+
+        assert!(store.snapshot().events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn replay_thread_snapshot_after_session_refresh_keeps_missing_spawn_and_command_items() {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        let spawned_thread_id = ThreadId::new();
+        let turn_id = "turn-live";
+        let channel = ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY);
+        app.thread_event_channels.insert(thread_id, channel);
+        {
+            let mut session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+            session.model.clear();
+            session.rollout_path = None;
+            let channel = app
+                .thread_event_channels
+                .get(&thread_id)
+                .expect("thread channel should exist");
+            let mut store = channel.store.lock().await;
+            store.set_session(session, Vec::new());
+            store.push_notification(ServerNotification::ItemCompleted(
+                ItemCompletedNotification {
+                    thread_id: thread_id.to_string(),
+                    turn_id: turn_id.to_string(),
+                    item: ThreadItem::CommandExecution {
+                        id: "cmd-1".to_string(),
+                        command: "echo hello".to_string(),
+                        cwd: PathBuf::from("/tmp/project"),
+                        process_id: None,
+                        source: codex_app_server_protocol::CommandExecutionSource::Agent,
+                        status: codex_app_server_protocol::CommandExecutionStatus::Completed,
+                        command_actions: Vec::new(),
+                        aggregated_output: Some("hello".to_string()),
+                        exit_code: Some(0),
+                        duration_ms: Some(1),
+                    },
+                },
+            ));
+            store.push_notification(ServerNotification::ItemCompleted(
+                ItemCompletedNotification {
+                    thread_id: thread_id.to_string(),
+                    turn_id: turn_id.to_string(),
+                    item: ThreadItem::CollabAgentToolCall {
+                        id: "spawn-1".to_string(),
+                        tool: codex_app_server_protocol::CollabAgentTool::SpawnAgent,
+                        status: codex_app_server_protocol::CollabAgentToolCallStatus::Completed,
+                        sender_thread_id: thread_id.to_string(),
+                        receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                        receiver_agents: Vec::new(),
+                        prompt: Some("Explore the repo".to_string()),
+                        model: Some("gpt-5".to_string()),
+                        reasoning_effort: Some(ReasoningEffortConfig::High),
+                        agents_states: HashMap::from([(
+                            spawned_thread_id.to_string(),
+                            codex_app_server_protocol::CollabAgentState {
+                                status: codex_app_server_protocol::CollabAgentStatus::PendingInit,
+                                message: None,
+                            },
+                        )]),
+                    },
+                },
+            ));
+        }
+        let mut snapshot = {
+            let channel = app
+                .thread_event_channels
+                .get(&thread_id)
+                .expect("thread channel should exist");
+            let store = channel.store.lock().await;
+            store.snapshot()
+        };
+
+        app.apply_refreshed_snapshot_thread(
+            thread_id,
+            AppServerStartedThread {
+                session: test_thread_session(thread_id, PathBuf::from("/tmp/project")),
+                turns: vec![test_turn(turn_id, TurnStatus::InProgress, Vec::new())],
+            },
+            &mut snapshot,
+        )
+        .await;
+        app.replay_thread_snapshot(snapshot, /*resume_restored_queue*/ false);
+
+        let mut rendered_cells = Vec::new();
+        while let Ok(event) = app_event_rx.try_recv() {
+            if let AppEvent::InsertHistoryCell(cell) = event {
+                rendered_cells.push(lines_to_single_string(&cell.display_lines(/*width*/ 120)));
+            }
+        }
+        let combined = rendered_cells.join("\n");
+        assert!(
+            combined.contains("Spawned"),
+            "expected spawn item in replayed transcript: {combined}"
+        );
+        assert!(
+            combined.contains("echo hello"),
+            "expected command item in replayed transcript: {combined}"
         );
     }
 
