@@ -952,6 +952,7 @@ pub(crate) struct ChatWidget {
     external_editor_state: ExternalEditorState,
     realtime_conversation: RealtimeConversationUiState,
     last_rendered_user_message_event: Option<RenderedUserMessageEvent>,
+    suppress_next_matching_live_user_message_event: bool,
     last_non_retry_error: Option<(String, String)>,
 }
 
@@ -4808,6 +4809,7 @@ impl ChatWidget {
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
             last_rendered_user_message_event: None,
+            suppress_next_matching_live_user_message_event: false,
             last_non_retry_error: None,
         };
 
@@ -6065,16 +6067,23 @@ impl ChatWidget {
                                     .collect(),
                                 text_elements: pending.user_message.text_elements,
                             };
-                            self.on_user_message_event(pending_event);
+                            self.render_user_message_event(
+                                pending_event,
+                                /*suppress_next_matching_live_event*/ true,
+                            );
                         } else if self.last_rendered_user_message_event.as_ref() != Some(&rendered)
                         {
                             tracing::warn!(
                                 "pending steer matched compare key but queue was empty when rendering committed user message"
                             );
-                            self.on_user_message_event(event);
+                            self.render_user_message_event(
+                                event, /*suppress_next_matching_live_event*/ true,
+                            );
                         }
                     } else if self.last_rendered_user_message_event.as_ref() != Some(&rendered) {
-                        self.on_user_message_event(event);
+                        self.render_user_message_event(
+                            event, /*suppress_next_matching_live_event*/ true,
+                        );
                     }
                 }
             }
@@ -6957,6 +6966,7 @@ impl ChatWidget {
             }
             EventMsg::AgentReasoningSectionBreak(_) => self.on_reasoning_section_break(),
             EventMsg::TurnStarted(event) => {
+                self.suppress_next_matching_live_user_message_event = false;
                 if !is_resume_initial_replay {
                     self.apply_turn_started_context_window(event.model_context_window);
                     self.on_task_started();
@@ -7072,7 +7082,16 @@ impl ChatWidget {
             }
             EventMsg::UserMessage(ev) => {
                 if from_replay || self.should_render_realtime_user_message_event(&ev) {
-                    self.on_user_message_event(ev);
+                    let rendered = Self::rendered_user_message_event_from_event(&ev);
+                    if !from_replay
+                        && self.suppress_next_matching_live_user_message_event
+                        && self.last_rendered_user_message_event.as_ref() == Some(&rendered)
+                    {
+                        self.suppress_next_matching_live_user_message_event = false;
+                    } else {
+                        self.suppress_next_matching_live_user_message_event = false;
+                        self.on_user_message_event(ev);
+                    }
                 }
             }
             EventMsg::EnteredReviewMode(review_request) => {
@@ -7172,16 +7191,23 @@ impl ChatWidget {
                                     .collect(),
                                 text_elements: pending.user_message.text_elements,
                             };
-                            self.on_user_message_event(pending_event);
+                            self.render_user_message_event(
+                                pending_event,
+                                /*suppress_next_matching_live_event*/ true,
+                            );
                         } else if self.last_rendered_user_message_event.as_ref() != Some(&rendered)
                         {
                             tracing::warn!(
                                 "pending steer matched compare key but queue was empty when rendering committed user message"
                             );
-                            self.on_user_message_event(event);
+                            self.render_user_message_event(
+                                event, /*suppress_next_matching_live_event*/ true,
+                            );
                         }
                     } else if self.last_rendered_user_message_event.as_ref() != Some(&rendered) {
-                        self.on_user_message_event(event);
+                        self.render_user_message_event(
+                            event, /*suppress_next_matching_live_event*/ true,
+                        );
                     }
                 }
                 if let codex_protocol::items::TurnItem::Plan(plan_item) = &item {
@@ -7265,8 +7291,17 @@ impl ChatWidget {
     }
 
     fn on_user_message_event(&mut self, event: UserMessageEvent) {
+        self.render_user_message_event(event, /*suppress_next_matching_live_event*/ false);
+    }
+
+    fn render_user_message_event(
+        &mut self,
+        event: UserMessageEvent,
+        suppress_next_matching_live_event: bool,
+    ) {
         self.last_rendered_user_message_event =
             Some(Self::rendered_user_message_event_from_event(&event));
+        self.suppress_next_matching_live_user_message_event = suppress_next_matching_live_event;
         let remote_image_urls = event.images.unwrap_or_default();
         if let Some(message) =
             history_cell::format_subagent_notification_for_display(&event.message)

@@ -286,6 +286,7 @@ pub(super) async fn make_chatwidget_manual(
         external_editor_state: ExternalEditorState::Closed,
         realtime_conversation: RealtimeConversationUiState::default(),
         last_rendered_user_message_event: None,
+        suppress_next_matching_live_user_message_event: false,
         last_non_retry_error: None,
     };
     widget.set_model(&resolved_model);

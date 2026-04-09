@@ -107,6 +107,34 @@ async fn thread_snapshot_replay_does_not_duplicate_agent_message_history() {
 }
 
 #[tokio::test]
+async fn live_user_message_event_does_not_duplicate_completed_user_message_history() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    complete_user_message(&mut chat, "user-1", "dispatcher handoff");
+    chat.handle_codex_event(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::UserMessage(UserMessageEvent {
+            message: "dispatcher handoff".to_string(),
+            images: None,
+            text_elements: Vec::new(),
+            local_images: Vec::new(),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected mirrored live user message event to render once"
+    );
+    let rendered = lines_to_single_string(&cells[0]);
+    assert!(
+        rendered.contains("dispatcher handoff"),
+        "expected rendered user message, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
 async fn replayed_user_message_preserves_text_elements_and_local_images() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
 
