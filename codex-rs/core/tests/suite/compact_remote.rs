@@ -4,8 +4,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use codex_core::CodexAuth;
 use codex_core::compact::SUMMARY_PREFIX;
+use codex_login::CodexAuth;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -116,8 +116,10 @@ async fn start_remote_realtime_server() -> responses::WebSocketTestServer {
 async fn start_realtime_conversation(codex: &codex_core::CodexThread) -> Result<()> {
     codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
-            prompt: "backend prompt".to_string(),
+            prompt: Some(Some("backend prompt".to_string())),
             session_id: None,
+            transport: None,
+            voice: None,
         }))
         .await?;
 

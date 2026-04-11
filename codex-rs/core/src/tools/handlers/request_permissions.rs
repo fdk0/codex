@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use codex_protocol::request_permissions::RequestPermissionsArgs;
 use codex_sandboxing::policy_transforms::normalize_additional_permissions;
 
@@ -12,7 +11,6 @@ use crate::tools::registry::ToolKind;
 
 pub struct RequestPermissionsHandler;
 
-#[async_trait]
 impl ToolHandler for RequestPermissionsHandler {
     type Output = FunctionToolOutput;
 
@@ -39,7 +37,7 @@ impl ToolHandler for RequestPermissionsHandler {
         };
 
         let mut args: RequestPermissionsArgs =
-            parse_arguments_with_base_path(&arguments, turn.cwd.as_path())?;
+            parse_arguments_with_base_path(&arguments, &turn.cwd)?;
         args.permissions = normalize_additional_permissions(args.permissions.into())
             .map(codex_protocol::request_permissions::RequestPermissionProfile::from)
             .map_err(FunctionCallError::RespondToModel)?;

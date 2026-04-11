@@ -93,6 +93,9 @@ async fn live_app_server_turn_completed_clears_working_status_after_answer_item(
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,
                 error: None,
+                started_at: Some(0),
+                completed_at: None,
+                duration_ms: None,
             },
         }),
         /*replay_kind*/ None,
@@ -132,6 +135,9 @@ async fn live_app_server_turn_completed_clears_working_status_after_answer_item(
                 items: Vec::new(),
                 status: AppServerTurnStatus::Completed,
                 error: None,
+                started_at: None,
+                completed_at: Some(0),
+                duration_ms: None,
             },
         }),
         /*replay_kind*/ None,
@@ -419,6 +425,9 @@ async fn live_app_server_failed_turn_does_not_duplicate_error_history() {
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,
                 error: None,
+                started_at: Some(0),
+                completed_at: None,
+                duration_ms: None,
             },
         }),
         /*replay_kind*/ None,
@@ -454,6 +463,9 @@ async fn live_app_server_failed_turn_does_not_duplicate_error_history() {
                     codex_error_info: None,
                     additional_details: None,
                 }),
+                started_at: None,
+                completed_at: Some(0),
+                duration_ms: None,
             },
         }),
         /*replay_kind*/ None,
@@ -475,6 +487,9 @@ async fn live_app_server_stream_recovery_restores_previous_status_header() {
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,
                 error: None,
+                started_at: Some(0),
+                completed_at: None,
+                duration_ms: None,
             },
         }),
         /*replay_kind*/ None,
@@ -529,6 +544,9 @@ async fn live_app_server_server_overloaded_error_renders_warning() {
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,
                 error: None,
+                started_at: Some(0),
+                completed_at: None,
+                duration_ms: None,
             },
         }),
         /*replay_kind*/ None,
@@ -574,6 +592,30 @@ async fn live_app_server_invalid_thread_name_update_is_ignored() {
 
     assert_eq!(chat.thread_id, Some(thread_id));
     assert_eq!(chat.thread_name, Some("original name".to_string()));
+}
+
+#[tokio::test]
+async fn live_app_server_thread_name_update_shows_resume_hint() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    chat.handle_server_notification(
+        ServerNotification::ThreadNameUpdated(
+            codex_app_server_protocol::ThreadNameUpdatedNotification {
+                thread_id: thread_id.to_string(),
+                thread_name: Some("review-fix".to_string()),
+            },
+        ),
+        /*replay_kind*/ None,
+    );
+
+    assert_eq!(chat.thread_name, Some("review-fix".to_string()));
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1);
+    let rendered = lines_to_single_string(&cells[0]);
+    assert!(rendered.contains("Thread renamed to review-fix"));
+    assert!(rendered.contains("codex resume review-fix"));
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
 use super::*;
 use crate::agent::status::is_final;
 use crate::config::types::AgentWaitOnWakeEnabledBehavior;
-use crate::error::CodexErr;
+use codex_protocol::error::CodexErr;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -15,7 +15,6 @@ use tokio::time::timeout_at;
 
 pub(crate) struct Handler;
 
-#[async_trait]
 impl ToolHandler for Handler {
     type Output = WaitAgentResult;
 

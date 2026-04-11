@@ -1,19 +1,19 @@
 use super::*;
 use crate::config::CONFIG_TOML_FILE;
 use crate::config::ConfigBuilder;
-use crate::config::types::AppConfig;
-use crate::config::types::AppToolConfig;
-use crate::config::types::AppToolsConfig;
-use crate::config::types::AppsDefaultConfig;
 use crate::config_loader::AppRequirementToml;
 use crate::config_loader::AppsRequirementsToml;
 use crate::config_loader::CloudRequirementsLoader;
 use crate::config_loader::ConfigLayerStack;
 use crate::config_loader::ConfigRequirements;
 use crate::config_loader::ConfigRequirementsToml;
-use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
-use crate::mcp_connection_manager::ToolInfo;
+use codex_config::types::AppConfig;
+use codex_config::types::AppToolConfig;
+use codex_config::types::AppToolsConfig;
+use codex_config::types::AppsDefaultConfig;
 use codex_features::Feature;
+use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
+use codex_mcp::ToolInfo;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use rmcp::model::JsonObject;
@@ -112,6 +112,7 @@ fn codex_app_tool(
         server_name: CODEX_APPS_MCP_SERVER_NAME.to_string(),
         tool_name: tool_name.to_string(),
         tool_namespace,
+        server_instructions: None,
         tool: test_tool_definition(tool_name),
         connector_id: Some(connector_id.to_string()),
         connector_name: connector_name.map(ToOwned::to_owned),
@@ -190,6 +191,7 @@ fn accessible_connectors_from_mcp_tools_carries_plugin_display_names() {
                 server_name: "sample".to_string(),
                 tool_name: "echo".to_string(),
                 tool_namespace: "sample".to_string(),
+                server_instructions: None,
                 tool: test_tool_definition("echo"),
                 connector_id: None,
                 connector_name: None,
@@ -314,6 +316,7 @@ fn accessible_connectors_from_mcp_tools_preserves_description() {
             server_name: CODEX_APPS_MCP_SERVER_NAME.to_string(),
             tool_name: "calendar_create_event".to_string(),
             tool_namespace: "mcp__codex_apps__calendar".to_string(),
+            server_instructions: None,
             tool: Tool {
                 name: "calendar_create_event".to_string().into(),
                 title: None,

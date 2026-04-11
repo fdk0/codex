@@ -19,31 +19,30 @@ use crate::config::Config;
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
 use crate::config::load_global_mcp_servers;
-use crate::config::types::AppToolApproval;
 use crate::connectors;
 use crate::guardian::GuardianApprovalRequest;
 use crate::guardian::GuardianMcpAnnotations;
 use crate::guardian::guardian_approval_request_to_json;
+use crate::guardian::guardian_rejection_message;
 use crate::guardian::review_approval_request;
 use crate::guardian::routes_approval_to_guardian;
-use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::mcp_tool_approval_templates::RenderedMcpToolApprovalParam;
 use crate::mcp_tool_approval_templates::render_mcp_tool_approval_template;
-use crate::protocol::EventMsg;
-use crate::protocol::McpInvocation;
-use crate::protocol::McpToolCallBeginEvent;
-use crate::protocol::McpToolCallEndEvent;
-use crate::state_db;
 use codex_analytics::AppInvocation;
 use codex_analytics::InvocationType;
 use codex_analytics::build_track_events_context;
+use codex_config::types::AppToolApproval;
 use codex_features::Feature;
+use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
+use codex_mcp::mcp_permission_prompt_is_auto_approved;
 use codex_otel::sanitize_metric_tag_value;
 use codex_protocol::mcp::CallToolResult;
 use codex_protocol::openai_models::InputModality;
-use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::McpInvocation;
+use codex_protocol::protocol::McpToolCallBeginEvent;
+use codex_protocol::protocol::McpToolCallEndEvent;
 use codex_protocol::protocol::ReviewDecision;
-use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputQuestion;
@@ -51,6 +50,7 @@ use codex_protocol::request_user_input::RequestUserInputQuestionOption;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationAction;
 use codex_rmcp_client::ElicitationResponse;
+use codex_rollout::state_db;
 use rmcp::model::ToolAnnotations;
 use serde::Deserialize;
 use serde::Serialize;
@@ -232,8 +232,8 @@ pub(crate) async fn handle_mcp_tool_call(
                 .await;
                 (result, Some(duration))
             }
-            McpToolApprovalDecision::Decline => {
-                let message = "user rejected MCP tool call".to_string();
+            McpToolApprovalDecision::Decline { message } => {
+                let message = message.unwrap_or_else(|| "user rejected MCP tool call".to_string());
                 (
                     notify_mcp_tool_call_skip(
                         sess.as_ref(),
@@ -553,7 +553,7 @@ enum McpToolApprovalDecision {
     Accept,
     AcceptForSession,
     AcceptAndRemember,
-    Decline,
+    Decline { message: Option<String> },
     Cancel,
     BlockedBySafetyMonitor(String),
 }
@@ -583,7 +583,7 @@ fn custom_mcp_tool_approval_mode(
         .and_then(|table| table.get("mcp_servers"))
         .cloned()
         .and_then(|value| {
-            HashMap::<String, crate::config::types::McpServerConfig>::deserialize(value).ok()
+            HashMap::<String, codex_config::types::McpServerConfig>::deserialize(value).ok()
         })
         .and_then(|servers| servers.get(server).cloned())
         .and_then(|server| server.tools.get(tool_name).cloned())
@@ -694,7 +694,10 @@ async fn maybe_request_mcp_tool_approval(
     metadata: Option<&McpToolApprovalMetadata>,
     approval_mode: AppToolApproval,
 ) -> Option<McpToolApprovalDecision> {
-    if is_full_access_mode(turn_context) {
+    if mcp_permission_prompt_is_auto_approved(
+        turn_context.approval_policy.value(),
+        turn_context.sandbox_policy.get(),
+    ) {
         return None;
     }
 
@@ -750,7 +753,7 @@ async fn maybe_request_mcp_tool_approval(
             monitor_reason.clone(),
         )
         .await;
-        let decision = mcp_tool_approval_decision_from_guardian(decision);
+        let decision = mcp_tool_approval_decision_from_guardian(sess, call_id, decision).await;
         apply_mcp_tool_approval_decision(
             sess,
             turn_context,
@@ -938,22 +941,21 @@ pub(crate) fn build_guardian_mcp_tool_review_request(
     }
 }
 
-fn mcp_tool_approval_decision_from_guardian(decision: ReviewDecision) -> McpToolApprovalDecision {
+async fn mcp_tool_approval_decision_from_guardian(
+    sess: &Session,
+    call_id: &str,
+    decision: ReviewDecision,
+) -> McpToolApprovalDecision {
     match decision {
         ReviewDecision::Approved
         | ReviewDecision::ApprovedExecpolicyAmendment { .. }
         | ReviewDecision::NetworkPolicyAmendment { .. } => McpToolApprovalDecision::Accept,
         ReviewDecision::ApprovedForSession => McpToolApprovalDecision::AcceptForSession,
-        ReviewDecision::Denied | ReviewDecision::Abort => McpToolApprovalDecision::Decline,
+        ReviewDecision::Denied => McpToolApprovalDecision::Decline {
+            message: Some(guardian_rejection_message(sess, call_id).await),
+        },
+        ReviewDecision::Abort => McpToolApprovalDecision::Decline { message: None },
     }
-}
-
-fn is_full_access_mode(turn_context: &TurnContext) -> bool {
-    matches!(turn_context.approval_policy.value(), AskForApproval::Never)
-        && matches!(
-            turn_context.sandbox_policy.get(),
-            SandboxPolicy::DangerFullAccess | SandboxPolicy::ExternalSandbox { .. }
-        )
 }
 
 fn mcp_tool_approval_callsite_mode(
@@ -1316,7 +1318,7 @@ fn parse_mcp_tool_approval_elicitation_response(
                 decision => decision,
             }
         }
-        ElicitationAction::Decline => McpToolApprovalDecision::Decline,
+        ElicitationAction::Decline => McpToolApprovalDecision::Decline { message: None },
         ElicitationAction::Cancel => McpToolApprovalDecision::Cancel,
     }
 }
@@ -1366,7 +1368,7 @@ fn parse_mcp_tool_approval_response(
         .iter()
         .any(|answer| answer == MCP_TOOL_APPROVAL_DECLINE_SYNTHETIC)
     {
-        McpToolApprovalDecision::Decline
+        McpToolApprovalDecision::Decline { message: None }
     } else if answers
         .iter()
         .any(|answer| answer == MCP_TOOL_APPROVAL_ACCEPT_FOR_SESSION)
@@ -1434,7 +1436,7 @@ async fn apply_mcp_tool_approval_decision(
             }
         }
         McpToolApprovalDecision::Accept
-        | McpToolApprovalDecision::Decline
+        | McpToolApprovalDecision::Decline { .. }
         | McpToolApprovalDecision::Cancel
         | McpToolApprovalDecision::BlockedBySafetyMonitor(_) => {}
     }
@@ -1541,8 +1543,7 @@ fn project_mcp_tool_approval_config_folder(config: &Config, server: &str) -> Opt
                 .and_then(|table| table.get("mcp_servers"))
                 .cloned()
                 .and_then(|value| {
-                    HashMap::<String, crate::config::types::McpServerConfig>::deserialize(value)
-                        .ok()
+                    HashMap::<String, codex_config::types::McpServerConfig>::deserialize(value).ok()
                 })?;
             if servers.contains_key(server) {
                 layer
