@@ -4,6 +4,7 @@ use crate::agent::status::is_final;
 use crate::codex::Session;
 use crate::config::types::AgentWaitOnWakeEnabledBehavior;
 use codex_protocol::ThreadId;
+use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::CollabAgentRef;
 use futures::FutureExt;
 use futures::StreamExt;
@@ -118,7 +119,7 @@ impl ToolHandler for Handler {
                     }
                     status_rxs.push((*id, rx));
                 }
-                Err(crate::error::CodexErr::ThreadNotFound(_)) => {
+                Err(CodexErr::ThreadNotFound(_)) => {
                     initial_final_statuses.push((*id, AgentStatus::NotFound));
                 }
                 Err(err) => {

@@ -141,7 +141,7 @@ async fn wait_for_turn_aborted(
     .expect("expected child turn to be interrupted");
 }
 
-async fn wait_for_redirected_envelope_in_history(
+async fn wait_for_redirected_followup_message_in_history(
     thread: &Arc<CodexThread>,
     expected: &InterAgentCommunication,
 ) {
@@ -168,10 +168,10 @@ async fn wait_for_redirected_envelope_in_history(
                             ))
                 )
             });
-            if saw_envelope {
+            if saw_user_message {
                 assert!(
-                    !saw_user_message,
-                    "redirected followup should be stored as an assistant envelope, not a plain user message"
+                    !saw_envelope,
+                    "redirected followup should be stored as a plain user message, not an assistant envelope"
                 );
                 break;
             }
@@ -179,7 +179,7 @@ async fn wait_for_redirected_envelope_in_history(
         }
     })
     .await
-    .expect("redirected followup envelope should appear in history");
+    .expect("redirected followup message should appear in history");
 }
 
 #[derive(Clone, Copy)]
@@ -1389,7 +1389,7 @@ async fn multi_agent_v2_followup_task_interrupts_busy_child_without_losing_messa
             "followup_task",
             function_payload(json!({
                 "target": agent_id.to_string(),
-                "items": [{"type": "text", "text": "continue"}],
+                "message": "continue",
                 "interrupt": true
             })),
         ))
@@ -1414,7 +1414,7 @@ async fn multi_agent_v2_followup_task_interrupts_busy_child_without_losing_messa
     }));
 
     wait_for_turn_aborted(&thread, &interrupted_turn_id, TurnAbortReason::Interrupted).await;
-    wait_for_redirected_envelope_in_history(
+    wait_for_redirected_followup_message_in_history(
         &thread,
         &InterAgentCommunication::new(
             AgentPath::root(),
@@ -2766,6 +2766,8 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: child_turn.sub_id.clone(),
                 last_agent_message: Some("sensitive child output".to_string()),
+                completed_at: None,
+                duration_ms: None,
             }),
         )
         .await;

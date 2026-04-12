@@ -1,6 +1,7 @@
 use super::message_tool::MessageDeliveryMode;
 use super::message_tool::SendMessageArgs;
 use super::message_tool::handle_message_string_tool;
+use super::message_tool::send_message_content;
 use super::*;
 use crate::tools::context::FunctionToolOutput;
 
@@ -24,8 +25,8 @@ impl ToolHandler for Handler {
             invocation,
             MessageDeliveryMode::QueueOnly,
             args.target,
-            args.message,
-            /*interrupt*/ false,
+            send_message_content(args.message, args.items)?,
+            args.interrupt,
         )
         .await
     }

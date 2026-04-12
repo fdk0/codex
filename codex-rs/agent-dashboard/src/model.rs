@@ -140,6 +140,7 @@ mod tests {
     fn thread_label_uses_cwd_basename_when_name_is_missing() {
         let thread = Thread {
             id: "thread-id".to_string(),
+            forked_from_id: None,
             preview: "preview text".to_string(),
             ephemeral: false,
             model_provider: "mock".to_string(),

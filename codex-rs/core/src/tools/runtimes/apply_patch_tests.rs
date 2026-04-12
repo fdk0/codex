@@ -143,12 +143,12 @@ fn build_sandbox_command_falls_back_to_current_exe_for_apply_patch() {
 #[test]
 fn build_sandbox_command_falls_back_when_configured_codex_self_exe_is_missing() {
     let path = std::env::temp_dir().join("apply-patch-current-exe-test.txt");
-    let action = ApplyPatchAction::new_add_for_test(&path, "hello".to_string());
+    let absolute_path =
+        AbsolutePathBuf::from_absolute_path(&path).expect("temp path should be absolute");
+    let action = ApplyPatchAction::new_add_for_test(&absolute_path, "hello".to_string());
     let request = ApplyPatchRequest {
         action,
-        file_paths: vec![
-            AbsolutePathBuf::from_absolute_path(&path).expect("temp path should be absolute"),
-        ],
+        file_paths: vec![absolute_path],
         changes: HashMap::from([(
             path,
             FileChange::Add {

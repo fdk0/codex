@@ -7,7 +7,6 @@ use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::ConfigBuilder;
 use crate::config::types::AgentWakeDescendantPolicy;
-use crate::config_loader::LoaderOverrides;
 use crate::contextual_user_message::SUBAGENT_NOTIFICATION_OPEN_TAG;
 use assert_matches::assert_matches;
 use chrono::Utc;
@@ -16,6 +15,7 @@ use codex_login::CodexAuth;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ErrorEvent;
@@ -662,11 +662,18 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
             phase: None,
         },
         assistant_message("parent final answer", Some(MessagePhase::FinalAnswer)),
+        ResponseItem::FunctionCallOutput {
+            call_id: parent_spawn_call_id.clone(),
+            output: FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::Text(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string()),
+                success: Some(true),
+            },
+        },
     ];
     assert_eq!(
         history.raw_items(),
         &expected_history,
-        "forked child history should keep only parent user messages and assistant final answers"
+        "forked child history should keep sanitized parent context plus the synthetic fork notice"
     );
 
     let expected = (
@@ -736,8 +743,8 @@ async fn spawn_agent_fork_injects_output_for_parent_spawn_call() {
             })),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
                 wake_parent_on_completion: None,
-                ..Default::default()
             },
         )
         .await
@@ -809,8 +816,8 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
             })),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
                 wake_parent_on_completion: None,
-                ..Default::default()
             },
         )
         .await
@@ -1246,6 +1253,8 @@ async fn completion_watcher_wakes_root_parent_for_legacy_child() {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: child_turn.sub_id.clone(),
                 last_agent_message: Some("done".to_string()),
+                completed_at: None,
+                duration_ms: None,
             }),
         )
         .await;
@@ -1303,6 +1312,8 @@ async fn completion_watcher_rearm_for_legacy_child_marks_current_status_seen() {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: first_turn.sub_id.clone(),
                 last_agent_message: Some("done-1".to_string()),
+                completed_at: None,
+                duration_ms: None,
             }),
         )
         .await;
@@ -1589,6 +1600,8 @@ async fn multi_agent_v2_completion_triggers_turn_when_child_is_wake_enabled() {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: tester_turn.sub_id.clone(),
                 last_agent_message: Some("done".to_string()),
+                completed_at: None,
+                duration_ms: None,
             }),
         )
         .await;
@@ -1700,6 +1713,8 @@ async fn trigger_turn_inter_agent_message_rearms_completion_watcher_for_reused_c
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: first_turn.sub_id.clone(),
                 last_agent_message: Some("done-1".to_string()),
+                completed_at: None,
+                duration_ms: None,
             }),
         )
         .await;
@@ -1758,6 +1773,8 @@ async fn trigger_turn_inter_agent_message_rearms_completion_watcher_for_reused_c
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: second_turn.sub_id.clone(),
                 last_agent_message: Some("done-2".to_string()),
+                completed_at: None,
+                duration_ms: None,
             }),
         )
         .await;
@@ -1873,6 +1890,8 @@ async fn leaf_only_completion_suppresses_parent_wake_while_descendant_is_active(
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: tester_turn.sub_id.clone(),
                 last_agent_message: Some("done".to_string()),
+                completed_at: None,
+                duration_ms: None,
             }),
         )
         .await;
@@ -1964,6 +1983,7 @@ async fn leaf_only_completion_wakes_parent_after_descendants_finish() {
             first_turn.as_ref(),
             EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: first_turn.sub_id.clone(),
+                started_at: None,
                 model_context_window: None,
                 collaboration_mode_kind: ModeKind::Default,
             }),
@@ -1977,6 +1997,8 @@ async fn leaf_only_completion_wakes_parent_after_descendants_finish() {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: first_turn.sub_id.clone(),
                 last_agent_message: Some("delegated".to_string()),
+                completed_at: None,
+                duration_ms: None,
             }),
         )
         .await;
@@ -2014,6 +2036,7 @@ async fn leaf_only_completion_wakes_parent_after_descendants_finish() {
             second_turn.as_ref(),
             EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: second_turn.sub_id.clone(),
+                started_at: None,
                 model_context_window: None,
                 collaboration_mode_kind: ModeKind::Default,
             }),
@@ -2027,6 +2050,8 @@ async fn leaf_only_completion_wakes_parent_after_descendants_finish() {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: second_turn.sub_id.clone(),
                 last_agent_message: Some("reconciled".to_string()),
+                completed_at: None,
+                duration_ms: None,
             }),
         )
         .await;
@@ -2110,6 +2135,7 @@ async fn leaf_only_reused_child_wakes_parent_only_once_after_descendants_finish(
             first_turn.as_ref(),
             EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: first_turn.sub_id.clone(),
+                started_at: None,
                 model_context_window: None,
                 collaboration_mode_kind: ModeKind::Default,
             }),
@@ -2123,6 +2149,8 @@ async fn leaf_only_reused_child_wakes_parent_only_once_after_descendants_finish(
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: first_turn.sub_id.clone(),
                 last_agent_message: Some("delegated".to_string()),
+                completed_at: None,
+                duration_ms: None,
             }),
         )
         .await;
@@ -2165,6 +2193,8 @@ async fn leaf_only_reused_child_wakes_parent_only_once_after_descendants_finish(
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: second_turn.sub_id.clone(),
                 last_agent_message: Some("reconciled".to_string()),
+                completed_at: None,
+                duration_ms: None,
             }),
         )
         .await;

@@ -537,6 +537,14 @@ pub struct AgentsToml {
     /// Default maximum runtime in seconds for agent job workers.
     #[schemars(range(min = 1))]
     pub job_max_runtime_seconds: Option<u64>,
+    /// Default value used when `spawn_agent` omits `wake_parent_on_completion`.
+    pub wake_parent_on_completion_default: Option<bool>,
+    /// Whether `wait_agent(...)` is allowed for child agents that already wake their parent.
+    #[serde(default)]
+    pub wait_on_wake_enabled: crate::types::AgentWaitOnWakeEnabledBehavior,
+    /// Whether a child may wake its parent before all descendants finish.
+    #[serde(default)]
+    pub wake_descendant_policy: crate::types::AgentWakeDescendantPolicy,
 
     /// User-defined role declarations keyed by role name.
     ///

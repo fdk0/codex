@@ -82,6 +82,7 @@ mod tests {
     fn thread_with_items(items: Vec<ThreadItem>) -> Thread {
         Thread {
             id: "child".to_string(),
+            forked_from_id: None,
             preview: "fallback preview".to_string(),
             ephemeral: false,
             model_provider: "mock".to_string(),
@@ -102,6 +103,9 @@ mod tests {
                 items,
                 status: codex_app_server_protocol::TurnStatus::Completed,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             }],
         }
     }

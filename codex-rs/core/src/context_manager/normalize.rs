@@ -5,6 +5,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
 use std::collections::HashSet;
 
+use crate::agent::control::FORKED_SPAWN_AGENT_OUTPUT_MESSAGE;
 use crate::util::error_or_panic;
 use tracing::info;
 
@@ -159,10 +160,13 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItem>) {
         .collect();
 
     items.retain(|item| match item {
-        ResponseItem::FunctionCallOutput { call_id, .. } => {
+        ResponseItem::FunctionCallOutput { call_id, output } => {
             let has_match =
                 function_call_ids.contains(call_id) || local_shell_call_ids.contains(call_id);
             if !has_match {
+                if is_synthetic_fork_notice(output) {
+                    return false;
+                }
                 error_or_panic(format!(
                     "Orphan function call output for call id: {call_id}"
                 ));
@@ -192,6 +196,10 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItem>) {
         ResponseItem::ToolSearchOutput { call_id: None, .. } => true,
         _ => true,
     });
+}
+
+fn is_synthetic_fork_notice(output: &FunctionCallOutputPayload) -> bool {
+    output.text_content() == Some(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE)
 }
 
 pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItem>, item: &ResponseItem) {
@@ -341,5 +349,51 @@ pub(crate) fn strip_images_when_unsupported(
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::models::FunctionCallOutputBody;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn remove_orphan_outputs_drops_synthetic_fork_notice_without_matching_call() {
+        let mut items = vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "seed".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            },
+            ResponseItem::FunctionCallOutput {
+                call_id: "spawn-call-1".to_string(),
+                output: FunctionCallOutputPayload {
+                    body: FunctionCallOutputBody::Text(
+                        FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string(),
+                    ),
+                    success: Some(true),
+                },
+            },
+        ];
+
+        remove_orphan_outputs(&mut items);
+
+        assert_eq!(
+            items,
+            vec![ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "seed".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            }]
+        );
     }
 }

@@ -2,10 +2,6 @@ use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
 use crate::config::types::AgentWaitOnWakeEnabledBehavior;
 use crate::config::types::AgentWakeDescendantPolicy;
-use crate::config::types::AppsConfigToml;
-use crate::config::types::PluginConfig;
-use crate::config::types::ShellEnvironmentPolicyToml;
-use crate::config::types::WindowsToml;
 use crate::config_loader::CloudRequirementsLoader;
 use crate::config_loader::ConfigLayerStack;
 use crate::config_loader::ConfigLayerStackOrdering;
@@ -122,6 +118,10 @@ pub use service::ConfigService;
 pub use service::ConfigServiceError;
 
 pub use codex_git_utils::GhostSnapshotConfig;
+
+pub mod types {
+    pub use codex_config::types::*;
+}
 
 /// Maximum number of bytes of the documentation that will be embedded. Larger
 /// files are *silently truncated* to this size so we do not take up too much of
@@ -1168,155 +1168,6 @@ fn resolve_tool_suggest_config(config_toml: &ConfigToml) -> ToolSuggestConfig {
     ToolSuggestConfig { discoverables }
 }
 
-impl From<ToolsToml> for Tools {
-    fn from(tools_toml: ToolsToml) -> Self {
-        Self {
-            web_search: tools_toml.web_search.is_some().then_some(true),
-            view_image: tools_toml.view_image,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct GhostSnapshotToml {
-    /// Exclude untracked files larger than this many bytes from ghost snapshots.
-    #[serde(alias = "ignore_untracked_files_over_bytes")]
-    pub ignore_large_untracked_files: Option<i64>,
-    /// Ignore untracked directories that contain this many files or more.
-    /// (Still emits a warning unless warnings are disabled.)
-    #[serde(alias = "large_untracked_dir_warning_threshold")]
-    pub ignore_large_untracked_dirs: Option<i64>,
-    /// Disable all ghost snapshot warning events.
-    pub disable_warnings: Option<bool>,
-}
-
-impl ConfigToml {
-    /// Derive the effective sandbox policy from the configuration.
-    fn derive_sandbox_policy(
-        &self,
-        sandbox_mode_override: Option<SandboxMode>,
-        profile_sandbox_mode: Option<SandboxMode>,
-        windows_sandbox_level: WindowsSandboxLevel,
-        resolved_cwd: &Path,
-        sandbox_policy_constraint: Option<&Constrained<SandboxPolicy>>,
-    ) -> SandboxPolicy {
-        let sandbox_mode_was_explicit = sandbox_mode_override.is_some()
-            || profile_sandbox_mode.is_some()
-            || self.sandbox_mode.is_some();
-        let resolved_sandbox_mode = sandbox_mode_override
-            .or(profile_sandbox_mode)
-            .or(self.sandbox_mode)
-            .or_else(|| {
-                // If no sandbox_mode is set but this directory has a trust decision,
-                // default to workspace-write except on unsandboxed Windows where we
-                // default to read-only.
-                self.get_active_project(resolved_cwd).and_then(|p| {
-                    if p.is_trusted() || p.is_untrusted() {
-                        if cfg!(target_os = "windows")
-                            && windows_sandbox_level
-                                == codex_protocol::config_types::WindowsSandboxLevel::Disabled
-                        {
-                            Some(SandboxMode::ReadOnly)
-                        } else {
-                            Some(SandboxMode::WorkspaceWrite)
-                        }
-                    } else {
-                        None
-                    }
-                })
-            })
-            .unwrap_or_default();
-        let mut sandbox_policy = match resolved_sandbox_mode {
-            SandboxMode::ReadOnly => SandboxPolicy::new_read_only_policy(),
-            SandboxMode::WorkspaceWrite => match self.sandbox_workspace_write.as_ref() {
-                Some(SandboxWorkspaceWrite {
-                    writable_roots,
-                    network_access,
-                    exclude_tmpdir_env_var,
-                    exclude_slash_tmp,
-                }) => SandboxPolicy::WorkspaceWrite {
-                    writable_roots: writable_roots.clone(),
-                    read_only_access: ReadOnlyAccess::FullAccess,
-                    network_access: *network_access,
-                    exclude_tmpdir_env_var: *exclude_tmpdir_env_var,
-                    exclude_slash_tmp: *exclude_slash_tmp,
-                },
-                None => SandboxPolicy::new_workspace_write_policy(),
-            },
-            SandboxMode::DangerFullAccess => SandboxPolicy::DangerFullAccess,
-        };
-        let downgrade_workspace_write_if_unsupported = |policy: &mut SandboxPolicy| {
-            if cfg!(target_os = "windows")
-                // If the experimental Windows sandbox is enabled, do not force a downgrade.
-                && windows_sandbox_level
-                    == codex_protocol::config_types::WindowsSandboxLevel::Disabled
-                && matches!(&*policy, SandboxPolicy::WorkspaceWrite { .. })
-            {
-                *policy = SandboxPolicy::new_read_only_policy();
-            }
-        };
-        if matches!(resolved_sandbox_mode, SandboxMode::WorkspaceWrite) {
-            downgrade_workspace_write_if_unsupported(&mut sandbox_policy);
-        }
-        if !sandbox_mode_was_explicit
-            && let Some(constraint) = sandbox_policy_constraint
-            && let Err(err) = constraint.can_set(&sandbox_policy)
-        {
-            tracing::warn!(
-                error = %err,
-                "default sandbox policy is disallowed by requirements; falling back to required default"
-            );
-            sandbox_policy = constraint.get().clone();
-            downgrade_workspace_write_if_unsupported(&mut sandbox_policy);
-        }
-        sandbox_policy
-    }
-
-    /// Resolves the cwd to an existing project, or returns None if ConfigToml
-    /// does not contain a project corresponding to cwd or a git repo for cwd
-    pub fn get_active_project(&self, resolved_cwd: &Path) -> Option<ProjectConfig> {
-        let projects = self.projects.clone().unwrap_or_default();
-
-        if let Some(project_config) = projects.get(&resolved_cwd.to_string_lossy().to_string()) {
-            return Some(project_config.clone());
-        }
-
-        // If cwd lives inside a git repo/worktree, check whether the root git project
-        // (the primary repository working directory) is trusted. This lets
-        // worktrees inherit trust from the main project.
-        if let Some(repo_root) = resolve_root_git_project_for_trust(resolved_cwd)
-            && let Some(project_config_for_root) =
-                projects.get(&repo_root.to_string_lossy().to_string_lossy().to_string())
-        {
-            return Some(project_config_for_root.clone());
-        }
-
-        None
-    }
-
-    pub fn get_config_profile(
-        &self,
-        override_profile: Option<String>,
-    ) -> Result<ConfigProfile, std::io::Error> {
-        let profile = override_profile.or_else(|| self.profile.clone());
-
-        match profile {
-            Some(key) => {
-                if let Some(profile) = self.profiles.get(key.as_str()) {
-                    return Ok(profile.clone());
-                }
-
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("config profile `{key}` not found"),
-                ))
-            }
-            None => Ok(ConfigProfile::default()),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PermissionConfigSyntax {
     Legacy,
@@ -2006,9 +1857,6 @@ impl Config {
         let developer_instructions = developer_instructions
             .or(config_profile.developer_instructions)
             .or(cfg.developer_instructions);
-        let guardian_developer_instructions = guardian_developer_instructions_from_requirements(
-            config_layer_stack.requirements_toml(),
-        );
         let include_permissions_instructions = config_profile
             .include_permissions_instructions
             .or(cfg.include_permissions_instructions)

@@ -1367,6 +1367,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-agent-dashboard"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "codex-app-server-client",
+ "codex-app-server-protocol",
+ "crossterm",
+ "futures",
+ "pretty_assertions",
+ "ratatui",
+ "textwrap 0.16.2",
+ "tokio",
+]
+
+[[package]]
 name = "codex-analytics"
 version = "0.0.0"
 dependencies = [

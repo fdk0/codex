@@ -20,13 +20,13 @@ use crate::thread_rollout_truncation::truncate_rollout_to_last_n_fork_turns;
 use codex_features::Feature;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::error::CodexErr;
+use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
-use codex_protocol::models::ResponseInputItem;
-use codex_protocol::error::CodexErr;
-use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -52,6 +52,7 @@ use uuid::Uuid;
 
 const AGENT_NAMES: &str = include_str!("agent_names.txt");
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
+pub(crate) const FORKED_SPAWN_AGENT_OUTPUT_MESSAGE: &str = "You are the newly spawned agent. The prior conversation history was forked from your parent agent. Treat the next user message as your new task, and use the forked history only as background context.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SpawnAgentForkMode {
@@ -73,6 +74,7 @@ struct ParentWakeSubscription {
     child_reference: String,
     child_agent_path: Option<AgentPath>,
     completion_watcher_generation: u64,
+    last_notified_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -442,6 +444,17 @@ impl AgentControl {
                 truncate_rollout_to_last_n_fork_turns(&forked_rollout_items, *last_n_turns);
         }
         forked_rollout_items.retain(keep_forked_rollout_item);
+        if let Some(call_id) = options.fork_parent_spawn_call_id.as_ref() {
+            let mut output =
+                FunctionCallOutputPayload::from_text(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string());
+            output.success = Some(true);
+            forked_rollout_items.push(RolloutItem::ResponseItem(
+                ResponseItem::FunctionCallOutput {
+                    call_id: call_id.clone(),
+                    output,
+                },
+            ));
+        }
 
         state
             .fork_thread_with_source(
@@ -1024,6 +1037,7 @@ impl AgentControl {
                 child_reference: child_reference.clone(),
                 child_agent_path: child_agent_path.clone(),
                 completion_watcher_generation: 0,
+                last_notified_generation: None,
             });
         self.parent_wake_preferences
             .lock()
@@ -1053,21 +1067,37 @@ impl AgentControl {
         }
 
         let mut status_rx = self.subscribe_status(child_thread_id).await.ok()?;
-        if !is_final(&status_rx.borrow().clone()) {
+        let current_status = status_rx.borrow().clone();
+        if !is_final(&current_status) {
             return None;
         }
         let _ = status_rx.borrow_and_update();
 
         let mut subscriptions = self.parent_wake_subscriptions.lock().await;
         let subscription = subscriptions.get_mut(&child_thread_id)?;
+        let current_generation = subscription.completion_watcher_generation;
         let child_agent_path = subscription.child_agent_path.clone();
         let child_reference = subscription.child_reference.clone();
         subscription.completion_watcher_generation =
             subscription.completion_watcher_generation.saturating_add(1);
         let completion_watcher_generation = subscription.completion_watcher_generation;
+        let parent_thread_id = subscription.parent_thread_id;
+        drop(subscriptions);
+
+        if !self.leaf_only_wake_blocked(child_thread_id).await {
+            self.notify_completion_to_parent(
+                child_thread_id,
+                parent_thread_id,
+                child_reference.clone(),
+                child_agent_path.clone(),
+                current_generation,
+                current_status,
+            )
+            .await;
+        }
 
         Some(CompletionWatcherArm {
-            parent_thread_id: subscription.parent_thread_id,
+            parent_thread_id,
             child_reference,
             child_agent_path,
             completion_watcher_generation,
@@ -1099,6 +1129,7 @@ impl AgentControl {
                                 parent_thread_id,
                                 child_reference,
                                 child_agent_path,
+                                completion_watcher_generation,
                                 control.get_status(child_thread_id).await,
                             )
                             .await;
@@ -1132,6 +1163,7 @@ impl AgentControl {
                     parent_thread_id,
                     child_reference,
                     child_agent_path,
+                    completion_watcher_generation,
                     status,
                 )
                 .await;
@@ -1210,12 +1242,23 @@ impl AgentControl {
         parent_thread_id: ThreadId,
         child_reference: String,
         child_agent_path: Option<AgentPath>,
+        completion_watcher_generation: u64,
         status: AgentStatus,
     ) {
         if !is_final(&status) {
             return;
         }
 
+        {
+            let mut subscriptions = self.parent_wake_subscriptions.lock().await;
+            let Some(subscription) = subscriptions.get_mut(&child_thread_id) else {
+                return;
+            };
+            if subscription.last_notified_generation == Some(completion_watcher_generation) {
+                return;
+            }
+            subscription.last_notified_generation = Some(completion_watcher_generation);
+        }
         let wake_parent_on_completion = self
             .parent_wake_subscriptions
             .lock()
@@ -1253,7 +1296,7 @@ impl AgentControl {
                 wake_parent_on_completion,
             );
             let _ = self
-                .send_inter_agent_communication(parent_thread_id, communication)
+                .send_inter_agent_communication_boxed(parent_thread_id, communication)
                 .await;
             return;
         }
@@ -1396,6 +1439,7 @@ impl AgentControl {
                 child_reference,
                 child_agent_path,
                 completion_watcher_generation: 0,
+                last_notified_generation: None,
             },
         );
     }
@@ -1446,6 +1490,14 @@ impl AgentControl {
                 subscription.completion_watcher_generation != completion_watcher_generation
             })
             .unwrap_or(true)
+    }
+
+    fn send_inter_agent_communication_boxed(
+        &self,
+        agent_id: ThreadId,
+        communication: InterAgentCommunication,
+    ) -> futures::future::BoxFuture<'_, CodexResult<String>> {
+        Box::pin(self.send_inter_agent_communication(agent_id, communication))
     }
 
     pub(crate) async fn wake_enabled_children_for_parent(

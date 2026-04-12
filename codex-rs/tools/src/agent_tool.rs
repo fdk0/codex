@@ -528,23 +528,18 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
         ),
         (
             "wake_parent_on_completion".to_string(),
-            JsonSchema::Boolean {
-                description: Some(
-                    "When true, Codex wakes the spawning parent thread after this child reaches a terminal status so the parent can continue without polling. When omitted, Codex uses the configured agents.wake_parent_on_completion_default policy."
-                        .to_string(),
-                ),
-            },
+            JsonSchema::boolean(Some(
+                "When true, Codex wakes the spawning parent thread after this child reaches a terminal status so the parent can continue without polling. When omitted, Codex uses the configured agents.wake_parent_on_completion_default policy."
+                    .to_string(),
+            )),
         ),
         (
             "env".to_string(),
-            JsonSchema::Object {
-                properties: BTreeMap::new(),
-                required: None,
-                additional_properties: Some(JsonSchema::String {
-                    description: None,
-                }
-                .into()),
-            },
+            JsonSchema::object(
+                BTreeMap::new(),
+                /*required*/ None,
+                Some(JsonSchema::string(/*description*/ None).into()),
+            ),
         ),
         (
             "model".to_string(),
@@ -582,23 +577,18 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
         ),
         (
             "wake_parent_on_completion".to_string(),
-            JsonSchema::Boolean {
-                description: Some(
-                    "When true, Codex wakes the spawning parent thread after this child reaches a terminal status so the parent can continue without polling. When omitted, Codex uses the configured agents.wake_parent_on_completion_default policy."
-                        .to_string(),
-                ),
-            },
+            JsonSchema::boolean(Some(
+                "When true, Codex wakes the spawning parent thread after this child reaches a terminal status so the parent can continue without polling. When omitted, Codex uses the configured agents.wake_parent_on_completion_default policy."
+                    .to_string(),
+            )),
         ),
         (
             "env".to_string(),
-            JsonSchema::Object {
-                properties: BTreeMap::new(),
-                required: None,
-                additional_properties: Some(JsonSchema::String {
-                    description: None,
-                }
-                .into()),
-            },
+            JsonSchema::object(
+                BTreeMap::new(),
+                /*required*/ None,
+                Some(JsonSchema::string(/*description*/ None).into()),
+            ),
         ),
         (
             "model".to_string(),
@@ -753,34 +743,28 @@ fn wait_agent_tool_parameters_v2(options: WaitAgentTimeoutOptions) -> JsonSchema
     let properties = BTreeMap::from([
         (
             "targets".to_string(),
-            JsonSchema::Array {
-                description: Some(
+            JsonSchema::array(
+                JsonSchema::string(Some("Agent id or canonical task name to wait on.".to_string())),
+                Some(
                     "Agent ids or canonical task names to wait on. Returns when any target reaches a final status."
                         .to_string(),
                 ),
-                items: Box::new(JsonSchema::String {
-                    description: Some(
-                        "Agent id or canonical task name to wait on.".to_string(),
-                    ),
-                }),
-            },
+            ),
         ),
         (
             "timeout_ms".to_string(),
-            JsonSchema::Number {
-                description: Some(format!(
+            JsonSchema::number(Some(format!(
                     "Optional timeout in milliseconds. Defaults to {}, min {}, max {}. Prefer longer waits (minutes) to avoid busy polling.",
                     options.default_timeout_ms, options.min_timeout_ms, options.max_timeout_ms,
-                )),
-            },
+                ))),
         ),
     ]);
 
-    JsonSchema::Object {
+    JsonSchema::object(
         properties,
-        required: Some(vec!["targets".to_string()]),
-        additional_properties: Some(false.into()),
-    }
+        Some(vec!["targets".to_string()]),
+        Some(false.into()),
+    )
 }
 
 #[cfg(test)]

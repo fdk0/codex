@@ -182,16 +182,19 @@ fn wait_agent_tool_v2_requires_targets_and_timeout_summary_output() {
     else {
         panic!("wait_agent should be a function tool");
     };
-    let JsonSchema::Object {
-        properties,
-        required,
-        ..
-    } = parameters
-    else {
-        panic!("wait_agent should use object params");
-    };
+    assert_eq!(
+        parameters.schema_type,
+        Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Object))
+    );
+    let properties = parameters
+        .properties
+        .as_ref()
+        .expect("wait_agent should use object params");
     assert!(properties.contains_key("targets"));
-    assert_eq!(required.as_deref(), Some(&["targets".to_string()][..]));
+    assert_eq!(
+        parameters.required.as_deref(),
+        Some(&["targets".to_string()][..])
+    );
     assert!(properties.contains_key("timeout_ms"));
     assert_eq!(
         output_schema.expect("wait output schema")["properties"]["message"]["description"],

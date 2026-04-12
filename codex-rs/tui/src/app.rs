@@ -2411,7 +2411,7 @@ impl App {
                 collaboration_mode,
                 personality,
             } => {
-                let mut should_start_turn = true;
+                let should_start_turn = true;
                 if let Some(turn_id) = self.active_turn_id_for_thread(thread_id).await {
                     let mut steer_turn_id = turn_id;
                     let mut retried_after_turn_mismatch = false;
@@ -2438,7 +2438,6 @@ impl App {
                                             let mut store = channel.store.lock().await;
                                             store.clear_active_turn_id();
                                         }
-                                        should_start_turn = true;
                                         break;
                                     }
                                     Some(ActiveTurnSteerRace::ExpectedTurnMismatch {
@@ -2472,11 +2471,6 @@ impl App {
                                     }
                                     None => return Err(error.into()),
                                 }
-                                should_start_turn = true;
-                            } else {
-                                tracing::error!("turn/start failed in app-server TUI: {error}");
-                                self.chat_widget.add_error_message(error.to_string());
-                                return Ok(true);
                             }
                         }
                     }

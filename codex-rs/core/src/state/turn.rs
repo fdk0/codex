@@ -10,7 +10,12 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
 use codex_protocol::dynamic_tools::DynamicToolResponse;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseInputItem;
+use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::ReviewDecision;
+use codex_protocol::protocol::TokenUsage;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationResponse;
@@ -18,10 +23,8 @@ use rmcp::model::RequestId;
 use tokio::sync::oneshot;
 
 use crate::codex::TurnContext;
+use crate::contextual_user_message::SUBAGENT_NOTIFICATION_FRAGMENT;
 use crate::tasks::AnySessionTask;
-use codex_protocol::models::PermissionProfile;
-use codex_protocol::protocol::ReviewDecision;
-use codex_protocol::protocol::TokenUsage;
 
 /// Metadata about the currently running turn.
 pub(crate) struct ActiveTurn {
@@ -224,6 +227,10 @@ impl TurnState {
         !self.pending_input.is_empty()
     }
 
+    pub(crate) fn has_pending_inter_agent_input(&self) -> bool {
+        self.pending_input.iter().any(is_inter_agent_pending_input)
+    }
+
     pub(crate) fn accept_mailbox_delivery_for_current_turn(&mut self) {
         self.set_mailbox_delivery_phase(MailboxDeliveryPhase::CurrentTurn);
     }
@@ -244,6 +251,26 @@ impl TurnState {
     pub(crate) fn granted_permissions(&self) -> Option<PermissionProfile> {
         self.granted_permissions.clone()
     }
+}
+
+fn is_inter_agent_pending_input(item: &ResponseInputItem) -> bool {
+    let ResponseInputItem::Message { role, content } = item else {
+        return false;
+    };
+
+    if role == "assistant" {
+        return InterAgentCommunication::is_message_content(content);
+    }
+
+    if role != "user" {
+        return false;
+    }
+
+    matches!(
+        content.as_slice(),
+        [ContentItem::InputText { text }]
+            if SUBAGENT_NOTIFICATION_FRAGMENT.matches_text(text)
+    )
 }
 
 impl ActiveTurn {

@@ -438,6 +438,7 @@ mod tests {
     fn thread(id: &str, parent_thread_id: Option<&str>, status: ThreadStatus) -> Thread {
         Thread {
             id: id.to_string(),
+            forked_from_id: None,
             preview: format!("{id} preview"),
             ephemeral: false,
             model_provider: "mock".to_string(),

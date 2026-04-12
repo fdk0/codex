@@ -109,7 +109,6 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::HasLegacyEvent;
-use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::RawResponseItemEvent;
@@ -830,6 +829,7 @@ pub(crate) struct Session {
     pending_mcp_server_refresh_config: Mutex<Option<McpServerRefreshConfig>>,
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
+    #[allow(dead_code)]
     mailbox: Mailbox,
     mailbox_rx: Mutex<MailboxReceiver>,
     idle_pending_input: Mutex<Vec<ResponseInputItem>>, // TODO (jif) merge with mailbox!
@@ -4174,10 +4174,16 @@ impl Session {
         })
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn subscribe_mailbox_seq(&self) -> watch::Receiver<u64> {
         self.mailbox.subscribe()
     }
-    pub(crate) fn enqueue_mailbox_communication(&self, communication: InterAgentCommunication) {
+    #[cfg(test)]
+    pub(crate) fn enqueue_mailbox_communication(
+        &self,
+        communication: codex_protocol::protocol::InterAgentCommunication,
+    ) {
         self.mailbox.send(communication);
     }
 
@@ -4244,6 +4250,7 @@ impl Session {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) async fn queued_response_items_for_next_turn_snapshot(
         &self,
     ) -> Vec<ResponseInputItem> {
@@ -4266,6 +4273,29 @@ impl Session {
                     let ts = at.turn_state.lock().await;
                     (
                         ts.has_pending_input(),
+                        ts.accepts_mailbox_delivery_for_current_turn(),
+                    )
+                }
+                None => (false, true),
+            }
+        };
+        if has_turn_pending_input {
+            return true;
+        }
+        if !accepts_mailbox_delivery {
+            return false;
+        }
+        self.mailbox_rx.lock().await.has_pending()
+    }
+
+    pub async fn has_pending_inter_agent_input(&self) -> bool {
+        let (has_turn_pending_input, accepts_mailbox_delivery) = {
+            let active = self.active_turn.lock().await;
+            match active.as_ref() {
+                Some(at) => {
+                    let ts = at.turn_state.lock().await;
+                    (
+                        ts.has_pending_inter_agent_input(),
                         ts.accepts_mailbox_delivery_for_current_turn(),
                     )
                 }
@@ -4812,10 +4842,10 @@ mod handlers {
     use crate::tasks::UserShellCommandMode;
     use crate::tasks::UserShellCommandTask;
     use crate::tasks::execute_user_shell_command;
-    use codex_protocol::models::ContentItem;
-    use codex_protocol::models::ResponseInputItem;
     use codex_mcp::collect_mcp_snapshot_from_manager;
     use codex_mcp::compute_auth_statuses;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseInputItem;
     use codex_protocol::protocol::CodexErrorInfo;
     use codex_protocol::protocol::ErrorEvent;
     use codex_protocol::protocol::Event;
@@ -5023,7 +5053,8 @@ mod handlers {
                 return;
             }
 
-            sess.enqueue_mailbox_communication(communication);
+            sess.queue_response_items_for_next_turn(vec![communication.to_response_input_item()])
+                .await;
         }
     }
 
@@ -7687,7 +7718,7 @@ async fn try_run_sampling_request(
                 }
                 needs_follow_up |= output_result.needs_follow_up;
                 // todo: remove before stabilizing multi-agent v2
-                if preempt_for_mailbox_mail && sess.mailbox_rx.lock().await.has_pending() {
+                if preempt_for_mailbox_mail && sess.has_pending_inter_agent_input().await {
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,

@@ -3,10 +3,10 @@ use std::path::Path;
 
 use anyhow::Context;
 use anyhow::Result;
-use codex_core::ModelProviderInfo;
-use codex_core::built_in_model_providers;
 use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_features::Feature;
+use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::items::parse_hook_prompt_fragment;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;

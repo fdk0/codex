@@ -34,7 +34,10 @@ impl MessageDeliveryMode {
 /// Input for the MultiAgentV2 `send_message` tool.
 pub(crate) struct SendMessageArgs {
     pub(crate) target: String,
-    pub(crate) message: String,
+    pub(crate) message: Option<String>,
+    pub(crate) items: Option<Vec<UserInput>>,
+    #[serde(default)]
+    pub(crate) interrupt: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +57,46 @@ fn message_content(message: String) -> Result<String, FunctionCallError> {
         ));
     }
     Ok(message)
+}
+
+pub(crate) fn send_message_content(
+    message: Option<String>,
+    items: Option<Vec<UserInput>>,
+) -> Result<String, FunctionCallError> {
+    match (message, items) {
+        (Some(_), Some(_)) => Err(FunctionCallError::RespondToModel(
+            "Provide either message or items, but not both".to_string(),
+        )),
+        (None, None) => Err(FunctionCallError::RespondToModel(
+            "Provide one of: message or items".to_string(),
+        )),
+        (Some(message), None) => message_content(message),
+        (None, Some(items)) => {
+            if items.is_empty() {
+                return Err(FunctionCallError::RespondToModel(
+                    "Items can't be empty".to_string(),
+                ));
+            }
+
+            let mut text = String::new();
+            for item in items {
+                match item {
+                    UserInput::Text {
+                        text: item_text,
+                        text_elements,
+                    } if text_elements.is_empty() => text.push_str(&item_text),
+                    _ => {
+                        return Err(FunctionCallError::RespondToModel(
+                            "send_message only supports text content in MultiAgentV2 for now"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+
+            message_content(text)
+        }
+    }
 }
 
 /// Handles the shared MultiAgentV2 plain-text message flow for both `send_message` and `followup_task`.

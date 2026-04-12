@@ -1,13 +1,15 @@
 use codex_protocol::protocol::InterAgentCommunication;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 #[cfg(test)]
 use codex_protocol::AgentPath;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
+#[allow(dead_code)]
 pub(crate) struct Mailbox {
     tx: mpsc::UnboundedSender<InterAgentCommunication>,
     next_seq: AtomicU64,
@@ -41,6 +43,7 @@ impl Mailbox {
         self.seq_tx.subscribe()
     }
 
+    #[cfg(test)]
     pub(crate) fn send(&self, communication: InterAgentCommunication) -> u64 {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let _ = self.tx.send(communication);

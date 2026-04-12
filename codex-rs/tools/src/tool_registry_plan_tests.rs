@@ -291,9 +291,9 @@ fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
         panic!("wait_agent should be a function tool");
     };
     let (properties, required) = expect_object_schema(parameters);
-    assert!(!properties.contains_key("targets"));
+    assert!(properties.contains_key("targets"));
     assert!(properties.contains_key("timeout_ms"));
-    assert_eq!(required, None);
+    assert_eq!(required, Some(&vec!["targets".to_string()]));
     let output_schema = output_schema
         .as_ref()
         .expect("wait_agent should define output schema");

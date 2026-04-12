@@ -262,6 +262,7 @@ mod tests {
     fn thread(id: &str, updated_at: i64, parent_thread_id: Option<&str>) -> Thread {
         Thread {
             id: id.to_string(),
+            forked_from_id: None,
             preview: format!("{id} preview"),
             ephemeral: false,
             model_provider: "mock".to_string(),

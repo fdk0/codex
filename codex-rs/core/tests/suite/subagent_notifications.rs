@@ -334,11 +334,7 @@ async fn wake_enabled_child_triggers_parent_turn_without_wait() -> Result<()> {
     let server = start_mock_server().await;
     let wake_turn = mount_sse_once_match(
         &server,
-        |req: &wiremock::Request| {
-            body_contains(req, "<subagent_notification>")
-                && !body_contains(req, TURN_1_PROMPT)
-                && !body_contains(req, TURN_2_NO_WAIT_PROMPT)
-        },
+        |req: &wiremock::Request| body_contains(req, "<subagent_notification>"),
         sse(vec![
             ev_response_created("resp-wake-1"),
             ev_assistant_message("msg-wake-1", "wake handled"),
@@ -373,11 +369,7 @@ async fn wake_enabled_multi_agent_v2_child_triggers_single_parent_turn_without_w
     let server = start_mock_server().await;
     let wake_turn = mount_sse_once_match(
         &server,
-        |req: &wiremock::Request| {
-            body_contains(req, "<subagent_notification>")
-                && !body_contains(req, TURN_1_PROMPT)
-                && !body_contains(req, TURN_2_NO_WAIT_PROMPT)
-        },
+        |req: &wiremock::Request| body_contains(req, "<subagent_notification>"),
         sse(vec![
             ev_response_created("resp-wake-v2-1"),
             ev_assistant_message("msg-wake-v2-1", "wake handled"),

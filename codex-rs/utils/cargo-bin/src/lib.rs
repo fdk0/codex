@@ -2,11 +2,15 @@ use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 pub use runfiles;
 
 /// Bazel sets this when runfiles directories are disabled, which we do on all platforms for consistency.
 const RUNFILES_MANIFEST_ONLY_ENV: &str = "RUNFILES_MANIFEST_ONLY";
+static CARGO_BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, thiserror::Error)]
 pub enum CargoBinError {
@@ -53,6 +57,8 @@ pub fn cargo_bin(name: &str) -> Result<PathBuf, CargoBinError> {
             }
             if path.exists() {
                 Ok(path)
+            } else if let Ok(built_path) = build_workspace_bin(name) {
+                Ok(built_path)
             } else {
                 Err(CargoBinError::ResolvedPathDoesNotExist {
                     key: "assert_cmd::Command::cargo_bin".to_owned(),
@@ -60,11 +66,17 @@ pub fn cargo_bin(name: &str) -> Result<PathBuf, CargoBinError> {
                 })
             }
         }
-        Err(err) => Err(CargoBinError::NotFound {
-            name: name.to_owned(),
-            env_keys,
-            fallback: format!("assert_cmd fallback failed: {err}"),
-        }),
+        Err(err) => {
+            if let Ok(path) = build_workspace_bin(name) {
+                Ok(path)
+            } else {
+                Err(CargoBinError::NotFound {
+                    name: name.to_owned(),
+                    env_keys,
+                    fallback: format!("assert_cmd fallback failed: {err}"),
+                })
+            }
+        }
     }
 }
 
@@ -104,6 +116,117 @@ fn resolve_bin_from_env(key: &str, value: OsString) -> Result<PathBuf, CargoBinE
         key: key.to_owned(),
         path: raw,
     })
+}
+
+fn build_workspace_bin(name: &str) -> io::Result<PathBuf> {
+    let workspace_root = find_workspace_root()?;
+    let target_dir = workspace_target_dir(&workspace_root);
+    let output_path = target_dir.join("debug").join(bin_file_name(name));
+    if output_path.exists() {
+        return Ok(output_path);
+    }
+
+    let _guard = CARGO_BUILD_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| io::Error::other("cargo build lock poisoned"))?;
+
+    if output_path.exists() {
+        return Ok(output_path);
+    }
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = Command::new(cargo)
+        .arg("build")
+        .arg("--quiet")
+        .arg("--bin")
+        .arg(name)
+        .current_dir(&workspace_root)
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "cargo build --bin {name} failed with status {status}"
+        )));
+    }
+
+    if output_path.exists() {
+        Ok(output_path)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "built workspace binary {name:?}, but no artifact was found at {}",
+                output_path.display()
+            ),
+        ))
+    }
+}
+
+fn find_workspace_root() -> io::Result<PathBuf> {
+    for candidate in workspace_root_candidates()? {
+        if let Some(workspace_root) = search_workspace_root(candidate) {
+            return Ok(workspace_root);
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "could not locate workspace Cargo.toml",
+    ))
+}
+
+fn workspace_root_candidates() -> io::Result<Vec<PathBuf>> {
+    let mut candidates = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR"))];
+    candidates.push(std::env::current_dir()?);
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(parent) = current_exe.parent()
+    {
+        candidates.push(parent.to_path_buf());
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    Ok(candidates)
+}
+
+fn search_workspace_root(mut dir: PathBuf) -> Option<PathBuf> {
+    loop {
+        let cargo_toml = dir.join("Cargo.toml");
+        if cargo_toml.exists()
+            && std::fs::read_to_string(&cargo_toml)
+                .is_ok_and(|manifest| manifest.contains("[workspace]"))
+        {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+fn workspace_target_dir(workspace_root: &Path) -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(target_dir) => {
+            let target_dir = PathBuf::from(target_dir);
+            if target_dir.is_absolute() {
+                target_dir
+            } else {
+                workspace_root.join(target_dir)
+            }
+        }
+        None => workspace_root.join("target"),
+    }
+}
+
+fn bin_file_name(name: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!("{name}.exe")
+    }
+    #[cfg(not(windows))]
+    {
+        name.to_owned()
+    }
 }
 
 /// Macro that derives the path to a test resource at runtime, the value of
