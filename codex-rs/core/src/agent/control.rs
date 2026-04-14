@@ -669,6 +669,7 @@ impl AgentControl {
             .maybe_prepare_completion_watcher_rearm(
                 agent_id,
                 initial_operation_triggers_turn(&initial_operation),
+                /*suppress_immediate_parent_notification*/ false,
             )
             .await;
         let last_task_message = render_input_preview(&initial_operation);
@@ -720,7 +721,12 @@ impl AgentControl {
         communication: InterAgentCommunication,
     ) -> CodexResult<String> {
         let completion_watcher = self
-            .maybe_prepare_completion_watcher_rearm(agent_id, communication.trigger_turn)
+            .maybe_prepare_completion_watcher_rearm(
+                agent_id,
+                communication.trigger_turn,
+                self.communication_reuses_child_from_descendant(agent_id, &communication)
+                    .await,
+            )
             .await;
         let last_task_message = communication.content.clone();
         let state = self.upgrade()?;
@@ -1061,6 +1067,7 @@ impl AgentControl {
         &self,
         child_thread_id: ThreadId,
         trigger_turn: bool,
+        suppress_immediate_parent_notification: bool,
     ) -> Option<CompletionWatcherArm> {
         if !trigger_turn {
             return None;
@@ -1084,7 +1091,9 @@ impl AgentControl {
         let parent_thread_id = subscription.parent_thread_id;
         drop(subscriptions);
 
-        if !self.leaf_only_wake_blocked(child_thread_id).await {
+        if !suppress_immediate_parent_notification
+            && !self.leaf_only_wake_blocked(child_thread_id).await
+        {
             self.notify_completion_to_parent(
                 child_thread_id,
                 parent_thread_id,
@@ -1336,13 +1345,17 @@ impl AgentControl {
                 return None;
             }
             if !self.leaf_only_wake_blocked(child_thread_id).await {
-                return Some(self.get_status(child_thread_id).await);
+                let status = self.get_status(child_thread_id).await;
+                if !is_final(&status) {
+                    return Some(status);
+                }
             }
 
             tokio::select! {
                 changed = status_rx.changed() => {
                     if changed.is_err() {
-                        return Some(self.get_status(child_thread_id).await);
+                        let status = self.get_status(child_thread_id).await;
+                        return Some(status);
                     }
                     let status = status_rx.borrow().clone();
                     if self
@@ -1354,13 +1367,79 @@ impl AgentControl {
                     {
                         return None;
                     }
-                    if !is_final(&status) || !self.leaf_only_wake_blocked(child_thread_id).await {
+                    if !is_final(&status) {
+                        return Some(status);
+                    }
+                    if !self.leaf_only_wake_blocked(child_thread_id).await
+                        && !self
+                            .child_has_scheduled_or_active_turn(child_thread_id)
+                            .await
+                    {
                         return Some(status);
                     }
                 }
-                _ = sleep(Duration::from_millis(25)) => {}
+                _ = sleep(Duration::from_millis(25)) => {
+                    if !self.leaf_only_wake_blocked(child_thread_id).await {
+                        let status = self.get_status(child_thread_id).await;
+                        if !is_final(&status)
+                            || !self
+                                .child_has_scheduled_or_active_turn(child_thread_id)
+                                .await
+                        {
+                            return Some(status);
+                        }
+                    }
+                }
             }
         }
+    }
+
+    async fn child_has_scheduled_or_active_turn(&self, child_thread_id: ThreadId) -> bool {
+        let Ok(state) = self.upgrade() else {
+            return false;
+        };
+        let Ok(child_thread) = state.get_thread(child_thread_id).await else {
+            return false;
+        };
+        if child_thread
+            .codex
+            .session
+            .active_turn
+            .lock()
+            .await
+            .is_some()
+        {
+            return true;
+        }
+        child_thread
+            .codex
+            .session
+            .has_queued_response_items_for_next_turn()
+            .await
+            || child_thread
+                .codex
+                .session
+                .has_trigger_turn_mailbox_items()
+                .await
+            || child_thread.codex.session.has_pending_input().await
+    }
+
+    async fn communication_reuses_child_from_descendant(
+        &self,
+        child_thread_id: ThreadId,
+        communication: &InterAgentCommunication,
+    ) -> bool {
+        let Some(child_agent_path) = self
+            .parent_wake_subscriptions
+            .lock()
+            .await
+            .get(&child_thread_id)
+            .and_then(|subscription| subscription.child_agent_path.clone())
+        else {
+            return false;
+        };
+        agent_matches_prefix(Some(&communication.author), &child_agent_path)
+            && communication.author != child_agent_path
     }
 
     #[allow(clippy::too_many_arguments)]

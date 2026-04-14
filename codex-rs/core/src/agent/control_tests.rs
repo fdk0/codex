@@ -207,6 +207,23 @@ async fn wait_for_turn_context(thread: &Arc<CodexThread>, sub_id: &str) -> Arc<T
     .expect("turn context should become active")
 }
 
+async fn wait_for_any_active_turn_context(thread: &Arc<CodexThread>) -> Arc<TurnContext> {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let active_turn = thread.codex.session.active_turn.lock().await;
+            if let Some(active_turn) = active_turn.as_ref()
+                && let Some((_, task)) = active_turn.tasks.first()
+            {
+                return Arc::clone(&task.turn_context);
+            }
+            drop(active_turn);
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("some turn context should become active")
+}
+
 async fn persist_thread_for_tree_resume(thread: &Arc<CodexThread>, message: &str) {
     thread
         .inject_user_message_without_turn(message.to_string())
@@ -1319,7 +1336,11 @@ async fn completion_watcher_rearm_for_legacy_child_marks_current_status_seen() {
         .await;
     let mut completion_watcher = harness
         .control
-        .maybe_prepare_completion_watcher_rearm(child_thread_id, /*trigger_turn*/ true)
+        .maybe_prepare_completion_watcher_rearm(
+            child_thread_id,
+            /*trigger_turn*/ true,
+            /*suppress_immediate_parent_notification*/ false,
+        )
         .await
         .expect("completed child should arm a replacement watcher");
 
@@ -2241,6 +2262,233 @@ async fn leaf_only_reused_child_wakes_parent_only_once_after_descendants_finish(
         .filter(|entry| *entry == expected_parent_wake)
         .count();
     assert_eq!(wake_count, 1);
+}
+
+#[tokio::test]
+async fn leaf_only_does_not_wake_parent_with_stale_child_status_when_descendant_finishes() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+    let parent_path = AgentPath::root();
+
+    let mut dispatcher_config = harness.config.clone();
+    let _ = dispatcher_config.features.enable(Feature::MultiAgentV2);
+    dispatcher_config.agent_wake_descendant_policy = AgentWakeDescendantPolicy::LeafOnly;
+    let dispatcher_thread_id = harness
+        .manager
+        .start_thread(dispatcher_config.clone())
+        .await
+        .expect("dispatcher thread should start")
+        .thread_id;
+    let dispatcher_thread = harness
+        .manager
+        .get_thread(dispatcher_thread_id)
+        .await
+        .expect("dispatcher thread should exist");
+    let dispatcher_path = parent_path.join("dispatcher").expect("dispatcher path");
+    let dispatcher_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 2,
+        agent_path: Some(dispatcher_path.clone()),
+        agent_nickname: None,
+        agent_role: Some("dispatcher".to_string()),
+    });
+    harness
+        .control
+        .register_parent_wake_subscription(
+            dispatcher_thread_id,
+            Some(&dispatcher_source),
+            /*wake_parent_on_completion*/ true,
+        )
+        .await;
+    harness
+        .control
+        .maybe_start_completion_watcher(
+            dispatcher_thread_id,
+            Some(dispatcher_source),
+            dispatcher_path.to_string(),
+            Some(dispatcher_path.clone()),
+            CompletionWatcherMode::CurrentOrNextTerminal,
+        )
+        .await;
+
+    let review_path = dispatcher_path.join("review_1").expect("review path");
+    let review_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: dispatcher_thread_id,
+        depth: 3,
+        agent_path: Some(review_path.clone()),
+        agent_nickname: None,
+        agent_role: Some("review".to_string()),
+    });
+    let review_thread_id = harness
+        .manager
+        .spawn_new_thread_with_source_for_tests(
+            dispatcher_config,
+            harness.control.clone(),
+            review_source.clone(),
+            /*persist_extended_history*/ false,
+            /*metrics_service_name*/ None,
+            /*inherited_shell_snapshot*/ None,
+            /*inherited_exec_policy*/ None,
+        )
+        .await
+        .expect("review thread should start")
+        .thread_id;
+    let review_thread = harness
+        .manager
+        .get_thread(review_thread_id)
+        .await
+        .expect("review thread should exist");
+    harness
+        .control
+        .register_parent_wake_subscription(
+            review_thread_id,
+            Some(&review_source),
+            /*wake_parent_on_completion*/ true,
+        )
+        .await;
+    harness
+        .control
+        .maybe_start_completion_watcher(
+            review_thread_id,
+            Some(review_source),
+            review_path.to_string(),
+            Some(review_path.clone()),
+            CompletionWatcherMode::CurrentOrNextTerminal,
+        )
+        .await;
+
+    let first_turn = dispatcher_thread.codex.session.new_default_turn().await;
+    dispatcher_thread
+        .codex
+        .session
+        .send_event(
+            first_turn.as_ref(),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: first_turn.sub_id.clone(),
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: ModeKind::Default,
+            }),
+        )
+        .await;
+    dispatcher_thread
+        .codex
+        .session
+        .send_event(
+            first_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: first_turn.sub_id.clone(),
+                last_agent_message: Some("spawned review_1".to_string()),
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
+
+    sleep(Duration::from_millis(150)).await;
+
+    let stale_message = crate::session_prefix::format_subagent_notification_message(
+        dispatcher_path.as_str(),
+        &AgentStatus::Completed(Some("spawned review_1".to_string())),
+    );
+    let stale_parent_wake = (
+        parent_thread_id,
+        Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                dispatcher_path.clone(),
+                parent_path.clone(),
+                Vec::new(),
+                stale_message,
+                true,
+            ),
+        },
+    );
+
+    let review_turn = review_thread.codex.session.new_default_turn().await;
+    review_thread
+        .codex
+        .session
+        .send_event(
+            review_turn.as_ref(),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: review_turn.sub_id.clone(),
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: ModeKind::Default,
+            }),
+        )
+        .await;
+    review_thread
+        .codex
+        .session
+        .send_event(
+            review_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: review_turn.sub_id.clone(),
+                last_agent_message: Some("review complete".to_string()),
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
+
+    let second_turn = wait_for_any_active_turn_context(&dispatcher_thread).await;
+    sleep(Duration::from_millis(150)).await;
+
+    let stale_wake_count = harness
+        .manager
+        .captured_ops()
+        .into_iter()
+        .filter(|entry| *entry == stale_parent_wake)
+        .count();
+    assert_eq!(stale_wake_count, 0);
+
+    dispatcher_thread
+        .codex
+        .session
+        .send_event(
+            second_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: second_turn.sub_id.clone(),
+                last_agent_message: Some("handing back".to_string()),
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
+
+    let final_message = crate::session_prefix::format_subagent_notification_message(
+        dispatcher_path.as_str(),
+        &AgentStatus::Completed(Some("handing back".to_string())),
+    );
+    let final_parent_wake = (
+        parent_thread_id,
+        Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                dispatcher_path,
+                parent_path,
+                Vec::new(),
+                final_message,
+                true,
+            ),
+        },
+    );
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let wake_count = harness
+                .manager
+                .captured_ops()
+                .into_iter()
+                .filter(|entry| *entry == final_parent_wake)
+                .count();
+            if wake_count >= 1 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("leaf_only child should wake parent with the reconciled completion");
 }
 
 #[tokio::test]
