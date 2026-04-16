@@ -5,6 +5,8 @@ expression: "format!(\"active hooks:\\n{}history:\\n{history}\", active_hook_blo
 active hooks:
 <empty>
 history:
+• Running PreToolUse hook
+
 • PreToolUse hook (blocked)
   feedback: command blocked by policy
 
