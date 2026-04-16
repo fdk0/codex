@@ -97,6 +97,7 @@ fn event_msg_persistence_mode(ev: &EventMsg) -> Option<EventPersistenceMode> {
         | EventMsg::AgentReasoning(_)
         | EventMsg::AgentReasoningRawContent(_)
         | EventMsg::TokenCount(_)
+        | EventMsg::ThreadNameUpdated(_)
         | EventMsg::ContextCompacted(_)
         | EventMsg::EnteredReviewMode(_)
         | EventMsg::ExitedReviewMode(_)
@@ -146,7 +147,6 @@ fn event_msg_persistence_mode(ev: &EventMsg) -> Option<EventPersistenceMode> {
         | EventMsg::AgentReasoningSectionBreak(_)
         | EventMsg::RawResponseItem(_)
         | EventMsg::SessionConfigured(_)
-        | EventMsg::ThreadNameUpdated(_)
         | EventMsg::McpToolCallBegin(_)
         | EventMsg::WebSearchBegin(_)
         | EventMsg::ExecCommandBegin(_)
@@ -191,6 +191,7 @@ fn event_msg_persistence_mode(ev: &EventMsg) -> Option<EventPersistenceMode> {
 mod tests {
     use super::EventPersistenceMode;
     use super::should_persist_event_msg;
+    use codex_protocol::ThreadId;
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::HookCompletedEvent;
     use codex_protocol::protocol::HookEventName;
@@ -200,6 +201,7 @@ mod tests {
     use codex_protocol::protocol::HookRunSummary;
     use codex_protocol::protocol::HookScope;
     use codex_protocol::protocol::ImageGenerationEndEvent;
+    use codex_protocol::protocol::ThreadNameUpdatedEvent;
     use std::path::PathBuf;
 
     #[test]
@@ -228,7 +230,7 @@ mod tests {
                 handler_type: HookHandlerType::Command,
                 execution_mode: HookExecutionMode::Sync,
                 scope: HookScope::Turn,
-                source_path: PathBuf::from("/tmp/hooks.json"),
+                source_path: PathBuf::from("/tmp/hooks.json").try_into().unwrap(),
                 display_order: 0,
                 status: HookRunStatus::Completed,
                 status_message: Some("loaded guards".into()),
@@ -237,6 +239,19 @@ mod tests {
                 duration_ms: Some(1),
                 entries: Vec::new(),
             },
+        });
+
+        assert!(should_persist_event_msg(
+            &event,
+            EventPersistenceMode::Limited
+        ));
+    }
+
+    #[test]
+    fn persists_thread_name_updates_in_limited_mode() {
+        let event = EventMsg::ThreadNameUpdated(ThreadNameUpdatedEvent {
+            thread_id: ThreadId::new(),
+            thread_name: Some("saved-session".to_string()),
         });
 
         assert!(should_persist_event_msg(

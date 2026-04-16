@@ -5,6 +5,7 @@
 // the TUI or the tracing stack).
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+mod agent_identity;
 mod apply_patch;
 mod apps;
 mod arc_monitor;
@@ -46,6 +47,7 @@ pub use landlock::spawn_command_under_linux_sandbox;
 pub(crate) mod mcp;
 mod mcp_skill_dependencies;
 mod mcp_tool_approval_templates;
+mod mcp_tool_exposure;
 mod network_policy_decision;
 pub(crate) mod network_proxy_loader;
 pub use mcp::McpManager;
@@ -53,9 +55,8 @@ pub use network_proxy_loader::MtimeConfigReloader;
 pub use network_proxy_loader::build_network_proxy_state;
 pub use network_proxy_loader::build_network_proxy_state_and_reloader;
 mod original_image_detail;
-pub use codex_mcp::MCP_SANDBOX_STATE_CAPABILITY;
-pub use codex_mcp::MCP_SANDBOX_STATE_METHOD;
 pub use codex_mcp::SandboxState;
+mod mcp_openai_file;
 mod mcp_tool_call;
 mod memories;
 pub(crate) mod mention_syntax;
@@ -137,7 +138,6 @@ pub use project_doc::discover_project_doc_paths;
 pub use project_doc::read_project_docs;
 mod rollout;
 pub(crate) mod safety;
-pub mod seatbelt;
 mod session_rollout_init_error;
 pub mod shell;
 pub(crate) mod shell_snapshot;
@@ -150,6 +150,7 @@ mod tools;
 pub(crate) mod turn_diff_tracker;
 mod turn_metadata;
 mod turn_timing;
+mod unavailable_tool;
 pub use rollout::ARCHIVED_SESSIONS_SUBDIR;
 pub use rollout::Cursor;
 pub use rollout::EventPersistenceMode;
@@ -165,10 +166,10 @@ pub use rollout::append_thread_name;
 pub use rollout::find_archived_thread_path_by_id_str;
 #[deprecated(note = "use find_thread_path_by_id_str")]
 pub use rollout::find_conversation_path_by_id_str;
+pub use rollout::find_thread_meta_by_name_str;
 pub use rollout::find_thread_name_by_id;
 pub use rollout::find_thread_names_by_ids;
 pub use rollout::find_thread_path_by_id_str;
-pub use rollout::find_thread_path_by_name_str;
 pub use rollout::parse_cursor;
 pub use rollout::read_head_for_summary;
 pub use rollout::read_session_meta_line;

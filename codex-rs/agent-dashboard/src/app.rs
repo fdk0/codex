@@ -446,7 +446,7 @@ mod tests {
             updated_at: 1,
             status,
             path: None,
-            cwd: PathBuf::from("/tmp"),
+            cwd: PathBuf::from("/tmp").try_into().unwrap(),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Exec,
             parent_thread_id: parent_thread_id.map(str::to_string),

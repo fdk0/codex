@@ -1,13 +1,13 @@
-use std::fs;
-use std::path::Path;
-
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigLayerStackOrdering;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use std::fs;
 
 use super::ConfiguredHandler;
 use super::config::HookConditions;
 use super::config::HookHandlerConfig;
 use super::config::HooksFile;
+use super::config::MatcherGroup;
 use crate::events::common::matcher_pattern_for_event;
 use crate::events::common::validate_matcher_pattern;
 
@@ -17,7 +17,7 @@ pub(crate) struct DiscoveryResult {
 }
 
 struct AppendGroupSpec<'a> {
-    source_path: &'a Path,
+    source_path: &'a AbsolutePathBuf,
     event_name: codex_protocol::protocol::HookEventName,
     matcher: Option<&'a str>,
     conditions: HookConditions,
@@ -69,105 +69,53 @@ pub(crate) fn discover_handlers(config_layer_stack: Option<&ConfigLayerStack>) -
             }
         };
 
-        for group in parsed.hooks.post_tool_use {
-            append_group_handlers(
+        let super::config::HookEvents {
+            pre_tool_use,
+            post_tool_use,
+            session_start,
+            after_compaction,
+            user_prompt_submit,
+            stop,
+        } = parsed.hooks;
+
+        for (event_name, groups) in [
+            (
+                codex_protocol::protocol::HookEventName::PreToolUse,
+                pre_tool_use,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::PostToolUse,
+                post_tool_use,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::SessionStart,
+                session_start,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::UserPromptSubmit,
+                user_prompt_submit,
+            ),
+            (codex_protocol::protocol::HookEventName::Stop, stop),
+        ] {
+            append_matcher_groups(
                 &mut handlers,
                 &mut warnings,
                 &mut display_order,
-                AppendGroupSpec {
-                    source_path: source_path.as_path(),
-                    event_name: codex_protocol::protocol::HookEventName::PostToolUse,
-                    matcher: matcher_pattern_for_event(
-                        codex_protocol::protocol::HookEventName::PostToolUse,
-                        group.matcher.as_deref(),
-                    ),
-                    conditions: group.conditions,
-                },
-                group.hooks,
+                &source_path,
+                event_name,
+                groups,
             );
         }
 
-        for group in parsed.hooks.pre_tool_use {
+        for group in after_compaction {
             append_group_handlers(
                 &mut handlers,
                 &mut warnings,
                 &mut display_order,
                 AppendGroupSpec {
-                    source_path: source_path.as_path(),
-                    event_name: codex_protocol::protocol::HookEventName::PreToolUse,
-                    matcher: matcher_pattern_for_event(
-                        codex_protocol::protocol::HookEventName::PreToolUse,
-                        group.matcher.as_deref(),
-                    ),
-                    conditions: group.conditions,
-                },
-                group.hooks,
-            );
-        }
-
-        for group in parsed.hooks.session_start {
-            append_group_handlers(
-                &mut handlers,
-                &mut warnings,
-                &mut display_order,
-                AppendGroupSpec {
-                    source_path: source_path.as_path(),
-                    event_name: codex_protocol::protocol::HookEventName::SessionStart,
-                    matcher: matcher_pattern_for_event(
-                        codex_protocol::protocol::HookEventName::SessionStart,
-                        group.matcher.as_deref(),
-                    ),
-                    conditions: group.conditions,
-                },
-                group.hooks,
-            );
-        }
-
-        for group in parsed.hooks.after_compaction {
-            append_group_handlers(
-                &mut handlers,
-                &mut warnings,
-                &mut display_order,
-                AppendGroupSpec {
-                    source_path: source_path.as_path(),
+                    source_path: &source_path,
                     event_name: codex_protocol::protocol::HookEventName::AfterCompaction,
                     matcher: group.matcher.as_deref(),
-                    conditions: group.conditions,
-                },
-                group.hooks,
-            );
-        }
-
-        for group in parsed.hooks.user_prompt_submit {
-            append_group_handlers(
-                &mut handlers,
-                &mut warnings,
-                &mut display_order,
-                AppendGroupSpec {
-                    source_path: source_path.as_path(),
-                    event_name: codex_protocol::protocol::HookEventName::UserPromptSubmit,
-                    matcher: matcher_pattern_for_event(
-                        codex_protocol::protocol::HookEventName::UserPromptSubmit,
-                        group.matcher.as_deref(),
-                    ),
-                    conditions: group.conditions,
-                },
-                group.hooks,
-            );
-        }
-
-        for group in parsed.hooks.stop {
-            append_group_handlers(
-                &mut handlers,
-                &mut warnings,
-                &mut display_order,
-                AppendGroupSpec {
-                    source_path: source_path.as_path(),
-                    event_name: codex_protocol::protocol::HookEventName::Stop,
-                    matcher: matcher_pattern_for_event(
-                        codex_protocol::protocol::HookEventName::Stop,
-                        group.matcher.as_deref(),
-                    ),
                     conditions: group.conditions,
                 },
                 group.hooks,
@@ -225,7 +173,7 @@ fn append_group_handlers(
                     command,
                     timeout_sec,
                     status_message,
-                    source_path: spec.source_path.to_path_buf(),
+                    source_path: spec.source_path.clone(),
                     display_order: *display_order,
                 });
                 *display_order += 1;
@@ -242,12 +190,36 @@ fn append_group_handlers(
     }
 }
 
+fn append_matcher_groups(
+    handlers: &mut Vec<ConfiguredHandler>,
+    warnings: &mut Vec<String>,
+    display_order: &mut i64,
+    source_path: &AbsolutePathBuf,
+    event_name: codex_protocol::protocol::HookEventName,
+    groups: Vec<MatcherGroup>,
+) {
+    for group in groups {
+        append_group_handlers(
+            handlers,
+            warnings,
+            display_order,
+            AppendGroupSpec {
+                source_path,
+                event_name,
+                matcher: matcher_pattern_for_event(event_name, group.matcher.as_deref()),
+                conditions: group.conditions,
+            },
+            group.hooks,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-    use std::path::PathBuf;
-
     use codex_protocol::protocol::HookEventName;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+    use codex_utils_absolute_path::test_support::PathBufExt;
+    use codex_utils_absolute_path::test_support::test_path_buf;
     use pretty_assertions::assert_eq;
 
     use super::AppendGroupSpec;
@@ -256,6 +228,10 @@ mod tests {
     use super::HookHandlerConfig;
     use super::append_group_handlers;
     use crate::events::common::matcher_pattern_for_event;
+
+    fn source_path() -> AbsolutePathBuf {
+        test_path_buf("/tmp/hooks.json").abs()
+    }
 
     #[test]
     fn user_prompt_submit_ignores_invalid_matcher_during_discovery() {
@@ -268,7 +244,7 @@ mod tests {
             &mut warnings,
             &mut display_order,
             AppendGroupSpec {
-                source_path: Path::new("/tmp/hooks.json"),
+                source_path: &source_path(),
                 event_name: HookEventName::UserPromptSubmit,
                 matcher: matcher_pattern_for_event(HookEventName::UserPromptSubmit, Some("[")),
                 conditions: HookConditions::default(),
@@ -291,7 +267,7 @@ mod tests {
                 command: "echo hello".to_string(),
                 timeout_sec: 600,
                 status_message: None,
-                source_path: PathBuf::from("/tmp/hooks.json"),
+                source_path: source_path(),
                 display_order: 0,
             }]
         );
@@ -308,7 +284,7 @@ mod tests {
             &mut warnings,
             &mut display_order,
             AppendGroupSpec {
-                source_path: Path::new("/tmp/hooks.json"),
+                source_path: &source_path(),
                 event_name: HookEventName::PreToolUse,
                 matcher: matcher_pattern_for_event(HookEventName::PreToolUse, Some("^Bash$")),
                 conditions: HookConditions::default(),
@@ -331,7 +307,7 @@ mod tests {
                 command: "echo hello".to_string(),
                 timeout_sec: 600,
                 status_message: None,
-                source_path: PathBuf::from("/tmp/hooks.json"),
+                source_path: source_path(),
                 display_order: 0,
             }]
         );
@@ -348,7 +324,7 @@ mod tests {
             &mut warnings,
             &mut display_order,
             AppendGroupSpec {
-                source_path: Path::new("/tmp/hooks.json"),
+                source_path: &source_path(),
                 event_name: HookEventName::PreToolUse,
                 matcher: matcher_pattern_for_event(HookEventName::PreToolUse, Some("*")),
                 conditions: HookConditions::default(),
@@ -385,7 +361,7 @@ mod tests {
             &mut warnings,
             &mut display_order,
             AppendGroupSpec {
-                source_path: Path::new("/tmp/hooks.json"),
+                source_path: &source_path(),
                 event_name: HookEventName::SessionStart,
                 matcher: Some("^startup$"),
                 conditions: conditions.clone(),
@@ -408,7 +384,7 @@ mod tests {
                 command: "echo hello".to_string(),
                 timeout_sec: 600,
                 status_message: None,
-                source_path: PathBuf::from("/tmp/hooks.json"),
+                source_path: source_path(),
                 display_order: 0,
             }]
         );

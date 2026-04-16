@@ -270,7 +270,7 @@ mod tests {
             updated_at,
             status: ThreadStatus::Idle,
             path: None,
-            cwd: PathBuf::from(format!("/tmp/{id}")),
+            cwd: PathBuf::from(format!("/tmp/{id}")).try_into().unwrap(),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Exec,
             parent_thread_id: parent_thread_id.map(str::to_string),

@@ -90,7 +90,7 @@ mod tests {
             updated_at: 0,
             status: ThreadStatus::Idle,
             path: None,
-            cwd: PathBuf::from("/tmp"),
+            cwd: PathBuf::from("/tmp").try_into().unwrap(),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Exec,
             parent_thread_id: Some("parent".to_string()),

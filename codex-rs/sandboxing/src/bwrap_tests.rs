@@ -45,7 +45,37 @@ exit 1
 }
 
 #[test]
-fn finds_first_executable_bwrap_in_search_paths() {
+fn detects_wsl1_proc_version_formats() {
+    assert!(proc_version_indicates_wsl1(
+        "Linux version 4.4.0-22621-Microsoft"
+    ));
+    assert!(proc_version_indicates_wsl1(
+        "Linux version 5.15.0-microsoft-standard-WSL1"
+    ));
+    assert!(proc_version_indicates_wsl1(
+        "Linux version 5.15.0-wsl-microsoft-standard-WSL1"
+    ));
+}
+
+#[test]
+fn does_not_treat_wsl2_or_native_linux_as_wsl1() {
+    assert!(!proc_version_indicates_wsl1(
+        "Linux version 6.6.87.2-microsoft-standard-WSL2"
+    ));
+    assert!(!proc_version_indicates_wsl1(
+        "Linux version 6.6.87.2-wsl-microsoft-standard-WSL2"
+    ));
+    assert!(!proc_version_indicates_wsl1(
+        "Linux version 4.19.104-microsoft-standard"
+    ));
+    assert!(!proc_version_indicates_wsl1(
+        "Linux version 6.6.87.2-microsoft-standard-WSL3"
+    ));
+    assert!(!proc_version_indicates_wsl1("Linux version 6.8.0"));
+}
+
+#[test]
+fn finds_first_executable_bwrap_in_joined_search_path() {
     let temp_dir = tempdir().expect("temp dir");
     let cwd = temp_dir.path().join("cwd");
     let first_dir = temp_dir.path().join("first");
