@@ -135,6 +135,43 @@ async fn live_user_message_event_does_not_duplicate_completed_user_message_histo
 }
 
 #[tokio::test]
+async fn live_subagent_wake_notification_renders_snapshot() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let message = r#"<subagent_notification>{"agent_path":"/root/dispatcher","status":{"completed":"reconciled"}}</subagent_notification>"#;
+
+    complete_user_message_for_inputs(
+        &mut chat,
+        "wake-1",
+        vec![UserInput::Text {
+            text: message.to_string(),
+            text_elements: Vec::new(),
+        }],
+    );
+    chat.handle_codex_event(Event {
+        id: "wake-1-live".into(),
+        msg: EventMsg::UserMessage(UserMessageEvent {
+            message: message.to_string(),
+            images: None,
+            text_elements: Vec::new(),
+            local_images: Vec::new(),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected a single wake notification history cell"
+    );
+
+    let combined = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert_chatwidget_snapshot!("live_subagent_wake_notification_renders_snapshot", combined);
+}
+
+#[tokio::test]
 async fn replayed_user_message_preserves_text_elements_and_local_images() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
 

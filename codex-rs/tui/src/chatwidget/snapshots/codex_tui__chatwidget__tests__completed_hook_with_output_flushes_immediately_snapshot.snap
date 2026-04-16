@@ -12,7 +12,5 @@ completed
 live hooks:
 <empty>
 history:
-• Running PreToolUse hook
-
 • PreToolUse hook (blocked)
   feedback: command blocked by policy

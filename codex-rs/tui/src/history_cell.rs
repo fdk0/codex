@@ -2226,7 +2226,7 @@ fn parse_subagent_notification_message(message: &str) -> Option<SubagentNotifica
     serde_json::from_str(body).ok()
 }
 
-pub(crate) fn format_subagent_notification_for_display(message: &str) -> Option<String> {
+pub(crate) fn new_subagent_notification_event(message: &str) -> Option<PlainHistoryCell> {
     let notification = parse_subagent_notification_message(message)?;
     let title = match &notification.status {
         AgentStatus::PendingInit => "Subagent pending init",
@@ -2247,13 +2247,26 @@ pub(crate) fn format_subagent_notification_for_display(message: &str) -> Option<
         AgentStatus::Errored(message) => Some(message),
     };
 
-    Some(match detail {
-        Some(detail) => format!(
-            "{title}\nAgent: {}\n\n{detail}",
-            notification.agent_reference
-        ),
-        None => format!("{title}\nAgent: {}", notification.agent_reference),
-    })
+    let mut lines: Vec<Line<'static>> = vec![
+        vec![
+            "• ".dim(),
+            Span::from(title).bold(),
+            Span::from(": ").dim(),
+            notification.agent_reference.into(),
+        ]
+        .into(),
+    ];
+    if let Some(detail) = detail {
+        let detail_lines = detail
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| Line::from(line.to_string()))
+            .collect::<Vec<_>>();
+        if !detail_lines.is_empty() {
+            lines.extend(prefix_lines(detail_lines, "  └ ".dim(), "    ".into()));
+        }
+    }
+    Some(PlainHistoryCell::new(lines))
 }
 
 pub(crate) fn new_error_event(message: String) -> PlainHistoryCell {
@@ -4795,28 +4808,33 @@ mod tests {
     }
 
     #[test]
-    fn format_subagent_notification_for_display_formats_completed_message() {
+    fn new_subagent_notification_event_formats_completed_message() {
         let message = r#"<subagent_notification>{"agent_id":"child-1","status":{"completed":"done"}}</subagent_notification>"#;
         assert_eq!(
-            format_subagent_notification_for_display(message),
-            Some("Subagent completed\nAgent: child-1\n\ndone".to_string())
+            new_subagent_notification_event(message)
+                .map(|cell| render_lines(&cell.display_lines(/*width*/ 80))),
+            Some(vec![
+                "• Subagent completed: child-1".to_string(),
+                "  └ done".to_string(),
+            ])
         );
     }
 
     #[test]
-    fn format_subagent_notification_for_display_accepts_agent_path_payload() {
+    fn new_subagent_notification_event_accepts_agent_path_payload() {
         let message = r#"<subagent_notification>{"agent_path":"worker/child-1","status":{"completed":"done"}}</subagent_notification>"#;
         assert_eq!(
-            format_subagent_notification_for_display(message),
-            Some("Subagent completed\nAgent: worker/child-1\n\ndone".to_string())
+            new_subagent_notification_event(message)
+                .map(|cell| render_lines(&cell.display_lines(/*width*/ 80))),
+            Some(vec![
+                "• Subagent completed: worker/child-1".to_string(),
+                "  └ done".to_string(),
+            ])
         );
     }
 
     #[test]
-    fn format_subagent_notification_for_display_returns_none_for_plain_text() {
-        assert_eq!(
-            format_subagent_notification_for_display("plain agent message"),
-            None
-        );
+    fn new_subagent_notification_event_returns_none_for_plain_text() {
+        assert!(new_subagent_notification_event("plain agent message").is_none());
     }
 }

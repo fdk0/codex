@@ -5,7 +5,5 @@ expression: "format!(\"active hooks:\\n{}history:\\n{history}\", active_hook_blo
 active hooks:
 • Running Stop hook: checking stop condition
 history:
-• Running Stop hook
-
 • Stop hook (stopped)
   stop: continue with more context

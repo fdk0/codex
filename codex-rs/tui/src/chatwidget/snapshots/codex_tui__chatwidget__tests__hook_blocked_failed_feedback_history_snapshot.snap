@@ -2,12 +2,8 @@
 source: tui/src/chatwidget/tests/status_and_layout.rs
 expression: rendered
 ---
-• Running PreToolUse hook
-
 • PreToolUse hook (blocked)
   feedback: run tests before touching the fixture
-
-• Running PostToolUse hook
 
 • PostToolUse hook (failed)
   error: hook exited with code 7

@@ -86,12 +86,6 @@ enum HookRunState {
         status: HookRunStatus,
         /// Hook output entries rendered below the completed header.
         entries: Vec<HookOutputEntry>,
-        /// Whether the transcript should keep the initial running line ahead of the final status.
-        ///
-        /// This is true once the hook was visible while running, or for non-success terminal
-        /// states where the user still needs to see what the hook was attempting even if it
-        /// finished before the reveal delay elapsed.
-        show_running_header: bool,
     },
 }
 
@@ -238,9 +232,7 @@ impl HookCell {
         let existing = &mut self.runs[index];
         existing.event_name = event_name;
         existing.status_message = status_message;
-        let show_running_header =
-            existing.state.is_running_visible() || status != HookRunStatus::Completed;
-        existing.state = HookRunState::completed(status, entries, show_running_header);
+        existing.state = HookRunState::completed(status, entries);
         true
     }
 
@@ -263,7 +255,7 @@ impl HookCell {
             id,
             event_name,
             status_message,
-            state: HookRunState::completed(status, entries, status != HookRunStatus::Completed),
+            state: HookRunState::completed(status, entries),
         });
     }
 
@@ -432,22 +424,7 @@ impl HookRunCell {
                     animations_enabled,
                 );
             }
-            HookRunState::Completed {
-                status,
-                entries,
-                show_running_header,
-            } => {
-                if *show_running_header {
-                    let hook_text = format!("Running {label} hook");
-                    push_running_hook_header(
-                        lines,
-                        &hook_text,
-                        /*start_time*/ None,
-                        self.status_message.as_deref(),
-                        animations_enabled,
-                    );
-                    push_hook_line_separator(lines);
-                }
+            HookRunState::Completed { status, entries } => {
                 let status_text = format!("{status:?}").to_lowercase();
                 let bullet = hook_completed_bullet(*status, entries);
                 lines.push(
@@ -480,16 +457,8 @@ impl HookRunState {
     }
 
     /// Creates the persistent final state for a hook with visible output or a notable status.
-    fn completed(
-        status: HookRunStatus,
-        entries: Vec<HookOutputEntry>,
-        show_running_header: bool,
-    ) -> Self {
-        Self::Completed {
-            status,
-            entries,
-            show_running_header,
-        }
+    fn completed(status: HookRunStatus, entries: Vec<HookOutputEntry>) -> Self {
+        Self::Completed { status, entries }
     }
 
     /// Returns true while the run is still waiting for a completion event or timer cleanup.

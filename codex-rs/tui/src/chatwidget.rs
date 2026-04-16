@@ -7071,10 +7071,8 @@ impl ChatWidget {
             Some(Self::rendered_user_message_event_from_event(&event));
         self.suppress_next_matching_live_user_message_event = suppress_next_matching_live_event;
         let remote_image_urls = event.images.unwrap_or_default();
-        if let Some(message) =
-            history_cell::format_subagent_notification_for_display(&event.message)
-        {
-            self.add_to_history(history_cell::new_info_event(message, None));
+        if let Some(cell) = history_cell::new_subagent_notification_event(&event.message) {
+            self.add_to_history(cell);
         } else if !event.message.trim().is_empty()
             || !event.text_elements.is_empty()
             || !remote_image_urls.is_empty()
