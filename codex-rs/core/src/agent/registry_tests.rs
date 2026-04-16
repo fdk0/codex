@@ -1,5 +1,7 @@
 use super::*;
 use codex_protocol::AgentPath;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use pretty_assertions::assert_eq;
 use std::collections::HashSet;
 
@@ -12,6 +14,16 @@ fn agent_metadata(thread_id: ThreadId) -> AgentMetadata {
         agent_id: Some(thread_id),
         ..Default::default()
     }
+}
+
+fn thread_spawn_source(parent_thread_id: ThreadId, agent_path: Option<AgentPath>) -> SessionSource {
+    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path,
+        agent_nickname: None,
+        agent_role: None,
+    })
 }
 
 #[test]
@@ -157,6 +169,85 @@ fn release_is_idempotent_for_registered_threads() {
         .reserve_spawn_slot(Some(1))
         .expect("slot released after second thread removal");
     drop(reservation);
+}
+
+#[test]
+fn upsert_thread_spawn_source_metadata_records_parent_and_path() {
+    let registry = Arc::new(AgentRegistry::default());
+    let thread_id = ThreadId::new();
+    let parent_thread_id = ThreadId::new();
+    let agent_path = agent_path("/root/dispatcher");
+
+    registry.upsert_thread_spawn_source_metadata(
+        thread_id,
+        &thread_spawn_source(parent_thread_id, Some(agent_path.clone())),
+    );
+
+    assert_eq!(
+        registry.agent_metadata_for_thread(thread_id),
+        Some(AgentMetadata {
+            agent_id: Some(thread_id),
+            parent_thread_id: Some(parent_thread_id),
+            agent_path: Some(agent_path),
+            agent_nickname: None,
+            agent_role: None,
+            last_task_message: None,
+        })
+    );
+}
+
+#[test]
+fn live_thread_spawn_children_groups_live_metadata_by_parent() {
+    let registry = Arc::new(AgentRegistry::default());
+    let parent_thread_id = ThreadId::new();
+    let sibling_parent_thread_id = ThreadId::new();
+    let dispatcher_thread_id = ThreadId::new();
+    let worker_thread_id = ThreadId::new();
+    let review_thread_id = ThreadId::new();
+
+    registry.upsert_thread_spawn_source_metadata(
+        dispatcher_thread_id,
+        &thread_spawn_source(parent_thread_id, Some(agent_path("/root/dispatcher"))),
+    );
+    registry.upsert_thread_spawn_source_metadata(
+        worker_thread_id,
+        &thread_spawn_source(
+            parent_thread_id,
+            Some(agent_path("/root/dispatcher/worker_1")),
+        ),
+    );
+    registry.upsert_thread_spawn_source_metadata(
+        review_thread_id,
+        &thread_spawn_source(sibling_parent_thread_id, Some(agent_path("/root/review_1"))),
+    );
+
+    let children_by_parent = registry.live_thread_spawn_children_by_parent();
+
+    assert_eq!(
+        children_by_parent.get(&parent_thread_id).map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        children_by_parent
+            .get(&sibling_parent_thread_id)
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        children_by_parent.get(&parent_thread_id).map(|children| {
+            children
+                .iter()
+                .map(|(thread_id, metadata)| (*thread_id, metadata.agent_path.clone()))
+                .collect::<Vec<_>>()
+        }),
+        Some(vec![
+            (dispatcher_thread_id, Some(agent_path("/root/dispatcher"))),
+            (
+                worker_thread_id,
+                Some(agent_path("/root/dispatcher/worker_1"))
+            ),
+        ])
+    );
 }
 
 #[test]

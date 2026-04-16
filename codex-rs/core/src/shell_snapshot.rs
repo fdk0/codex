@@ -8,7 +8,6 @@ use std::time::SystemTime;
 use crate::rollout::list::find_thread_path_by_id_str;
 use crate::shell::Shell;
 use crate::shell::ShellType;
-use crate::shell::get_shell;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
@@ -111,6 +110,16 @@ impl ShellSnapshot {
         session_cwd: &AbsolutePathBuf,
         shell: &Shell,
     ) -> std::result::Result<Self, &'static str> {
+        Self::try_new_with_env_overrides(codex_home, session_id, session_cwd, shell, &[]).await
+    }
+
+    async fn try_new_with_env_overrides(
+        codex_home: &AbsolutePathBuf,
+        session_id: ThreadId,
+        session_cwd: &AbsolutePathBuf,
+        shell: &Shell,
+        env_overrides: &[(&str, &str)],
+    ) -> std::result::Result<Self, &'static str> {
         // File to store the snapshot
         let extension = match shell.shell_type {
             ShellType::PowerShell => "ps1",
@@ -137,8 +146,7 @@ impl ShellSnapshot {
         });
 
         // Make the new snapshot.
-        if let Err(err) =
-            write_shell_snapshot(shell.shell_type.clone(), &temp_path, session_cwd).await
+        if let Err(err) = write_shell_snapshot(shell, &temp_path, session_cwd, env_overrides).await
         {
             tracing::warn!(
                 "Failed to create shell snapshot for {}: {err:?}",
@@ -156,7 +164,9 @@ impl ShellSnapshot {
             cwd: session_cwd.clone(),
         };
 
-        if let Err(err) = validate_snapshot(shell, &temp_snapshot.path, session_cwd).await {
+        if let Err(err) =
+            validate_snapshot(shell, &temp_snapshot.path, session_cwd, env_overrides).await
+        {
             tracing::error!("Shell snapshot validation failed: {err:?}");
             remove_snapshot_file(&temp_snapshot.path).await;
             return Err("validation_failed");
@@ -187,17 +197,16 @@ impl Drop for ShellSnapshot {
 }
 
 async fn write_shell_snapshot(
-    shell_type: ShellType,
+    shell: &Shell,
     output_path: &AbsolutePathBuf,
     cwd: &AbsolutePathBuf,
+    env_overrides: &[(&str, &str)],
 ) -> Result<()> {
+    let shell_type = shell.shell_type.clone();
     if shell_type == ShellType::PowerShell || shell_type == ShellType::Cmd {
         bail!("Shell snapshot not supported yet for {shell_type:?}");
     }
-    let shell = get_shell(shell_type.clone(), /*path*/ None)
-        .with_context(|| format!("No available shell for {shell_type:?}"))?;
-
-    let raw_snapshot = capture_snapshot(&shell, cwd).await?;
+    let raw_snapshot = capture_snapshot(shell, cwd, env_overrides).await?;
     let snapshot = strip_snapshot_preamble(&raw_snapshot)?;
 
     if let Some(parent) = output_path.parent() {
@@ -215,13 +224,21 @@ async fn write_shell_snapshot(
     Ok(())
 }
 
-async fn capture_snapshot(shell: &Shell, cwd: &AbsolutePathBuf) -> Result<String> {
+async fn capture_snapshot(
+    shell: &Shell,
+    cwd: &AbsolutePathBuf,
+    env_overrides: &[(&str, &str)],
+) -> Result<String> {
     let shell_type = shell.shell_type.clone();
     match shell_type {
-        ShellType::Zsh => run_shell_script(shell, &zsh_snapshot_script(), cwd).await,
-        ShellType::Bash => run_shell_script(shell, &bash_snapshot_script(), cwd).await,
-        ShellType::Sh => run_shell_script(shell, &sh_snapshot_script(), cwd).await,
-        ShellType::PowerShell => run_shell_script(shell, powershell_snapshot_script(), cwd).await,
+        ShellType::Zsh => run_shell_script(shell, &zsh_snapshot_script(), cwd, env_overrides).await,
+        ShellType::Bash => {
+            run_shell_script(shell, &bash_snapshot_script(), cwd, env_overrides).await
+        }
+        ShellType::Sh => run_shell_script(shell, &sh_snapshot_script(), cwd, env_overrides).await,
+        ShellType::PowerShell => {
+            run_shell_script(shell, powershell_snapshot_script(), cwd, env_overrides).await
+        }
         ShellType::Cmd => bail!("Shell snapshotting is not yet supported for {shell_type:?}"),
     }
 }
@@ -239,59 +256,89 @@ async fn validate_snapshot(
     shell: &Shell,
     snapshot_path: &AbsolutePathBuf,
     cwd: &AbsolutePathBuf,
+    env_overrides: &[(&str, &str)],
 ) -> Result<()> {
     let snapshot_path_display = snapshot_path.display();
     let script = format!("set -e; . \"{snapshot_path_display}\"");
-    run_script_with_timeout(
+    run_script_with_timeout_with_env(
         shell,
         &script,
         SNAPSHOT_TIMEOUT,
         /*use_login_shell*/ false,
         cwd,
+        env_overrides,
     )
     .await
     .map(|_| ())
 }
 
-async fn run_shell_script(shell: &Shell, script: &str, cwd: &AbsolutePathBuf) -> Result<String> {
-    run_script_with_timeout(
+async fn run_shell_script(
+    shell: &Shell,
+    script: &str,
+    cwd: &AbsolutePathBuf,
+    env_overrides: &[(&str, &str)],
+) -> Result<String> {
+    run_script_with_timeout_with_env(
         shell,
         script,
         SNAPSHOT_TIMEOUT,
         /*use_login_shell*/ true,
         cwd,
+        env_overrides,
     )
     .await
 }
 
-async fn run_script_with_timeout(
+async fn run_script_with_timeout_with_env(
     shell: &Shell,
     script: &str,
     snapshot_timeout: Duration,
     use_login_shell: bool,
     cwd: &AbsolutePathBuf,
+    env_overrides: &[(&str, &str)],
 ) -> Result<String> {
     let args = shell.derive_exec_args(script, use_login_shell);
     let shell_name = shell.name();
+    #[cfg(target_os = "linux")]
+    let parent_pid = std::process::id() as libc::pid_t;
 
     // Handler is kept as guard to control the drop. The `mut` pattern is required because .args()
     // returns a ref of handler.
     let mut handler = Command::new(&args[0]);
     handler.args(&args[1..]);
     handler.stdin(Stdio::null());
+    handler.stdout(Stdio::piped());
+    handler.stderr(Stdio::piped());
     handler.current_dir(cwd);
+    for (key, value) in env_overrides {
+        handler.env(key, value);
+    }
     #[cfg(unix)]
     unsafe {
-        handler.pre_exec(|| {
+        handler.pre_exec(move || {
             codex_utils_pty::process_group::detach_from_tty()?;
+            #[cfg(target_os = "linux")]
+            codex_utils_pty::process_group::set_parent_death_signal(parent_pid)?;
             Ok(())
         });
     }
     handler.kill_on_drop(true);
-    let output = timeout(snapshot_timeout, handler.output())
-        .await
-        .map_err(|_| anyhow!("Snapshot command timed out for {shell_name}"))?
+    let child = handler
+        .spawn()
         .with_context(|| format!("Failed to execute {shell_name}"))?;
+    let child_pid = child.id();
+    let mut output = Box::pin(child.wait_with_output());
+    let output = match timeout(snapshot_timeout, &mut output).await {
+        Ok(output) => output.with_context(|| format!("Failed to execute {shell_name}"))?,
+        Err(_) => {
+            #[cfg(unix)]
+            if let Some(child_pid) = child_pid {
+                let _ = codex_utils_pty::process_group::kill_process_tree_by_pid(child_pid);
+            }
+            let _ = output.await;
+            return Err(anyhow!("Snapshot command timed out for {shell_name}"));
+        }
+    };
 
     if !output.status.success() {
         let status = output.status;

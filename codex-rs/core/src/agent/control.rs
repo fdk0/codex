@@ -71,6 +71,7 @@ pub(crate) struct SpawnAgentOptions {
 struct ParentWakeSubscription {
     parent_thread_id: ThreadId,
     wake_parent_on_completion: bool,
+    wake_descendant_policy: AgentWakeDescendantPolicy,
     child_reference: String,
     child_agent_path: Option<AgentPath>,
     completion_watcher_generation: u64,
@@ -232,6 +233,7 @@ impl AgentControl {
     ) -> CodexResult<LiveAgent> {
         let state = self.upgrade()?;
         let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
+        let wake_descendant_policy = config.agent_wake_descendant_policy;
         let wake_parent_on_completion = options
             .wake_parent_on_completion
             .unwrap_or(config.agent_wake_parent_on_completion_default);
@@ -353,6 +355,7 @@ impl AgentControl {
             new_thread.thread_id,
             notification_source.as_ref(),
             wake_parent_on_completion,
+            wake_descendant_policy,
         )
         .await;
 
@@ -635,6 +638,7 @@ impl AgentControl {
             resumed_thread.thread_id,
             Some(&notification_source),
             wake_parent_on_completion,
+            resumed_snapshot.agent_wake_descendant_policy,
         )
         .await;
         let child_reference = agent_metadata
@@ -849,6 +853,15 @@ impl AgentControl {
         }
     }
 
+    pub(crate) fn register_live_thread_source(
+        &self,
+        thread_id: ThreadId,
+        session_source: &SessionSource,
+    ) {
+        self.state
+            .upsert_thread_spawn_source_metadata(thread_id, session_source);
+    }
+
     pub(crate) fn get_agent_metadata(&self, agent_id: ThreadId) -> Option<AgentMetadata> {
         self.state.agent_metadata_for_thread(agent_id)
     }
@@ -1041,6 +1054,7 @@ impl AgentControl {
             .or_insert_with(|| ParentWakeSubscription {
                 parent_thread_id,
                 wake_parent_on_completion: false,
+                wake_descendant_policy: AgentWakeDescendantPolicy::Immediate,
                 child_reference: child_reference.clone(),
                 child_agent_path: child_agent_path.clone(),
                 completion_watcher_generation: 0,
@@ -1081,8 +1095,12 @@ impl AgentControl {
         }
         let _ = status_rx.borrow_and_update();
 
+        let wake_descendant_policy = self.read_wake_descendant_policy(child_thread_id).await;
         let mut subscriptions = self.parent_wake_subscriptions.lock().await;
         let subscription = subscriptions.get_mut(&child_thread_id)?;
+        if let Some(wake_descendant_policy) = wake_descendant_policy {
+            subscription.wake_descendant_policy = wake_descendant_policy;
+        }
         let current_generation = subscription.completion_watcher_generation;
         let child_agent_path = subscription.child_agent_path.clone();
         let child_reference = subscription.child_reference.clone();
@@ -1319,16 +1337,13 @@ impl AgentControl {
     }
 
     async fn leaf_only_wake_blocked(&self, child_thread_id: ThreadId) -> bool {
-        let Ok(state) = self.upgrade() else {
-            return false;
-        };
-        let Ok(child_thread) = state.get_thread(child_thread_id).await else {
-            return false;
-        };
-        let child_snapshot = child_thread.config_snapshot().await;
         matches!(
-            child_snapshot.agent_wake_descendant_policy,
-            AgentWakeDescendantPolicy::LeafOnly
+            self.parent_wake_subscriptions
+                .lock()
+                .await
+                .get(&child_thread_id)
+                .map(|subscription| subscription.wake_descendant_policy),
+            Some(AgentWakeDescendantPolicy::LeafOnly)
         ) && self.has_active_descendants(child_thread_id).await
     }
 
@@ -1475,6 +1490,7 @@ impl AgentControl {
         });
         let agent_metadata = AgentMetadata {
             agent_id: None,
+            parent_thread_id: Some(parent_thread_id),
             agent_path,
             agent_nickname,
             agent_role,
@@ -1488,6 +1504,7 @@ impl AgentControl {
         child_thread_id: ThreadId,
         session_source: Option<&SessionSource>,
         wake_parent_on_completion: bool,
+        wake_descendant_policy: AgentWakeDescendantPolicy,
     ) {
         let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id, ..
@@ -1516,6 +1533,7 @@ impl AgentControl {
             ParentWakeSubscription {
                 parent_thread_id: *parent_thread_id,
                 wake_parent_on_completion,
+                wake_descendant_policy,
                 child_reference,
                 child_agent_path,
                 completion_watcher_generation: 0,
@@ -1659,44 +1677,7 @@ impl AgentControl {
     async fn live_thread_spawn_children(
         &self,
     ) -> CodexResult<HashMap<ThreadId, Vec<(ThreadId, AgentMetadata)>>> {
-        let state = self.upgrade()?;
-        let mut children_by_parent = HashMap::<ThreadId, Vec<(ThreadId, AgentMetadata)>>::new();
-
-        for thread_id in state.list_thread_ids().await {
-            let Ok(thread) = state.get_thread(thread_id).await else {
-                continue;
-            };
-            let snapshot = thread.config_snapshot().await;
-            let Some(parent_thread_id) = thread_spawn_parent_thread_id(&snapshot.session_source)
-            else {
-                continue;
-            };
-            children_by_parent
-                .entry(parent_thread_id)
-                .or_default()
-                .push((
-                    thread_id,
-                    self.state
-                        .agent_metadata_for_thread(thread_id)
-                        .unwrap_or(AgentMetadata {
-                            agent_id: Some(thread_id),
-                            ..Default::default()
-                        }),
-                ));
-        }
-
-        for children in children_by_parent.values_mut() {
-            children.sort_by(|left, right| {
-                left.1
-                    .agent_path
-                    .as_deref()
-                    .unwrap_or_default()
-                    .cmp(right.1.agent_path.as_deref().unwrap_or_default())
-                    .then_with(|| left.0.to_string().cmp(&right.0.to_string()))
-            });
-        }
-
-        Ok(children_by_parent)
+        Ok(self.state.live_thread_spawn_children_by_parent())
     }
 
     async fn persist_thread_spawn_edge_for_source(
@@ -1815,6 +1796,24 @@ impl AgentControl {
             }
         }
         false
+    }
+
+    async fn read_wake_descendant_policy(
+        &self,
+        child_thread_id: ThreadId,
+    ) -> Option<AgentWakeDescendantPolicy> {
+        let Ok(state) = self.upgrade() else {
+            return None;
+        };
+        let Ok(child_thread) = state.get_thread(child_thread_id).await else {
+            return None;
+        };
+        Some(
+            child_thread
+                .config_snapshot()
+                .await
+                .agent_wake_descendant_policy,
+        )
     }
 }
 

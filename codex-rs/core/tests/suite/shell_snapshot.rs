@@ -1,4 +1,7 @@
 use anyhow::Result;
+use codex_core::shell::ShellType;
+#[cfg(target_os = "linux")]
+use codex_core::shell::get_shell;
 use codex_features::Feature;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -13,6 +16,7 @@ use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
+use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
@@ -20,8 +24,14 @@ use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
+#[cfg(target_os = "linux")]
+use tempfile::TempDir;
 use tokio::fs;
 use tokio::time::Duration;
 use tokio::time::Instant;
@@ -45,6 +55,35 @@ const POLICY_SUCCESS_OUTPUT: &str = "policy-after-snapshot";
 #[derive(Debug, Default)]
 struct SnapshotRunOptions {
     shell_environment_set: HashMap<String, String>,
+}
+
+#[cfg(target_os = "linux")]
+fn snapshot_test_builder() -> TestCodexBuilder {
+    let home = Arc::new(TempDir::new().expect("snapshot test home should be created"));
+    let shell_path = home.path().join("snapshot-shell");
+    std::fs::write(
+        &shell_path,
+        format!(
+            "#!/bin/sh\nexport HOME=\"{0}\"\nexport ZDOTDIR=\"{0}\"\nexec /bin/bash \"$@\"\n",
+            home.path().display()
+        ),
+    )
+    .expect("snapshot shell wrapper should be written");
+    let mut permissions = std::fs::metadata(&shell_path)
+        .expect("snapshot shell wrapper metadata should load")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&shell_path, permissions)
+        .expect("snapshot shell wrapper should be executable");
+
+    let shell = get_shell(ShellType::Bash, Some(&shell_path))
+        .expect("bash should be available for shell snapshot tests");
+    test_codex().with_home(home).with_user_shell(shell)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn snapshot_test_builder() -> TestCodexBuilder {
+    test_codex()
 }
 
 async fn wait_for_snapshot(codex_home: &Path) -> Result<PathBuf> {
@@ -117,7 +156,7 @@ async fn run_snapshot_command_with_options(
     let SnapshotRunOptions {
         shell_environment_set,
     } = options;
-    let builder = test_codex().with_config(move |config| {
+    let builder = snapshot_test_builder().with_config(move |config| {
         config.use_experimental_unified_exec_tool = true;
         config
             .features
@@ -213,7 +252,7 @@ async fn run_shell_command_snapshot_with_options(
     let SnapshotRunOptions {
         shell_environment_set,
     } = options;
-    let builder = test_codex().with_config(move |config| {
+    let builder = snapshot_test_builder().with_config(move |config| {
         config
             .features
             .enable(Feature::ShellSnapshot)
@@ -410,7 +449,7 @@ async fn linux_shell_command_uses_shell_snapshot() -> Result<()> {
 #[cfg_attr(target_os = "windows", ignore)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shell_command_snapshot_preserves_shell_environment_policy_set() -> Result<()> {
-    let builder = test_codex().with_config(|config| {
+    let builder = snapshot_test_builder().with_config(|config| {
         config
             .features
             .enable(Feature::ShellSnapshot)
@@ -459,7 +498,7 @@ async fn shell_command_snapshot_preserves_shell_environment_policy_set() -> Resu
 #[cfg_attr(not(target_os = "linux"), ignore)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn linux_unified_exec_snapshot_preserves_shell_environment_policy_set() -> Result<()> {
-    let builder = test_codex().with_config(|config| {
+    let builder = snapshot_test_builder().with_config(|config| {
         config.use_experimental_unified_exec_tool = true;
         config
             .features
@@ -513,7 +552,7 @@ async fn linux_unified_exec_snapshot_preserves_shell_environment_policy_set() ->
 #[cfg_attr(target_os = "windows", ignore)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
-    let builder = test_codex().with_config(|config| {
+    let builder = snapshot_test_builder().with_config(|config| {
         config
             .features
             .enable(Feature::ShellSnapshot)
@@ -614,7 +653,7 @@ async fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
 #[cfg_attr(target_os = "windows", ignore)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shell_snapshot_deleted_after_shutdown_with_skills() -> Result<()> {
-    let builder = test_codex().with_config(|config| {
+    let builder = snapshot_test_builder().with_config(|config| {
         config
             .features
             .enable(Feature::ShellSnapshot)

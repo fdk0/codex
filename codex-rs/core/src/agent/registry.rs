@@ -32,9 +32,10 @@ struct ActiveAgents {
     nickname_reset_count: usize,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AgentMetadata {
     pub(crate) agent_id: Option<ThreadId>,
+    pub(crate) parent_thread_id: Option<ThreadId>,
     pub(crate) agent_path: Option<AgentPath>,
     pub(crate) agent_nickname: Option<String>,
     pub(crate) agent_role: Option<String>,
@@ -133,6 +134,44 @@ impl AgentRegistry {
             });
     }
 
+    pub(crate) fn upsert_thread_spawn_source_metadata(
+        &self,
+        thread_id: ThreadId,
+        session_source: &SessionSource,
+    ) {
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            agent_path,
+            ..
+        }) = session_source
+        else {
+            return;
+        };
+
+        let mut active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = agent_path
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("thread:{thread_id}"));
+        let metadata = active_agents
+            .agent_tree
+            .entry(key)
+            .or_insert_with(|| AgentMetadata {
+                agent_id: Some(thread_id),
+                parent_thread_id: Some(*parent_thread_id),
+                agent_path: agent_path.clone(),
+                ..Default::default()
+            });
+        metadata.agent_id = Some(thread_id);
+        metadata.parent_thread_id = Some(*parent_thread_id);
+        if metadata.agent_path.is_none() {
+            metadata.agent_path = agent_path.clone();
+        }
+    }
+
     pub(crate) fn agent_id_for_path(&self, agent_path: &AgentPath) -> Option<ThreadId> {
         self.active_agents
             .lock()
@@ -164,6 +203,38 @@ impl AgentRegistry {
             })
             .cloned()
             .collect()
+    }
+
+    pub(crate) fn live_thread_spawn_children_by_parent(
+        &self,
+    ) -> HashMap<ThreadId, Vec<(ThreadId, AgentMetadata)>> {
+        let mut children_by_parent = HashMap::<ThreadId, Vec<(ThreadId, AgentMetadata)>>::new();
+
+        for metadata in self.live_agents() {
+            let Some(thread_id) = metadata.agent_id else {
+                continue;
+            };
+            let Some(parent_thread_id) = metadata.parent_thread_id else {
+                continue;
+            };
+            children_by_parent
+                .entry(parent_thread_id)
+                .or_default()
+                .push((thread_id, metadata));
+        }
+
+        for children in children_by_parent.values_mut() {
+            children.sort_by(|left, right| {
+                left.1
+                    .agent_path
+                    .as_deref()
+                    .unwrap_or_default()
+                    .cmp(right.1.agent_path.as_deref().unwrap_or_default())
+                    .then_with(|| left.0.to_string().cmp(&right.0.to_string()))
+            });
+        }
+
+        children_by_parent
     }
 
     pub(crate) fn update_last_task_message(&self, thread_id: ThreadId, last_task_message: String) {

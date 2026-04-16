@@ -1269,6 +1269,7 @@ async fn completion_watcher_wakes_root_parent_for_legacy_child() {
             child_thread_id,
             Some(&session_source),
             /*wake_parent_on_completion*/ false,
+            AgentWakeDescendantPolicy::Immediate,
         )
         .await;
     harness
@@ -1328,6 +1329,7 @@ async fn completion_watcher_rearm_for_legacy_child_marks_current_status_seen() {
             child_thread_id,
             Some(&session_source),
             /*wake_parent_on_completion*/ true,
+            AgentWakeDescendantPolicy::Immediate,
         )
         .await;
     harness
@@ -1635,6 +1637,7 @@ async fn multi_agent_v2_completion_triggers_turn_when_child_is_wake_enabled() {
             tester_thread_id,
             Some(&session_source),
             /*wake_parent_on_completion*/ true,
+            AgentWakeDescendantPolicy::Immediate,
         )
         .await;
     harness
@@ -1754,6 +1757,7 @@ async fn trigger_turn_inter_agent_message_rearms_completion_watcher_for_reused_c
             tester_thread_id,
             Some(&session_source),
             /*wake_parent_on_completion*/ true,
+            AgentWakeDescendantPolicy::Immediate,
         )
         .await;
     harness
@@ -1909,6 +1913,7 @@ async fn leaf_only_completion_suppresses_parent_wake_while_descendant_is_active(
             tester_thread_id,
             Some(&tester_source),
             /*wake_parent_on_completion*/ true,
+            AgentWakeDescendantPolicy::LeafOnly,
         )
         .await;
     harness
@@ -2004,6 +2009,7 @@ async fn leaf_only_completion_wakes_parent_after_descendants_finish() {
             dispatcher_thread_id,
             Some(&dispatcher_source),
             /*wake_parent_on_completion*/ true,
+            AgentWakeDescendantPolicy::LeafOnly,
         )
         .await;
     harness
@@ -2155,6 +2161,7 @@ async fn leaf_only_reused_child_wakes_parent_only_once_after_descendants_finish(
             dispatcher_thread_id,
             Some(&dispatcher_source),
             /*wake_parent_on_completion*/ true,
+            AgentWakeDescendantPolicy::LeafOnly,
         )
         .await;
     harness
@@ -2340,6 +2347,7 @@ async fn leaf_only_does_not_wake_parent_with_stale_child_status_when_descendant_
             dispatcher_thread_id,
             Some(&dispatcher_source),
             /*wake_parent_on_completion*/ true,
+            AgentWakeDescendantPolicy::LeafOnly,
         )
         .await;
     harness
@@ -2386,6 +2394,7 @@ async fn leaf_only_does_not_wake_parent_with_stale_child_status_when_descendant_
             review_thread_id,
             Some(&review_source),
             /*wake_parent_on_completion*/ true,
+            AgentWakeDescendantPolicy::LeafOnly,
         )
         .await;
     harness

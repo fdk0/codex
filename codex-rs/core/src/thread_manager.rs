@@ -932,6 +932,8 @@ impl ThreadManagerState {
         parent_trace: Option<W3cTraceContext>,
         user_shell_override: Option<crate::shell::Shell>,
     ) -> CodexResult<NewThread> {
+        let registration_source = session_source.clone();
+        let agent_control_for_registration = agent_control.clone();
         let environment = self
             .environment_manager
             .current()
@@ -974,8 +976,12 @@ impl ThreadManagerState {
             analytics_events_client: self.analytics_events_client.clone(),
         })
         .await?;
-        self.finalize_thread_spawn(codex, thread_id, watch_registration)
-            .await
+        let new_thread = self
+            .finalize_thread_spawn(codex, thread_id, watch_registration)
+            .await?;
+        agent_control_for_registration
+            .register_live_thread_source(new_thread.thread_id, &registration_source);
+        Ok(new_thread)
     }
 
     async fn finalize_thread_spawn(
