@@ -83,7 +83,7 @@
               "$ref": "#/definitions/AgentWakeDescendantPolicy"
             }
           ],
-          "default": "immediate",
+          "default": "leaf_only",
           "description": "Whether a child may wake its parent before all descendants finish."
         },
         "wake_parent_on_completion_default": {

@@ -1791,7 +1791,7 @@ impl Config {
             .agents
             .as_ref()
             .and_then(|agents| agents.wake_parent_on_completion_default)
-            .unwrap_or(false);
+            .unwrap_or(true);
         let agent_wait_on_wake_enabled_behavior = cfg
             .agents
             .as_ref()

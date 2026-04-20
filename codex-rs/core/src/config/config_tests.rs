@@ -1955,6 +1955,28 @@ fn load_config_applies_agent_wake_policies() -> std::io::Result<()> {
 }
 
 #[test]
+fn load_config_defaults_agent_wake_policies_when_omitted() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        codex_home.path().to_path_buf().abs(),
+    )?;
+
+    assert_eq!(config.agent_wake_parent_on_completion_default, true);
+    assert_eq!(
+        config.agent_wait_on_wake_enabled_behavior,
+        AgentWaitOnWakeEnabledBehavior::Allow
+    );
+    assert_eq!(
+        config.agent_wake_descendant_policy,
+        AgentWakeDescendantPolicy::LeafOnly
+    );
+
+    Ok(())
+}
+
+#[test]
 fn config_honors_explicit_file_oauth_store_mode() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
@@ -4649,9 +4671,9 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             agent_roles: BTreeMap::new(),
             memories: MemoriesConfig::default(),
             agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
-            agent_wake_parent_on_completion_default: false,
+            agent_wake_parent_on_completion_default: true,
             agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Allow,
-            agent_wake_descendant_policy: AgentWakeDescendantPolicy::Immediate,
+            agent_wake_descendant_policy: AgentWakeDescendantPolicy::LeafOnly,
             codex_home: fixture.codex_home(),
             sqlite_home: fixture.codex_home().to_path_buf(),
             log_dir: fixture.codex_home().join("log").to_path_buf(),
@@ -4801,9 +4823,9 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         agent_roles: BTreeMap::new(),
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
-        agent_wake_parent_on_completion_default: false,
+        agent_wake_parent_on_completion_default: true,
         agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Allow,
-        agent_wake_descendant_policy: AgentWakeDescendantPolicy::Immediate,
+        agent_wake_descendant_policy: AgentWakeDescendantPolicy::LeafOnly,
         codex_home: fixture.codex_home(),
         sqlite_home: fixture.codex_home().to_path_buf(),
         log_dir: fixture.codex_home().join("log").to_path_buf(),
@@ -4951,9 +4973,9 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         agent_roles: BTreeMap::new(),
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
-        agent_wake_parent_on_completion_default: false,
+        agent_wake_parent_on_completion_default: true,
         agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Allow,
-        agent_wake_descendant_policy: AgentWakeDescendantPolicy::Immediate,
+        agent_wake_descendant_policy: AgentWakeDescendantPolicy::LeafOnly,
         codex_home: fixture.codex_home(),
         sqlite_home: fixture.codex_home().to_path_buf(),
         log_dir: fixture.codex_home().join("log").to_path_buf(),
@@ -5087,9 +5109,9 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         agent_roles: BTreeMap::new(),
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
-        agent_wake_parent_on_completion_default: false,
+        agent_wake_parent_on_completion_default: true,
         agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Allow,
-        agent_wake_descendant_policy: AgentWakeDescendantPolicy::Immediate,
+        agent_wake_descendant_policy: AgentWakeDescendantPolicy::LeafOnly,
         codex_home: fixture.codex_home(),
         sqlite_home: fixture.codex_home().to_path_buf(),
         log_dir: fixture.codex_home().join("log").to_path_buf(),
