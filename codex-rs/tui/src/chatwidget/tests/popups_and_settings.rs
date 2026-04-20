@@ -105,6 +105,22 @@ async fn plugins_popup_snapshot_shows_all_marketplaces_and_sorts_installed_then_
     chat.set_feature_enabled(Feature::Plugins, /*enabled*/ true);
 
     let mut response = plugins_test_response(vec![
+        PluginMarketplaceEntry {
+            name: "openai-bundled".to_string(),
+            path: plugins_test_absolute_path("marketplaces/openai-bundled"),
+            interface: Some(MarketplaceInterface {
+                display_name: Some("OpenAI Bundled".to_string()),
+            }),
+            plugins: vec![plugins_test_summary(
+                "computer-use@openai-bundled",
+                "computer-use",
+                Some("Computer Use"),
+                Some("Operate the computer UI."),
+                /*installed*/ false,
+                /*enabled*/ true,
+                PluginInstallPolicy::Available,
+            )],
+        },
         plugins_test_curated_marketplace(vec![
             plugins_test_summary(
                 "plugin-bravo",
@@ -149,6 +165,10 @@ async fn plugins_popup_snapshot_shows_all_marketplaces_and_sorts_installed_then_
     let popup = render_loaded_plugins_popup(&mut chat, response);
     assert_chatwidget_snapshot!("plugins_popup_curated_marketplace", popup);
     assert!(
+        popup.contains("Computer Use"),
+        "expected /plugins to include bundled marketplaces, got:\n{popup}"
+    );
+    assert!(
         popup.contains("Hidden Repo Plugin"),
         "expected /plugins to include non-curated marketplaces, got:\n{popup}"
     );
@@ -156,6 +176,8 @@ async fn plugins_popup_snapshot_shows_all_marketplaces_and_sorts_installed_then_
         plugins_test_popup_row_position(&popup, "Alpha Sync")
             < plugins_test_popup_row_position(&popup, "Bravo Search")
             && plugins_test_popup_row_position(&popup, "Bravo Search")
+                < plugins_test_popup_row_position(&popup, "Computer Use")
+            && plugins_test_popup_row_position(&popup, "Computer Use")
                 < plugins_test_popup_row_position(&popup, "Hidden Repo Plugin")
             && plugins_test_popup_row_position(&popup, "Hidden Repo Plugin")
                 < plugins_test_popup_row_position(&popup, "Starter"),
