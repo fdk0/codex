@@ -36,8 +36,8 @@ pub const DEFAULT_MEMORIES_MAX_UNUSED_DAYS: i64 = 30;
 #[serde(rename_all = "snake_case")]
 pub enum AgentWaitOnWakeEnabledBehavior {
     #[default]
-    Allow,
     Reject,
+    Allow,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]

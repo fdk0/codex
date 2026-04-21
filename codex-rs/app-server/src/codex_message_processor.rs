@@ -9795,7 +9795,7 @@ mod tests {
             session_source: SessionSource::Cli,
             agent_wake_parent_on_completion_default: true,
             agent_wait_on_wake_enabled_behavior:
-                codex_core::config::types::AgentWaitOnWakeEnabledBehavior::Allow,
+                codex_core::config::types::AgentWaitOnWakeEnabledBehavior::Reject,
             agent_wake_descendant_policy:
                 codex_core::config::types::AgentWakeDescendantPolicy::LeafOnly,
         };

@@ -1966,7 +1966,7 @@ fn load_config_defaults_agent_wake_policies_when_omitted() -> std::io::Result<()
     assert_eq!(config.agent_wake_parent_on_completion_default, true);
     assert_eq!(
         config.agent_wait_on_wake_enabled_behavior,
-        AgentWaitOnWakeEnabledBehavior::Allow
+        AgentWaitOnWakeEnabledBehavior::Reject
     );
     assert_eq!(
         config.agent_wake_descendant_policy,
@@ -4658,7 +4658,7 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             mcp_servers: Constrained::allow_any(HashMap::new()),
             mcp_oauth_credentials_store_mode: resolve_mcp_oauth_credentials_store_mode(
                 Default::default(),
-                LOCAL_DEV_BUILD_VERSION,
+                env!("CARGO_PKG_VERSION"),
             ),
             mcp_oauth_callback_port: None,
             mcp_oauth_callback_url: None,
@@ -4672,7 +4672,7 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             memories: MemoriesConfig::default(),
             agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
             agent_wake_parent_on_completion_default: true,
-            agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Allow,
+            agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Reject,
             agent_wake_descendant_policy: AgentWakeDescendantPolicy::LeafOnly,
             codex_home: fixture.codex_home(),
             sqlite_home: fixture.codex_home().to_path_buf(),
@@ -4810,7 +4810,7 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         mcp_servers: Constrained::allow_any(HashMap::new()),
         mcp_oauth_credentials_store_mode: resolve_mcp_oauth_credentials_store_mode(
             Default::default(),
-            LOCAL_DEV_BUILD_VERSION,
+            env!("CARGO_PKG_VERSION"),
         ),
         mcp_oauth_callback_port: None,
         mcp_oauth_callback_url: None,
@@ -4824,7 +4824,7 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
         agent_wake_parent_on_completion_default: true,
-        agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Allow,
+        agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Reject,
         agent_wake_descendant_policy: AgentWakeDescendantPolicy::LeafOnly,
         codex_home: fixture.codex_home(),
         sqlite_home: fixture.codex_home().to_path_buf(),
@@ -4960,7 +4960,7 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         mcp_servers: Constrained::allow_any(HashMap::new()),
         mcp_oauth_credentials_store_mode: resolve_mcp_oauth_credentials_store_mode(
             Default::default(),
-            LOCAL_DEV_BUILD_VERSION,
+            env!("CARGO_PKG_VERSION"),
         ),
         mcp_oauth_callback_port: None,
         mcp_oauth_callback_url: None,
@@ -4974,7 +4974,7 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
         agent_wake_parent_on_completion_default: true,
-        agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Allow,
+        agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Reject,
         agent_wake_descendant_policy: AgentWakeDescendantPolicy::LeafOnly,
         codex_home: fixture.codex_home(),
         sqlite_home: fixture.codex_home().to_path_buf(),
@@ -5096,7 +5096,7 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         mcp_servers: Constrained::allow_any(HashMap::new()),
         mcp_oauth_credentials_store_mode: resolve_mcp_oauth_credentials_store_mode(
             Default::default(),
-            LOCAL_DEV_BUILD_VERSION,
+            env!("CARGO_PKG_VERSION"),
         ),
         mcp_oauth_callback_port: None,
         mcp_oauth_callback_url: None,
@@ -5110,7 +5110,7 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
         agent_wake_parent_on_completion_default: true,
-        agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Allow,
+        agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::Reject,
         agent_wake_descendant_policy: AgentWakeDescendantPolicy::LeafOnly,
         codex_home: fixture.codex_home(),
         sqlite_home: fixture.codex_home().to_path_buf(),

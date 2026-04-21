@@ -4,7 +4,6 @@ use crate::ThreadManager;
 use crate::codex::make_session_and_context;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
-use crate::config::types::AgentWaitOnWakeEnabledBehavior;
 use crate::function_tool::FunctionCallError;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::state::TaskKind;
@@ -2653,18 +2652,15 @@ async fn wait_agent_rejects_empty_targets() {
 }
 
 #[tokio::test]
-async fn wait_agent_rejects_wake_enabled_child_agents_when_configured() {
+async fn wait_agent_rejects_wake_enabled_child_agents_by_default() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         agent_id: String,
     }
 
-    let (mut session, mut turn) = make_session_and_context().await;
+    let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
-    let mut config = (*turn.config).clone();
-    config.agent_wait_on_wake_enabled_behavior = AgentWaitOnWakeEnabledBehavior::Reject;
-    turn.config = Arc::new(config);
     let session = Arc::new(session);
     let turn = Arc::new(turn);
 
@@ -2741,7 +2737,7 @@ async fn multi_agent_v2_wait_agent_accepts_targets_argument() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_wait_agent_rejects_wake_enabled_child_agents_when_configured() {
+async fn multi_agent_v2_wait_agent_rejects_wake_enabled_child_agents_by_default() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -2750,7 +2746,6 @@ async fn multi_agent_v2_wait_agent_rejects_wake_enabled_child_agents_when_config
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
-    config.agent_wait_on_wake_enabled_behavior = AgentWaitOnWakeEnabledBehavior::Reject;
     turn.config = Arc::new(config);
     let session = Arc::new(session);
     let turn = Arc::new(turn);
