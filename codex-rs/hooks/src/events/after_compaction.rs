@@ -244,6 +244,7 @@ mod tests {
     use std::path::PathBuf;
 
     use codex_protocol::protocol::HookEventName;
+    use codex_protocol::protocol::HookSource;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
     use pretty_assertions::assert_eq;
@@ -264,6 +265,7 @@ mod tests {
             timeout_sec: 5,
             status_message: None,
             source_path: test_path_buf("/tmp/hooks.json").abs(),
+            source: HookSource::User,
             display_order: 0,
         }
     }

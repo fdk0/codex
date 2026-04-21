@@ -125,6 +125,20 @@ impl ThreadHistoryBuilder {
             .or_else(|| self.turns.last().cloned())
     }
 
+    /// Returns the index of the active turn snapshot within the finished turn list.
+    ///
+    /// When a turn is still open, this is the index it will occupy after
+    /// `finish`. When no turn is open, it is the index of the last finished turn.
+    pub fn active_turn_position(&self) -> Option<usize> {
+        if self.current_turn.is_some() {
+            Some(self.turns.len())
+        } else if self.turns.is_empty() {
+            None
+        } else {
+            Some(self.turns.len() - 1)
+        }
+    }
+
     pub fn has_active_turn(&self) -> bool {
         self.current_turn.is_some()
     }
@@ -221,7 +235,9 @@ impl ThreadHistoryBuilder {
             RolloutItem::EventMsg(event) => self.handle_event(event),
             RolloutItem::Compacted(payload) => self.handle_compacted(payload),
             RolloutItem::ResponseItem(item) => self.handle_response_item(item),
-            RolloutItem::TurnContext(_) | RolloutItem::SessionMeta(_) => {}
+            RolloutItem::TurnContext(_)
+            | RolloutItem::SessionMeta(_)
+            | RolloutItem::SessionState(_) => {}
         }
     }
 
@@ -457,6 +473,7 @@ impl ThreadHistoryBuilder {
     ) {
         let item = ThreadItem::DynamicToolCall {
             id: payload.call_id.clone(),
+            namespace: payload.namespace.clone(),
             tool: payload.tool.clone(),
             arguments: payload.arguments.clone(),
             status: DynamicToolCallStatus::InProgress,
@@ -480,6 +497,7 @@ impl ThreadHistoryBuilder {
         let duration_ms = i64::try_from(payload.duration.as_millis()).ok();
         let item = ThreadItem::DynamicToolCall {
             id: payload.call_id.clone(),
+            namespace: payload.namespace.clone(),
             tool: payload.tool.clone(),
             arguments: payload.arguments.clone(),
             status,
@@ -505,6 +523,7 @@ impl ThreadHistoryBuilder {
                 .arguments
                 .clone()
                 .unwrap_or(serde_json::Value::Null),
+            mcp_app_resource_uri: payload.mcp_app_resource_uri.clone(),
             result: None,
             error: None,
             duration_ms: None,
@@ -521,11 +540,11 @@ impl ThreadHistoryBuilder {
         let duration_ms = i64::try_from(payload.duration.as_millis()).ok();
         let (result, error) = match &payload.result {
             Ok(value) => (
-                Some(McpToolCallResult {
+                Some(Box::new(McpToolCallResult {
                     content: value.content.clone(),
                     structured_content: value.structured_content.clone(),
                     meta: value.meta.clone(),
-                }),
+                })),
                 None,
             ),
             Err(message) => (
@@ -545,6 +564,7 @@ impl ThreadHistoryBuilder {
                 .arguments
                 .clone()
                 .unwrap_or(serde_json::Value::Null),
+            mcp_app_resource_uri: payload.mcp_app_resource_uri.clone(),
             result,
             error,
             duration_ms,
@@ -1041,8 +1061,15 @@ impl ThreadHistoryBuilder {
     }
 
     fn new_turn(&mut self, id: Option<String>) -> PendingTurn {
+        let id = id.unwrap_or_else(|| {
+            if self.next_rollout_index == 0 {
+                Uuid::now_v7().to_string()
+            } else {
+                format!("rollout-{}", self.current_rollout_index)
+            }
+        });
         PendingTurn {
-            id: id.unwrap_or_else(|| Uuid::now_v7().to_string()),
+            id,
             items: Vec::new(),
             error: None,
             status: TurnStatus::Completed,
@@ -1699,8 +1726,8 @@ mod tests {
             .collect::<Vec<_>>();
         let turns = build_turns_from_rollout_items(&items);
         assert_eq!(turns.len(), 2);
-        assert!(Uuid::parse_str(&turns[0].id).is_ok());
-        assert!(Uuid::parse_str(&turns[1].id).is_ok());
+        assert_eq!(turns[0].id, "rollout-0");
+        assert_eq!(turns[1].id, "rollout-5");
         assert_ne!(turns[0].id, turns[1].id);
         assert_eq!(turns[0].status, TurnStatus::Completed);
         assert_eq!(turns[1].status, TurnStatus::Completed);
@@ -1884,6 +1911,7 @@ mod tests {
                     tool: "lookup".into(),
                     arguments: Some(serde_json::json!({"id":"123"})),
                 },
+                mcp_app_resource_uri: None,
                 duration: Duration::from_millis(8),
                 result: Err("boom".into()),
             }),
@@ -1932,6 +1960,7 @@ mod tests {
                 tool: "lookup".into(),
                 status: McpToolCallStatus::Failed,
                 arguments: serde_json::json!({"id":"123"}),
+                mcp_app_resource_uri: None,
                 result: None,
                 error: Some(McpToolCallError {
                     message: "boom".into(),
@@ -1957,6 +1986,7 @@ mod tests {
                     tool: "lookup".into(),
                     arguments: Some(serde_json::json!({"id":"123"})),
                 },
+                mcp_app_resource_uri: Some("ui://widget/lookup.html".into()),
                 duration: Duration::from_millis(8),
                 result: Ok(CallToolResult {
                     content: vec![serde_json::json!({
@@ -1986,7 +2016,8 @@ mod tests {
                 tool: "lookup".into(),
                 status: McpToolCallStatus::Completed,
                 arguments: serde_json::json!({"id":"123"}),
-                result: Some(McpToolCallResult {
+                mcp_app_resource_uri: Some("ui://widget/lookup.html".into()),
+                result: Some(Box::new(McpToolCallResult {
                     content: vec![serde_json::json!({
                         "type": "text",
                         "text": "result"
@@ -1995,7 +2026,7 @@ mod tests {
                     meta: Some(serde_json::json!({
                         "ui/resourceUri": "ui://widget/lookup.html"
                     })),
-                }),
+                })),
                 error: None,
                 duration_ms: Some(8),
             }
@@ -2021,6 +2052,7 @@ mod tests {
                 codex_protocol::dynamic_tools::DynamicToolCallRequest {
                     call_id: "dyn-1".into(),
                     turn_id: "turn-1".into(),
+                    namespace: Some("codex_app".into()),
                     tool: "lookup_ticket".into(),
                     arguments: serde_json::json!({"id":"ABC-123"}),
                 },
@@ -2028,6 +2060,7 @@ mod tests {
             EventMsg::DynamicToolCallResponse(DynamicToolCallResponseEvent {
                 call_id: "dyn-1".into(),
                 turn_id: "turn-1".into(),
+                namespace: Some("codex_app".into()),
                 tool: "lookup_ticket".into(),
                 arguments: serde_json::json!({"id":"ABC-123"}),
                 content_items: vec![CoreDynamicToolCallOutputContentItem::InputText {
@@ -2050,6 +2083,7 @@ mod tests {
             turns[0].items[1],
             ThreadItem::DynamicToolCall {
                 id: "dyn-1".into(),
+                namespace: Some("codex_app".into()),
                 tool: "lookup_ticket".into(),
                 arguments: serde_json::json!({"id":"ABC-123"}),
                 status: DynamicToolCallStatus::Completed,
@@ -3142,6 +3176,7 @@ mod tests {
                     execution_mode: HookExecutionMode::Sync,
                     scope: HookScope::Turn,
                     source_path: PathBuf::from("/tmp/hooks.json").abs(),
+                    source: codex_protocol::protocol::HookSource::User,
                     display_order: 0,
                     status: HookRunStatus::Completed,
                     status_message: Some("loaded guards".into()),
@@ -3176,6 +3211,7 @@ mod tests {
                     execution_mode: crate::protocol::v2::HookExecutionMode::Sync,
                     scope: crate::protocol::v2::HookScope::Turn,
                     source_path: PathBuf::from("/tmp/hooks.json").abs(),
+                    source: crate::protocol::v2::HookSource::User,
                     display_order: 0,
                     status: crate::protocol::v2::HookRunStatus::Completed,
                     status_message: Some("loaded guards".into()),

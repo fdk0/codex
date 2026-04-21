@@ -2,12 +2,13 @@ use super::*;
 use crate::CodexThread;
 use crate::ThreadManager;
 use crate::agent::agent_status_from_event;
-use crate::codex::TurnContext;
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::ConfigBuilder;
 use crate::config::types::AgentWakeDescendantPolicy;
-use crate::contextual_user_message::SUBAGENT_NOTIFICATION_OPEN_TAG;
+use crate::context::ContextualUserFragment;
+use crate::context::SubagentNotification;
+use crate::session::turn_context::TurnContext;
 use assert_matches::assert_matches;
 use codex_features::Feature;
 use codex_login::CodexAuth;
@@ -133,7 +134,7 @@ fn has_subagent_notification(history_items: &[ResponseItem]) -> bool {
         }
         content.iter().any(|content_item| match content_item {
             ContentItem::InputText { text } | ContentItem::OutputText { text } => {
-                text.contains(SUBAGENT_NOTIFICATION_OPEN_TAG)
+                SubagentNotification::matches_text(text)
             }
             ContentItem::InputImage { .. } => false,
         })
@@ -194,7 +195,9 @@ async fn wait_for_subagent_notification(parent_thread: &Arc<CodexThread>) -> boo
             sleep(Duration::from_millis(25)).await;
         }
     };
-    timeout(Duration::from_secs(2), wait).await.is_ok()
+    // CI can take several seconds to schedule the detached completion watcher,
+    // especially on slower Windows runners.
+    timeout(Duration::from_secs(10), wait).await.is_ok()
 }
 
 async fn wait_for_turn_context(thread: &Arc<CodexThread>, sub_id: &str) -> Arc<TurnContext> {
@@ -1831,7 +1834,7 @@ async fn trigger_turn_inter_agent_message_rearms_completion_watcher_for_reused_c
         .await
         .expect("trigger_turn follow-up should succeed for completed child");
 
-    let second_turn = wait_for_turn_context(&tester_thread, &submission_id).await;
+    let second_turn: Arc<TurnContext> = wait_for_turn_context(&tester_thread, &submission_id).await;
     tester_thread
         .codex
         .session
@@ -2254,7 +2257,8 @@ async fn leaf_only_reused_child_wakes_parent_only_once_after_descendants_finish(
         .await
         .expect("worker shutdown should succeed");
 
-    let second_turn = wait_for_turn_context(&dispatcher_thread, &reuse_submission_id).await;
+    let second_turn: Arc<TurnContext> =
+        wait_for_turn_context(&dispatcher_thread, &reuse_submission_id).await;
     dispatcher_thread
         .codex
         .session
@@ -2483,7 +2487,7 @@ async fn leaf_only_does_not_wake_parent_with_stale_child_status_when_descendant_
         )
         .await;
 
-    let second_turn = wait_for_any_active_turn_context(&dispatcher_thread).await;
+    let second_turn: Arc<TurnContext> = wait_for_any_active_turn_context(&dispatcher_thread).await;
     sleep(Duration::from_millis(150)).await;
 
     let stale_wake_count = harness

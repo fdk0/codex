@@ -34,6 +34,7 @@ codex-arg0 = { workspace = true }
 codex-cloud-requirements = { workspace = true }
 codex-config = { workspace = true }
 codex-core = { workspace = true }
+codex-core-plugins = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-features = { workspace = true }
 codex-git-utils = { workspace = true }
@@ -96,6 +97,7 @@ axum = { workspace = true, default-features = false, features = [
     "tokio",
 ] }
 core_test_support = { workspace = true }
+codex-model-provider-info = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }

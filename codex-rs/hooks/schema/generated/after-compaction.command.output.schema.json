@@ -21,6 +21,7 @@
     "HookEventNameWire": {
       "enum": [
         "PreToolUse",
+        "PermissionRequest",
         "PostToolUse",
         "SessionStart",
         "AfterCompaction",

@@ -22,8 +22,9 @@ use codex_rmcp_client::ElicitationResponse;
 use rmcp::model::RequestId;
 use tokio::sync::oneshot;
 
-use crate::codex::TurnContext;
-use crate::contextual_user_message::SUBAGENT_NOTIFICATION_FRAGMENT;
+use crate::context::ContextualUserFragment;
+use crate::context::SubagentNotification;
+use crate::session::turn_context::TurnContext;
 use crate::tasks::AnySessionTask;
 
 /// Metadata about the currently running turn.
@@ -108,6 +109,7 @@ pub(crate) struct TurnState {
     mailbox_delivery_phase: MailboxDeliveryPhase,
     granted_permissions: Option<PermissionProfile>,
     pub(crate) tool_calls: u64,
+    pub(crate) has_memory_citation: bool,
     pub(crate) token_usage_at_turn_start: TokenUsage,
 }
 
@@ -269,7 +271,7 @@ fn is_inter_agent_pending_input(item: &ResponseInputItem) -> bool {
     matches!(
         content.as_slice(),
         [ContentItem::InputText { text }]
-            if SUBAGENT_NOTIFICATION_FRAGMENT.matches_text(text)
+            if SubagentNotification::matches_text(text)
     )
 }
 

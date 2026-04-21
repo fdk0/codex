@@ -7,11 +7,14 @@ pub(crate) mod schema_loader;
 
 use codex_config::ConfigLayerStack;
 use codex_protocol::protocol::HookRunSummary;
+use codex_protocol::protocol::HookSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 use crate::engine::config::HookConditions;
 use crate::events::after_compaction::AfterCompactionOutcome;
 use crate::events::after_compaction::AfterCompactionRequest;
+use crate::events::permission_request::PermissionRequestOutcome;
+use crate::events::permission_request::PermissionRequestRequest;
 use crate::events::post_tool_use::PostToolUseOutcome;
 use crate::events::post_tool_use::PostToolUseRequest;
 use crate::events::pre_tool_use::PreToolUseOutcome;
@@ -38,6 +41,7 @@ pub(crate) struct ConfiguredHandler {
     pub timeout_sec: u64,
     pub status_message: Option<String>,
     pub source_path: AbsolutePathBuf,
+    pub source: HookSource,
     pub display_order: i64,
 }
 
@@ -54,6 +58,7 @@ impl ConfiguredHandler {
     fn event_name_label(&self) -> &'static str {
         match self.event_name {
             codex_protocol::protocol::HookEventName::PreToolUse => "pre-tool-use",
+            codex_protocol::protocol::HookEventName::PermissionRequest => "permission-request",
             codex_protocol::protocol::HookEventName::PostToolUse => "post-tool-use",
             codex_protocol::protocol::HookEventName::SessionStart => "session-start",
             codex_protocol::protocol::HookEventName::AfterCompaction => "after-compaction",
@@ -111,6 +116,13 @@ impl ClaudeHooksEngine {
         crate::events::after_compaction::preview(&self.handlers, request)
     }
 
+    pub(crate) fn preview_permission_request(
+        &self,
+        request: &PermissionRequestRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::permission_request::preview(&self.handlers, request)
+    }
+
     pub(crate) fn preview_post_tool_use(
         &self,
         request: &PostToolUseRequest,
@@ -135,6 +147,13 @@ impl ClaudeHooksEngine {
         request: AfterCompactionRequest,
     ) -> AfterCompactionOutcome {
         crate::events::after_compaction::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) async fn run_permission_request(
+        &self,
+        request: PermissionRequestRequest,
+    ) -> PermissionRequestOutcome {
+        crate::events::permission_request::run(&self.handlers, &self.shell, request).await
     }
 
     pub(crate) async fn run_post_tool_use(

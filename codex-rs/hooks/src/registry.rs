@@ -5,6 +5,8 @@ use crate::engine::ClaudeHooksEngine;
 use crate::engine::CommandShell;
 use crate::events::after_compaction::AfterCompactionOutcome;
 use crate::events::after_compaction::AfterCompactionRequest;
+use crate::events::permission_request::PermissionRequestOutcome;
+use crate::events::permission_request::PermissionRequestRequest;
 use crate::events::post_tool_use::PostToolUseOutcome;
 use crate::events::post_tool_use::PostToolUseRequest;
 use crate::events::pre_tool_use::PreToolUseOutcome;
@@ -105,6 +107,13 @@ impl Hooks {
         self.engine.preview_after_compaction(request)
     }
 
+    pub fn preview_permission_request(
+        &self,
+        request: &PermissionRequestRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_permission_request(request)
+    }
+
     pub fn preview_post_tool_use(
         &self,
         request: &PostToolUseRequest,
@@ -132,6 +141,13 @@ impl Hooks {
         request: AfterCompactionRequest,
     ) -> AfterCompactionOutcome {
         self.engine.run_after_compaction(request).await
+    }
+
+    pub async fn run_permission_request(
+        &self,
+        request: PermissionRequestRequest,
+    ) -> PermissionRequestOutcome {
+        self.engine.run_permission_request(request).await
     }
 
     pub async fn run_post_tool_use(&self, request: PostToolUseRequest) -> PostToolUseOutcome {

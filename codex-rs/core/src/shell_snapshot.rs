@@ -168,13 +168,13 @@ impl ShellSnapshot {
             validate_snapshot(shell, &temp_snapshot.path, session_cwd, env_overrides).await
         {
             tracing::error!("Shell snapshot validation failed: {err:?}");
-            remove_snapshot_file(&temp_snapshot.path).await;
+            remove_snapshot_file(&temp_path).await;
             return Err("validation_failed");
         }
 
-        if let Err(err) = fs::rename(&temp_snapshot.path, &path).await {
+        if let Err(err) = fs::rename(&temp_path, &path).await {
             tracing::warn!("Failed to finalize shell snapshot: {err:?}");
-            remove_snapshot_file(&temp_snapshot.path).await;
+            remove_snapshot_file(&temp_path).await;
             return Err("write_failed");
         }
 
