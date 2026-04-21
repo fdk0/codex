@@ -1,5 +1,6 @@
 use super::PluginLoadOutcome;
 use super::curated_plugins_repo_path;
+use super::installed_marketplaces::bundled_marketplace_roots_from_current_exe;
 use super::installed_marketplaces::installed_marketplace_roots_from_config;
 use super::read_curated_plugins_sha;
 use super::startup_sync::start_startup_remote_plugin_sync_once;
@@ -1482,6 +1483,10 @@ impl PluginsManager {
         // Treat the curated catalog as an extra marketplace root so plugin listing can surface it
         // without requiring every caller to know where it is stored.
         let mut roots = additional_roots.to_vec();
+        let current_exe = std::env::current_exe().ok();
+        roots.extend(bundled_marketplace_roots_from_current_exe(
+            current_exe.as_deref(),
+        ));
         roots.extend(installed_marketplace_roots_from_config(
             config,
             self.codex_home.as_path(),

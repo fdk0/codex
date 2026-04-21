@@ -13,6 +13,28 @@ pub fn marketplace_install_root(codex_home: &Path) -> PathBuf {
     codex_home.join(INSTALLED_MARKETPLACES_DIR)
 }
 
+pub(crate) fn bundled_marketplace_roots_from_current_exe(
+    current_exe: Option<&Path>,
+) -> Vec<AbsolutePathBuf> {
+    let Some(bundled_plugins_root) = bundled_plugins_root_from_current_exe(current_exe) else {
+        return Vec::new();
+    };
+
+    let Ok(entries) = bundled_plugins_root.read_dir() else {
+        return Vec::new();
+    };
+
+    let mut roots = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter_map(|path| find_marketplace_manifest_path(&path).map(|_| path))
+        .filter_map(|path| AbsolutePathBuf::try_from(path).ok())
+        .collect::<Vec<_>>();
+    roots.sort_unstable();
+    roots
+}
+
 pub(crate) fn installed_marketplace_roots_from_config(
     config: &Config,
     codex_home: &Path,
@@ -59,6 +81,28 @@ pub(crate) fn installed_marketplace_roots_from_config(
     roots
 }
 
+fn bundled_plugins_root_from_current_exe(current_exe: Option<&Path>) -> Option<PathBuf> {
+    let exe_dir = current_exe?.parent()?;
+    let mut candidate_resource_dirs = Vec::new();
+
+    if exe_dir.file_name().is_some_and(|name| name == "Resources") {
+        candidate_resource_dirs.push(exe_dir.to_path_buf());
+    }
+
+    if exe_dir.file_name().is_some_and(|name| name == "MacOS")
+        && let Some(contents_dir) = exe_dir.parent()
+    {
+        candidate_resource_dirs.push(contents_dir.join("Resources"));
+    }
+
+    candidate_resource_dirs.push(exe_dir.join("codex-resources"));
+
+    candidate_resource_dirs
+        .into_iter()
+        .find(|resource_dir| resource_dir.is_dir())
+        .map(|resource_dir| resource_dir.join("plugins"))
+}
+
 pub(crate) fn resolve_configured_marketplace_root(
     marketplace_name: &str,
     marketplace: &toml::Value,
@@ -71,5 +115,63 @@ pub(crate) fn resolve_configured_marketplace_root(
             .filter(|source| !source.is_empty())
             .map(PathBuf::from),
         _ => Some(default_install_root.join(marketplace_name)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use std::fs;
+
+    #[test]
+    fn bundled_marketplace_roots_are_discovered_for_resources_bundled_cli() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let resources_dir = tempdir.path().join("CodexCustom.app/Contents/Resources");
+        let marketplace_root = resources_dir.join("plugins/openai-bundled");
+        let manifest_dir = marketplace_root.join(".agents/plugins");
+        let plugin_dir = marketplace_root.join("plugins/computer-use/.codex-plugin");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::write(
+            manifest_dir.join("marketplace.json"),
+            r#"{"name":"openai-bundled","plugins":[]}"#,
+        )
+        .unwrap();
+        let exe_path = resources_dir.join("codex");
+        fs::write(&exe_path, "").unwrap();
+
+        let roots = bundled_marketplace_roots_from_current_exe(Some(&exe_path));
+
+        assert_eq!(
+            roots,
+            vec![AbsolutePathBuf::try_from(marketplace_root).unwrap()]
+        );
+    }
+
+    #[test]
+    fn bundled_marketplace_roots_are_discovered_for_macos_app_launcher() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let contents_dir = tempdir.path().join("CodexCustom.app/Contents");
+        let resources_dir = contents_dir.join("Resources");
+        let marketplace_root = resources_dir.join("plugins/openai-bundled");
+        let manifest_dir = marketplace_root.join(".agents/plugins");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::write(
+            manifest_dir.join("marketplace.json"),
+            r#"{"name":"openai-bundled","plugins":[]}"#,
+        )
+        .unwrap();
+        let macos_dir = contents_dir.join("MacOS");
+        fs::create_dir_all(&macos_dir).unwrap();
+        let exe_path = macos_dir.join("Codex");
+        fs::write(&exe_path, "").unwrap();
+
+        let roots = bundled_marketplace_roots_from_current_exe(Some(&exe_path));
+
+        assert_eq!(
+            roots,
+            vec![AbsolutePathBuf::try_from(marketplace_root).unwrap()]
+        );
     }
 }
