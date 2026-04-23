@@ -3230,6 +3230,7 @@ name = "codex-rollout-trace"
 version = "0.122.0"
 dependencies = [
  "anyhow",
+ "codex-code-mode",
  "codex-protocol",
  "pretty_assertions",
  "serde",
