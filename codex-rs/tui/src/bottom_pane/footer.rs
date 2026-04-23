@@ -787,6 +787,8 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
     let mut quit = Line::from("");
     let mut show_transcript = Line::from("");
     let mut change_mode = Line::from("");
+    let mut reasoning_down = Line::from("");
+    let mut reasoning_up = Line::from("");
 
     for descriptor in SHORTCUTS {
         if let Some(text) = descriptor.overlay_entry(state) {
@@ -803,6 +805,8 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
                 ShortcutId::Quit => quit = text,
                 ShortcutId::ShowTranscript => show_transcript = text,
                 ShortcutId::ChangeMode => change_mode = text,
+                ShortcutId::ReasoningDown => reasoning_down = text,
+                ShortcutId::ReasoningUp => reasoning_up = text,
             }
         }
     }
@@ -818,6 +822,8 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
         edit_previous,
         history_search,
         quit,
+        reasoning_down,
+        reasoning_up,
     ];
     if change_mode.width() > 0 {
         ordered.push(change_mode);
@@ -903,6 +909,8 @@ enum ShortcutId {
     Quit,
     ShowTranscript,
     ChangeMode,
+    ReasoningDown,
+    ReasoningUp,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1093,6 +1101,24 @@ const SHORTCUTS: &[ShortcutDescriptor] = &[
         }],
         prefix: "",
         label: " to change mode",
+    },
+    ShortcutDescriptor {
+        id: ShortcutId::ReasoningDown,
+        bindings: &[ShortcutBinding {
+            key: key_hint::alt(KeyCode::Char(',')),
+            condition: DisplayCondition::Always,
+        }],
+        prefix: "",
+        label: " reasoning down",
+    },
+    ShortcutDescriptor {
+        id: ShortcutId::ReasoningUp,
+        bindings: &[ShortcutBinding {
+            key: key_hint::alt(KeyCode::Char('.')),
+            condition: DisplayCondition::Always,
+        }],
+        prefix: "",
+        label: " reasoning up",
     },
 ];
 

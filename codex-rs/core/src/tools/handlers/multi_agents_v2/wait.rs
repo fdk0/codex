@@ -39,6 +39,16 @@ impl ToolHandler for Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: WaitArgs = parse_arguments(&arguments)?;
+        let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
+        let timeout_ms = match timeout_ms {
+            ms if ms <= 0 => {
+                return Err(FunctionCallError::RespondToModel(
+                    "timeout_ms must be greater than zero".to_owned(),
+                ));
+            }
+            ms => ms.clamp(MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS),
+        };
+
         let receiver_thread_ids = resolve_agent_targets(&session, &turn, args.targets).await?;
         let mut receiver_agents = Vec::with_capacity(receiver_thread_ids.len());
         for receiver_thread_id in &receiver_thread_ids {
@@ -53,48 +63,6 @@ impl ToolHandler for Handler {
                 agent_role: agent_metadata.agent_role,
             });
         }
-        let mut wake_enabled_children = session
-            .services
-            .agent_control
-            .wake_enabled_children_for_parent(session.conversation_id, &receiver_thread_ids)
-            .await;
-        let mut active_wake_enabled_children = Vec::with_capacity(wake_enabled_children.len());
-        for child_thread_id in wake_enabled_children.drain(..) {
-            let status = session
-                .services
-                .agent_control
-                .get_status(child_thread_id)
-                .await;
-            if !is_final(&status) {
-                active_wake_enabled_children.push(child_thread_id);
-            }
-        }
-        if !active_wake_enabled_children.is_empty()
-            && matches!(
-                turn.config.agent_wait_on_wake_enabled_behavior,
-                AgentWaitOnWakeEnabledBehavior::Reject
-            )
-        {
-            let ids = active_wake_enabled_children
-                .iter()
-                .map(ThreadId::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(FunctionCallError::RespondToModel(format!(
-                "wait is disabled for wake-enabled child agents by current configuration. These child threads already have wake_parent_on_completion enabled for parent {}: {ids}. End the current turn and rely on the automatic wake path instead, or set agents.wait_on_wake_enabled = \"allow\" / spawn the child with wake_parent_on_completion=false when you explicitly want polling.",
-                session.conversation_id
-            )));
-        }
-
-        let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
-        let timeout_ms = match timeout_ms {
-            ms if ms <= 0 => {
-                return Err(FunctionCallError::RespondToModel(
-                    "timeout_ms must be greater than zero".to_owned(),
-                ));
-            }
-            ms => ms.clamp(MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS),
-        };
 
         session
             .send_event(
@@ -109,78 +77,123 @@ impl ToolHandler for Handler {
             )
             .await;
 
-        let mut status_rxs = Vec::with_capacity(receiver_thread_ids.len());
-        let mut initial_final_statuses = Vec::new();
-        for id in &receiver_thread_ids {
-            match session.services.agent_control.subscribe_status(*id).await {
-                Ok(rx) => {
-                    let status = rx.borrow().clone();
-                    if is_final(&status) {
-                        initial_final_statuses.push((*id, status));
-                    }
-                    status_rxs.push((*id, rx));
-                }
-                Err(CodexErr::ThreadNotFound(_)) => {
-                    initial_final_statuses.push((*id, AgentStatus::NotFound));
-                }
-                Err(err) => {
-                    let mut statuses = HashMap::with_capacity(1);
-                    statuses.insert(*id, session.services.agent_control.get_status(*id).await);
-                    session
-                        .send_event(
-                            &turn,
-                            CollabWaitingEndEvent {
-                                sender_thread_id: session.conversation_id,
-                                call_id: call_id.clone(),
-                                agent_statuses: build_wait_agent_statuses(
-                                    &statuses,
-                                    &receiver_agents,
-                                ),
-                                statuses,
-                            }
-                            .into(),
-                        )
-                        .await;
-                    return Err(collab_agent_error(*id, err));
-                }
-            }
-        }
-
-        let statuses = if !initial_final_statuses.is_empty() {
-            initial_final_statuses
+        let (timed_out, agent_statuses, statuses_by_id) = if receiver_thread_ids.is_empty() {
+            let mut mailbox_seq_rx = session.subscribe_mailbox_seq();
+            let timed_out = if session.has_pending_mailbox_items().await {
+                false
+            } else {
+                let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+                !wait_for_mailbox_change(&mut mailbox_seq_rx, deadline).await
+            };
+            (timed_out, Vec::new(), HashMap::new())
         } else {
-            let mut futures = FuturesUnordered::new();
-            for (id, rx) in status_rxs {
-                let session = session.clone();
-                futures.push(wait_for_final_status(session, id, rx));
-            }
-            let mut results = Vec::new();
-            let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-            loop {
-                match timeout_at(deadline, futures.next()).await {
-                    Ok(Some(Some(result))) => {
-                        results.push(result);
-                        break;
-                    }
-                    Ok(Some(None)) => continue,
-                    Ok(None) | Err(_) => break,
+            let mut wake_enabled_children = session
+                .services
+                .agent_control
+                .wake_enabled_children_for_parent(session.conversation_id, &receiver_thread_ids)
+                .await;
+            let mut active_wake_enabled_children = Vec::with_capacity(wake_enabled_children.len());
+            for child_thread_id in wake_enabled_children.drain(..) {
+                let status = session
+                    .services
+                    .agent_control
+                    .get_status(child_thread_id)
+                    .await;
+                if !is_final(&status) {
+                    active_wake_enabled_children.push(child_thread_id);
                 }
             }
-            if !results.is_empty() {
-                loop {
-                    match futures.next().now_or_never() {
-                        Some(Some(Some(result))) => results.push(result),
-                        Some(Some(None)) => continue,
-                        Some(None) | None => break,
-                    }
-                }
+            if !active_wake_enabled_children.is_empty()
+                && matches!(
+                    turn.config.agent_wait_on_wake_enabled_behavior,
+                    AgentWaitOnWakeEnabledBehavior::Reject
+                )
+            {
+                let ids = active_wake_enabled_children
+                    .iter()
+                    .map(ThreadId::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "wait is disabled for wake-enabled child agents by current configuration. These child threads already have wake_parent_on_completion enabled for parent {}: {ids}. End the current turn and rely on the automatic wake path instead, or set agents.wait_on_wake_enabled = \"allow\" / spawn the child with wake_parent_on_completion=false when you explicitly want polling.",
+                    session.conversation_id
+                )));
             }
-            results
-        };
 
-        let timed_out = statuses.is_empty();
-        let statuses_by_id = statuses.clone().into_iter().collect::<HashMap<_, _>>();
-        let agent_statuses = build_wait_agent_statuses(&statuses_by_id, &receiver_agents);
+            let mut status_rxs = Vec::with_capacity(receiver_thread_ids.len());
+            let mut initial_final_statuses = Vec::new();
+            for id in &receiver_thread_ids {
+                match session.services.agent_control.subscribe_status(*id).await {
+                    Ok(rx) => {
+                        let status = rx.borrow().clone();
+                        if is_final(&status) {
+                            initial_final_statuses.push((*id, status));
+                        }
+                        status_rxs.push((*id, rx));
+                    }
+                    Err(CodexErr::ThreadNotFound(_)) => {
+                        initial_final_statuses.push((*id, AgentStatus::NotFound));
+                    }
+                    Err(err) => {
+                        let mut statuses = HashMap::with_capacity(1);
+                        statuses.insert(*id, session.services.agent_control.get_status(*id).await);
+                        session
+                            .send_event(
+                                &turn,
+                                CollabWaitingEndEvent {
+                                    sender_thread_id: session.conversation_id,
+                                    call_id: call_id.clone(),
+                                    agent_statuses: build_wait_agent_statuses(
+                                        &statuses,
+                                        &receiver_agents,
+                                    ),
+                                    statuses,
+                                }
+                                .into(),
+                            )
+                            .await;
+                        return Err(collab_agent_error(*id, err));
+                    }
+                }
+            }
+
+            let statuses = if !initial_final_statuses.is_empty() {
+                initial_final_statuses
+            } else {
+                let mut futures = FuturesUnordered::new();
+                for (id, rx) in status_rxs {
+                    let session = session.clone();
+                    futures.push(wait_for_final_status(session, id, rx));
+                }
+                let mut results = Vec::new();
+                let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+                loop {
+                    match timeout_at(deadline, futures.next()).await {
+                        Ok(Some(Some(result))) => {
+                            results.push(result);
+                            break;
+                        }
+                        Ok(Some(None)) => continue,
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+                if !results.is_empty() {
+                    loop {
+                        match futures.next().now_or_never() {
+                            Some(Some(Some(result))) => results.push(result),
+                            Some(Some(None)) => continue,
+                            Some(None) | None => break,
+                        }
+                    }
+                }
+                results
+            };
+
+            let timed_out = statuses.is_empty();
+            let statuses_by_id = statuses.into_iter().collect::<HashMap<_, _>>();
+            let agent_statuses = build_wait_agent_statuses(&statuses_by_id, &receiver_agents);
+            (timed_out, agent_statuses, statuses_by_id)
+        };
         let result = WaitAgentResult::from_timed_out(timed_out);
 
         session
@@ -201,6 +214,7 @@ impl ToolHandler for Handler {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WaitArgs {
     #[serde(default)]
     targets: Vec<String>,
@@ -276,5 +290,15 @@ async fn wait_for_final_status(
         if is_final(&status) {
             return Some((thread_id, status));
         }
+    }
+}
+
+async fn wait_for_mailbox_change(
+    mailbox_seq_rx: &mut tokio::sync::watch::Receiver<u64>,
+    deadline: Instant,
+) -> bool {
+    match timeout_at(deadline, mailbox_seq_rx.changed()).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) | Err(_) => false,
     }
 }

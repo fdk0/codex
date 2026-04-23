@@ -84,27 +84,24 @@ impl ToolHandler for Handler {
         apply_spawn_agent_env_overrides(&mut config, args.env.as_ref());
         apply_spawn_agent_overrides(&mut config, child_depth);
 
-        let result = session
-            .services
-            .agent_control
-            .spawn_agent_with_metadata(
-                config,
-                input_items,
-                Some(thread_spawn_source(
-                    session.conversation_id,
-                    &turn.session_source,
-                    child_depth,
-                    role_name,
-                    /*task_name*/ None,
-                )?),
-                SpawnAgentOptions {
-                    fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
-                    fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
-                    wake_parent_on_completion: args.wake_parent_on_completion,
-                },
-            )
-            .await
-            .map_err(collab_spawn_error);
+        let result = Box::pin(session.services.agent_control.spawn_agent_with_metadata(
+            config,
+            input_items,
+            Some(thread_spawn_source(
+                session.conversation_id,
+                &turn.session_source,
+                child_depth,
+                role_name,
+                /*task_name*/ None,
+            )?),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
+                fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
+                wake_parent_on_completion: args.wake_parent_on_completion,
+            },
+        ))
+        .await
+        .map_err(collab_spawn_error);
         let (new_thread_id, new_agent_metadata, status) = match &result {
             Ok(spawned_agent) => (
                 Some(spawned_agent.thread_id),

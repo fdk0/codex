@@ -37,7 +37,6 @@ impl Mailbox {
         )
     }
 
-    #[cfg(test)]
     pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
         self.seq_tx.subscribe()
     }

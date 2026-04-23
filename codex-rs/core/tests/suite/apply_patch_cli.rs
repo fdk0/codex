@@ -405,6 +405,7 @@ async fn apply_patch_cli_move_without_content_change_has_no_turn_diff(
     let model = test.session_configured.model.clone();
     codex
         .submit(Op::UserTurn {
+            environments: None,
             items: vec![UserInput::Text {
                 text: "rename without content change".into(),
                 text_elements: Vec::new(),
@@ -414,6 +415,7 @@ async fn apply_patch_cli_move_without_content_change_has_no_turn_diff(
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
             model,
             effort: None,
             summary: None,
@@ -1128,6 +1130,7 @@ async fn apply_patch_custom_tool_streaming_emits_updated_changes() -> Result<()>
 
     codex
         .submit(Op::UserTurn {
+            environments: None,
             items: vec![UserInput::Text {
                 text: "create streamed file".into(),
                 text_elements: Vec::new(),
@@ -1137,6 +1140,7 @@ async fn apply_patch_custom_tool_streaming_emits_updated_changes() -> Result<()>
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
             model: test.session_configured.model.clone(),
             effort: None,
             summary: None,
@@ -1225,6 +1229,7 @@ async fn apply_patch_shell_command_heredoc_with_cd_emits_turn_diff() -> Result<(
     let model = test.session_configured.model.clone();
     codex
         .submit(Op::UserTurn {
+            environments: None,
             items: vec![UserInput::Text {
                 text: "apply via shell heredoc with cd".into(),
                 text_elements: Vec::new(),
@@ -1234,6 +1239,7 @@ async fn apply_patch_shell_command_heredoc_with_cd_emits_turn_diff() -> Result<(
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
             model,
             effort: None,
             summary: None,
@@ -1309,6 +1315,7 @@ async fn apply_patch_shell_command_failure_propagates_error_and_skips_diff() -> 
     let model = test.session_configured.model.clone();
     codex
         .submit(Op::UserTurn {
+            environments: None,
             items: vec![UserInput::Text {
                 text: "apply patch via shell".into(),
                 text_elements: Vec::new(),
@@ -1318,6 +1325,7 @@ async fn apply_patch_shell_command_failure_propagates_error_and_skips_diff() -> 
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
             model,
             effort: None,
             summary: None,
@@ -1464,6 +1472,7 @@ async fn apply_patch_emits_turn_diff_event_with_unified_diff(
     let model = test.session_configured.model.clone();
     codex
         .submit(Op::UserTurn {
+            environments: None,
             items: vec![UserInput::Text {
                 text: "emit diff".into(),
                 text_elements: Vec::new(),
@@ -1473,6 +1482,7 @@ async fn apply_patch_emits_turn_diff_event_with_unified_diff(
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
             model,
             effort: None,
             summary: None,
@@ -1531,6 +1541,7 @@ async fn apply_patch_turn_diff_for_rename_with_content_change(
     let model = test.session_configured.model.clone();
     codex
         .submit(Op::UserTurn {
+            environments: None,
             items: vec![UserInput::Text {
                 text: "rename with change".into(),
                 text_elements: Vec::new(),
@@ -1540,6 +1551,7 @@ async fn apply_patch_turn_diff_for_rename_with_content_change(
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
             model,
             effort: None,
             summary: None,
@@ -1607,6 +1619,7 @@ async fn apply_patch_aggregates_diff_across_multiple_tool_calls() -> Result<()> 
     let model = test.session_configured.model.clone();
     codex
         .submit(Op::UserTurn {
+            environments: None,
             items: vec![UserInput::Text {
                 text: "aggregate diffs".into(),
                 text_elements: Vec::new(),
@@ -1616,6 +1629,7 @@ async fn apply_patch_aggregates_diff_across_multiple_tool_calls() -> Result<()> 
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
             model,
             effort: None,
             summary: None,
@@ -1683,6 +1697,7 @@ async fn apply_patch_aggregates_diff_preserves_success_after_failure() -> Result
     let model = test.session_configured.model.clone();
     codex
         .submit(Op::UserTurn {
+            environments: None,
             items: vec![UserInput::Text {
                 text: "apply patch twice with failure".into(),
                 text_elements: Vec::new(),
@@ -1692,6 +1707,7 @@ async fn apply_patch_aggregates_diff_preserves_success_after_failure() -> Result
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
             model,
             effort: None,
             summary: None,

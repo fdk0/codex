@@ -1,21 +1,15 @@
 use super::PluginLoadOutcome;
-use super::curated_plugins_repo_path;
-use super::installed_marketplaces::bundled_marketplace_roots_from_current_exe;
-use super::installed_marketplaces::installed_marketplace_roots_from_config;
-use super::read_curated_plugins_sha;
 use super::startup_sync::start_startup_remote_plugin_sync_once;
-use super::sync_openai_plugins_repo;
 use crate::SkillMetadata;
 use crate::config::Config;
-use crate::config::ConfigService;
-use crate::config::ConfigServiceError;
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
 use crate::config_loader::ConfigLayerStack;
 use codex_analytics::AnalyticsEventsClient;
-use codex_app_server_protocol::ConfigValueWriteParams;
-use codex_app_server_protocol::MergeStrategy;
 use codex_config::types::PluginConfig;
+use codex_core_plugins::OPENAI_CURATED_MARKETPLACE_NAME;
+use codex_core_plugins::installed_marketplaces::bundled_marketplace_roots_from_current_exe;
+use codex_core_plugins::installed_marketplaces::installed_marketplace_roots_from_layer_stack;
 use codex_core_plugins::loader::configured_curated_plugin_ids_from_codex_home;
 use codex_core_plugins::loader::installed_plugin_telemetry_metadata;
 use codex_core_plugins::loader::load_plugin_apps;
@@ -46,9 +40,12 @@ use codex_core_plugins::marketplace_upgrade::ConfiguredMarketplaceUpgradeError;
 use codex_core_plugins::marketplace_upgrade::ConfiguredMarketplaceUpgradeOutcome;
 use codex_core_plugins::marketplace_upgrade::configured_git_marketplace_names;
 use codex_core_plugins::marketplace_upgrade::upgrade_configured_git_marketplaces;
-use codex_core_plugins::remote::RemotePluginFetchError;
-use codex_core_plugins::remote::RemotePluginMutationError;
 use codex_core_plugins::remote::RemotePluginServiceConfig;
+use codex_core_plugins::remote_legacy::RemotePluginFetchError;
+use codex_core_plugins::remote_legacy::RemotePluginMutationError;
+use codex_core_plugins::startup_sync::curated_plugins_repo_path;
+use codex_core_plugins::startup_sync::read_curated_plugins_sha;
+use codex_core_plugins::startup_sync::sync_openai_plugins_repo;
 use codex_core_plugins::store::PluginInstallResult as StorePluginInstallResult;
 use codex_core_plugins::store::PluginStore;
 use codex_core_plugins::store::PluginStoreError;
@@ -62,7 +59,6 @@ use codex_plugin::PluginIdError;
 use codex_plugin::prompt_safe_plugin_description;
 use codex_protocol::protocol::Product;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use serde_json::json;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -76,9 +72,6 @@ use toml_edit::value;
 use tracing::info;
 use tracing::warn;
 
-pub const OPENAI_CURATED_MARKETPLACE_NAME: &str = "openai-curated";
-pub const OPENAI_CURATED_MARKETPLACE_DISPLAY_NAME: &str = "OpenAI Curated";
-pub const OPENAI_BUNDLED_MARKETPLACE_NAME: &str = "openai-bundled";
 static CURATED_REPO_SYNC_STARTED: AtomicBool = AtomicBool::new(false);
 const FEATURED_PLUGIN_IDS_CACHE_TTL: std::time::Duration =
     std::time::Duration::from_secs(60 * 60 * 3);
@@ -173,7 +166,7 @@ pub struct PluginInstallOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PluginReadOutcome {
     pub marketplace_name: String,
-    pub marketplace_path: AbsolutePathBuf,
+    pub marketplace_path: Option<AbsolutePathBuf>,
     pub plugin: PluginDetail,
 }
 
@@ -532,12 +525,13 @@ impl PluginsManager {
         if let Some(featured_plugin_ids) = self.cached_featured_plugin_ids(&cache_key) {
             return Ok(featured_plugin_ids);
         }
-        let featured_plugin_ids = codex_core_plugins::remote::fetch_remote_featured_plugin_ids(
-            &remote_plugin_service_config(config),
-            auth,
-            self.restriction_product,
-        )
-        .await?;
+        let featured_plugin_ids =
+            codex_core_plugins::remote_legacy::fetch_remote_featured_plugin_ids(
+                &remote_plugin_service_config(config),
+                auth,
+                self.restriction_product,
+            )
+            .await?;
         self.write_featured_plugin_ids_cache(cache_key, &featured_plugin_ids);
         Ok(featured_plugin_ids)
     }
@@ -567,7 +561,7 @@ impl PluginsManager {
         )?;
         let plugin_id = resolved.plugin_id.as_key();
         // This only forwards the backend mutation before the local install flow.
-        codex_core_plugins::remote::enable_remote_plugin(
+        codex_core_plugins::remote_legacy::enable_remote_plugin(
             &remote_plugin_service_config(config),
             auth,
             &plugin_id,
@@ -610,18 +604,17 @@ impl PluginsManager {
         .await
         .map_err(PluginInstallError::join)??;
 
-        ConfigService::new_with_defaults(self.codex_home.clone())
-            .write_value(ConfigValueWriteParams {
-                key_path: format!("plugins.{}", result.plugin_id.as_key()),
-                value: json!({
-                    "enabled": true,
-                }),
-                merge_strategy: MergeStrategy::Replace,
-                file_path: None,
-                expected_version: None,
-            })
+        ConfigEditsBuilder::new(&self.codex_home)
+            .with_edits([ConfigEdit::SetPath {
+                segments: vec![
+                    "plugins".to_string(),
+                    result.plugin_id.as_key(),
+                    "enabled".to_string(),
+                ],
+                value: value(true),
+            }])
+            .apply()
             .await
-            .map(|_| ())
             .map_err(PluginInstallError::from)?;
 
         let analytics_events_client = match self.analytics_events_client.read() {
@@ -659,7 +652,7 @@ impl PluginsManager {
         let plugin_id = PluginId::parse(&plugin_id)?;
         let plugin_key = plugin_id.as_key();
         // This only forwards the backend mutation before the local uninstall flow.
-        codex_core_plugins::remote::uninstall_remote_plugin(
+        codex_core_plugins::remote_legacy::uninstall_remote_plugin(
             &remote_plugin_service_config(config),
             auth,
             &plugin_key,
@@ -716,7 +709,7 @@ impl PluginsManager {
         }
 
         info!("starting remote plugin sync");
-        let remote_plugins = codex_core_plugins::remote::fetch_remote_plugin_status(
+        let remote_plugins = codex_core_plugins::remote_legacy::fetch_remote_plugin_status(
             &remote_plugin_service_config(config),
             auth,
         )
@@ -975,13 +968,7 @@ impl PluginsManager {
                 (!plugins.is_empty()).then_some(ConfiguredMarketplace {
                     name: marketplace.name,
                     path: marketplace.path,
-                    interface: if marketplace_name == OPENAI_CURATED_MARKETPLACE_NAME {
-                        Some(MarketplaceInterface {
-                            display_name: Some(OPENAI_CURATED_MARKETPLACE_DISPLAY_NAME.to_string()),
-                        })
-                    } else {
-                        marketplace.interface
-                    },
+                    interface: marketplace.interface,
                     plugins,
                 })
             })
@@ -1030,12 +1017,8 @@ impl PluginsManager {
             .await?;
 
         Ok(PluginReadOutcome {
-            marketplace_name: if marketplace_name == OPENAI_CURATED_MARKETPLACE_NAME {
-                OPENAI_CURATED_MARKETPLACE_DISPLAY_NAME.to_string()
-            } else {
-                marketplace_name
-            },
-            marketplace_path: request.marketplace_path.clone(),
+            marketplace_name,
+            marketplace_path: Some(request.marketplace_path.clone()),
             plugin,
         })
     }
@@ -1487,8 +1470,8 @@ impl PluginsManager {
         roots.extend(bundled_marketplace_roots_from_current_exe(
             current_exe.as_deref(),
         ));
-        roots.extend(installed_marketplace_roots_from_config(
-            config,
+        roots.extend(installed_marketplace_roots_from_layer_stack(
+            &config.config_layer_stack,
             self.codex_home.as_path(),
         ));
         let curated_repo_root = curated_plugins_repo_path(self.codex_home.as_path());
@@ -1543,7 +1526,7 @@ pub enum PluginInstallError {
     Store(#[from] PluginStoreError),
 
     #[error("{0}")]
-    Config(#[from] ConfigServiceError),
+    Config(#[from] anyhow::Error),
 
     #[error("failed to join plugin install task: {0}")]
     Join(#[from] tokio::task::JoinError),

@@ -272,7 +272,7 @@ mod tests {
     use super::parse_completed;
     use crate::engine::ConfiguredHandler;
     use crate::engine::command_runner::CommandRunResult;
-    use crate::engine::config::HookConditions;
+    use codex_config::HookConditions;
 
     #[test]
     fn plain_stdout_becomes_model_context() {
@@ -369,6 +369,7 @@ mod tests {
     fn handler() -> ConfiguredHandler {
         ConfiguredHandler {
             event_name: HookEventName::SessionStart,
+            is_managed: false,
             matcher: None,
             conditions: HookConditions::default(),
             command: "echo hook".to_string(),

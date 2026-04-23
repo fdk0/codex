@@ -196,6 +196,7 @@ async fn run_snapshot_command_with_options(
 
     codex
         .submit(Op::UserTurn {
+            environments: None,
             items: vec![UserInput::Text {
                 text: "run unified exec with shell snapshot".into(),
                 text_elements: Vec::new(),
@@ -205,6 +206,7 @@ async fn run_snapshot_command_with_options(
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
             model: session_model,
             effort: None,
             summary: None,
@@ -287,6 +289,7 @@ async fn run_shell_command_snapshot_with_options(
 
     codex
         .submit(Op::UserTurn {
+            environments: None,
             items: vec![UserInput::Text {
                 text: "run shell_command with shell snapshot".into(),
                 text_elements: Vec::new(),
@@ -296,6 +299,7 @@ async fn run_shell_command_snapshot_with_options(
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
             model: session_model,
             effort: None,
             summary: None,
@@ -358,6 +362,7 @@ async fn run_tool_turn_on_harness(
     let cwd = test.cwd_path().to_path_buf();
     codex
         .submit(Op::UserTurn {
+            environments: None,
             items: vec![UserInput::Text {
                 text: prompt.into(),
                 text_elements: Vec::new(),
@@ -367,6 +372,7 @@ async fn run_tool_turn_on_harness(
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
             model: session_model,
             effort: None,
             summary: None,
@@ -593,6 +599,7 @@ async fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
     let model = test.session_configured.model.clone();
     codex
         .submit(Op::UserTurn {
+            environments: None,
             items: vec![UserInput::Text {
                 text: "apply patch via shell_command with snapshot".into(),
                 text_elements: Vec::new(),
@@ -602,6 +609,7 @@ async fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
             model,
             effort: None,
             summary: None,

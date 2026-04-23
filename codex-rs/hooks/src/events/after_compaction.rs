@@ -250,7 +250,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use crate::engine::ConfiguredHandler;
-    use crate::engine::config::HookConditions;
+    use codex_config::HookConditions;
 
     use super::AfterCompactionRequest;
     use super::AfterCompactionSource;
@@ -259,6 +259,7 @@ mod tests {
     fn handler(matcher: Option<&str>) -> ConfiguredHandler {
         ConfiguredHandler {
             event_name: HookEventName::AfterCompaction,
+            is_managed: false,
             matcher: matcher.map(str::to_owned),
             conditions: HookConditions::default(),
             command: "echo ok".to_string(),
