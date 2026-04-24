@@ -1343,7 +1343,7 @@ async fn open_agent_picker_preserves_cached_metadata_for_replay_threads() -> Res
 }
 
 #[tokio::test]
-async fn open_agent_picker_prunes_terminal_metadata_only_threads() -> Result<()> {
+async fn open_agent_picker_keeps_metadata_only_threads_until_selected() -> Result<()> {
     let mut app = make_test_app().await;
     let mut app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
         .await
@@ -1358,8 +1358,14 @@ async fn open_agent_picker_prunes_terminal_metadata_only_threads() -> Result<()>
 
     app.open_agent_picker(&mut app_server).await;
 
-    assert_eq!(app.agent_navigation.get(&thread_id), None);
-    assert!(app.agent_navigation.is_empty());
+    assert_eq!(
+        app.agent_navigation.get(&thread_id),
+        Some(&AgentPickerThreadEntry {
+            agent_nickname: Some("Ghost".to_string()),
+            agent_role: Some("worker".to_string()),
+            is_closed: false,
+        })
+    );
     Ok(())
 }
 
@@ -1402,8 +1408,14 @@ async fn open_agent_picker_marks_loaded_threads_open() -> Result<()> {
         .start_thread(app.chat_widget.config_ref())
         .await?;
     let thread_id = started.session.thread_id;
-    app.thread_event_channels
-        .insert(thread_id, ThreadEventChannel::new(/*capacity*/ 1));
+    app.thread_event_channels.insert(
+        thread_id,
+        ThreadEventChannel::new_with_session(
+            /*capacity*/ 1,
+            started.session.clone(),
+            Vec::new(),
+        ),
+    );
 
     app.open_agent_picker(&mut app_server).await;
 

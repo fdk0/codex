@@ -441,6 +441,7 @@ impl ThreadManager {
                 metrics_service_name,
                 inherited_shell_snapshot,
                 inherited_exec_policy,
+                /*environments*/ None,
             )
             .await
     }

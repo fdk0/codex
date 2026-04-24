@@ -155,14 +155,6 @@ impl AgentNavigationState {
             .collect()
     }
 
-    /// Returns tracked thread ids in the same stable order used by the picker.
-    pub(crate) fn tracked_thread_ids(&self) -> Vec<ThreadId> {
-        self.ordered_threads()
-            .into_iter()
-            .map(|(thread_id, _)| thread_id)
-            .collect()
-    }
-
     pub(crate) fn open_agent_count(&self, primary_thread_id: Option<ThreadId>) -> usize {
         self.threads
             .iter()

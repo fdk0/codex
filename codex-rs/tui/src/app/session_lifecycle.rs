@@ -7,24 +7,14 @@
 use super::*;
 
 impl App {
-    pub(super) async fn open_agent_picker(&mut self, app_server: &mut AppServerSession) {
-        let mut thread_ids = self.agent_navigation.tracked_thread_ids();
-        for thread_id in self.thread_event_channels.keys().copied() {
-            if !thread_ids.contains(&thread_id) {
-                thread_ids.push(thread_id);
-            }
-        }
-        for thread_id in thread_ids {
-            if self.side_threads.contains_key(&thread_id) {
-                continue;
-            }
-            if !self
-                .refresh_agent_picker_thread_liveness(app_server, thread_id)
-                .await
-            {
-                continue;
-            }
-        }
+    /// Opens the `/agent` picker from cached replay state without blocking on backend reads.
+    ///
+    /// Large completed multi-agent trees can have dozens of descendants, and synchronously calling
+    /// `thread/read` for every cached thread before showing the popup can wedge the TUI. Picker
+    /// open therefore trusts local replay channels and cached metadata first; selecting a specific
+    /// thread still refreshes liveness on demand.
+    pub(super) async fn open_agent_picker(&mut self, _app_server: &mut AppServerSession) {
+        self.sync_agent_picker_cache_from_replay_channels().await;
 
         let has_non_primary_agent_thread = self
             .agent_navigation
@@ -82,6 +72,33 @@ impl App {
             initial_selected_idx,
             ..Default::default()
         });
+    }
+
+    async fn sync_agent_picker_cache_from_replay_channels(&mut self) {
+        let thread_ids: Vec<_> = self.thread_event_channels.keys().copied().collect();
+        for thread_id in thread_ids {
+            if self.side_threads.contains_key(&thread_id) {
+                continue;
+            }
+
+            let existing_entry = self.agent_navigation.get(&thread_id).cloned();
+            let Some(channel) = self.thread_event_channels.get(&thread_id) else {
+                continue;
+            };
+            let is_closed = {
+                let store = channel.store.lock().await;
+                existing_entry.as_ref().is_some_and(|entry| entry.is_closed)
+                    || store.session.is_none()
+            };
+            self.upsert_agent_picker_thread(
+                thread_id,
+                existing_entry
+                    .as_ref()
+                    .and_then(|entry| entry.agent_nickname.clone()),
+                existing_entry.and_then(|entry| entry.agent_role),
+                is_closed,
+            );
+        }
     }
 
     pub(super) fn is_terminal_thread_read_error(err: &color_eyre::Report) -> bool {
