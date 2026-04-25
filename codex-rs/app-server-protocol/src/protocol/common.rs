@@ -1528,22 +1528,7 @@ mod tests {
                         "type": "dangerFullAccess"
                     },
                     "permissionProfile": {
-                        "network": {
-                            "enabled": true,
-                        },
-                        "fileSystem": {
-                            "entries": [
-                                {
-                                    "path": {
-                                        "type": "special",
-                                        "value": {
-                                            "kind": "root",
-                                        },
-                                    },
-                                    "access": "write",
-                                },
-                            ],
-                        },
+                        "type": "disabled"
                     },
                     "reasoningEffort": null
                 }

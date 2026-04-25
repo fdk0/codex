@@ -111,6 +111,52 @@
       },
       "type": "object"
     },
+    "ConfiguredHookConditions": {
+      "properties": {
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "permissionMode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "permissionModes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profiles": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "models",
+        "permissionModes",
+        "profiles"
+      ],
+      "type": "object"
+    },
     "ConfiguredHookHandler": {
       "oneOf": [
         {
@@ -187,6 +233,9 @@
     },
     "ConfiguredHookMatcherGroup": {
       "properties": {
+        "conditions": {
+          "$ref": "#/definitions/ConfiguredHookConditions"
+        },
         "hooks": {
           "items": {
             "$ref": "#/definitions/ConfiguredHookHandler"
@@ -201,12 +250,19 @@
         }
       },
       "required": [
+        "conditions",
         "hooks"
       ],
       "type": "object"
     },
     "ManagedHooksRequirements": {
       "properties": {
+        "AfterCompaction": {
+          "items": {
+            "$ref": "#/definitions/ConfiguredHookMatcherGroup"
+          },
+          "type": "array"
+        },
         "PermissionRequest": {
           "items": {
             "$ref": "#/definitions/ConfiguredHookMatcherGroup"
@@ -257,6 +313,7 @@
         }
       },
       "required": [
+        "AfterCompaction",
         "PermissionRequest",
         "PostToolUse",
         "PreToolUse",

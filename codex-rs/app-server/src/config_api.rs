@@ -12,6 +12,7 @@ use codex_app_server_protocol::ConfigRequirementsReadResponse;
 use codex_app_server_protocol::ConfigValueWriteParams;
 use codex_app_server_protocol::ConfigWriteErrorCode;
 use codex_app_server_protocol::ConfigWriteResponse;
+use codex_app_server_protocol::ConfiguredHookConditions;
 use codex_app_server_protocol::ConfiguredHookHandler;
 use codex_app_server_protocol::ConfiguredHookMatcherGroup;
 use codex_app_server_protocol::ExperimentalFeatureEnablementSetParams;
@@ -316,9 +317,9 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         permission_request,
         post_tool_use,
         session_start,
+        after_compaction,
         user_prompt_submit,
         stop,
-        ..
     } = hooks;
 
     ManagedHooksRequirements {
@@ -328,6 +329,7 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         permission_request: map_hook_matcher_groups_to_api(permission_request),
         post_tool_use: map_hook_matcher_groups_to_api(post_tool_use),
         session_start: map_hook_matcher_groups_to_api(session_start),
+        after_compaction: map_hook_matcher_groups_to_api(after_compaction),
         user_prompt_submit: map_hook_matcher_groups_to_api(user_prompt_submit),
         stop: map_hook_matcher_groups_to_api(stop),
     }
@@ -345,6 +347,14 @@ fn map_hook_matcher_groups_to_api(
 fn map_hook_matcher_group_to_api(group: CoreMatcherGroup) -> ConfiguredHookMatcherGroup {
     ConfiguredHookMatcherGroup {
         matcher: group.matcher,
+        conditions: ConfiguredHookConditions {
+            profile: group.conditions.profile,
+            profiles: group.conditions.profiles,
+            model: group.conditions.model,
+            models: group.conditions.models,
+            permission_mode: group.conditions.permission_mode,
+            permission_modes: group.conditions.permission_modes,
+        },
         hooks: group
             .hooks
             .into_iter()
@@ -556,6 +566,10 @@ mod tests {
                 hooks: HookEventsToml {
                     pre_tool_use: vec![CoreMatcherGroup {
                         matcher: Some("^Bash$".to_string()),
+                        conditions: codex_config::HookConditions {
+                            profiles: vec!["bd-worker".to_string()],
+                            ..Default::default()
+                        },
                         hooks: vec![CoreHookHandlerConfig::Command {
                             command: "python3 /enterprise/hooks/pre.py".to_string(),
                             timeout_sec: Some(10),
@@ -639,6 +653,14 @@ mod tests {
                 windows_managed_dir: Some(PathBuf::from(r"C:\enterprise\hooks")),
                 pre_tool_use: vec![ConfiguredHookMatcherGroup {
                     matcher: Some("^Bash$".to_string()),
+                    conditions: ConfiguredHookConditions {
+                        profile: None,
+                        profiles: vec!["bd-worker".to_string()],
+                        model: None,
+                        models: Vec::new(),
+                        permission_mode: None,
+                        permission_modes: Vec::new(),
+                    },
                     hooks: vec![ConfiguredHookHandler::Command {
                         command: "python3 /enterprise/hooks/pre.py".to_string(),
                         timeout_sec: Some(10),
@@ -649,6 +671,7 @@ mod tests {
                 permission_request: Vec::new(),
                 post_tool_use: Vec::new(),
                 session_start: Vec::new(),
+                after_compaction: Vec::new(),
                 user_prompt_submit: Vec::new(),
                 stop: Vec::new(),
             }),

@@ -3207,6 +3207,7 @@ mod tests {
                 last_agent_message: None,
                 completed_at: Some(2),
                 duration_ms: Some(1),
+                time_to_first_token_ms: None,
             })),
         ];
 
