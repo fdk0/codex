@@ -75,7 +75,42 @@ impl App {
     }
 
     async fn sync_agent_picker_cache_from_replay_channels(&mut self) {
+        let mut replay_metadata = HashMap::new();
         let thread_ids: Vec<_> = self.thread_event_channels.keys().copied().collect();
+        for thread_id in &thread_ids {
+            let Some(channel) = self.thread_event_channels.get(thread_id) else {
+                continue;
+            };
+            let store = channel.store.lock().await;
+            collect_collab_agent_metadata_from_turns(&store.turns, &mut replay_metadata);
+            collect_collab_agent_metadata_from_buffer(&store.buffer, &mut replay_metadata);
+        }
+
+        for (thread_id, metadata) in replay_metadata {
+            let existing_entry = self.agent_navigation.get(&thread_id).cloned();
+            let agent_nickname = existing_entry
+                .as_ref()
+                .and_then(|entry| entry.agent_nickname.clone())
+                .or(metadata.agent_nickname);
+            let agent_role = existing_entry
+                .as_ref()
+                .and_then(|entry| entry.agent_role.clone())
+                .or(metadata.agent_role);
+            let is_closed =
+                existing_entry.as_ref().is_some_and(|entry| entry.is_closed) || metadata.is_closed;
+            if existing_entry.as_ref().is_some_and(|entry| {
+                entry.agent_nickname.as_ref() == agent_nickname.as_ref()
+                    && entry.agent_role.as_ref() == agent_role.as_ref()
+                    && entry.is_closed == is_closed
+            }) {
+                continue;
+            }
+            if agent_nickname.is_none() && agent_role.is_none() {
+                continue;
+            }
+            self.upsert_agent_picker_thread(thread_id, agent_nickname, agent_role, is_closed);
+        }
+
         for thread_id in thread_ids {
             if self.side_threads.contains_key(&thread_id) {
                 continue;
@@ -748,6 +783,115 @@ impl App {
 
         Ok(AppRunControl::Continue)
     }
+}
+
+fn collect_collab_agent_metadata_from_turns(
+    turns: &[Turn],
+    metadata: &mut HashMap<ThreadId, CachedCollabAgentMetadata>,
+) {
+    for turn in turns {
+        for item in &turn.items {
+            collect_collab_agent_metadata_from_item(item, metadata);
+        }
+    }
+}
+
+fn collect_collab_agent_metadata_from_buffer(
+    buffer: &VecDeque<ThreadBufferedEvent>,
+    metadata: &mut HashMap<ThreadId, CachedCollabAgentMetadata>,
+) {
+    for event in buffer {
+        let item = match event {
+            ThreadBufferedEvent::Notification(ServerNotification::ItemStarted(notification)) => {
+                Some(&notification.item)
+            }
+            ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(notification)) => {
+                Some(&notification.item)
+            }
+            ThreadBufferedEvent::Notification(_)
+            | ThreadBufferedEvent::Request(_)
+            | ThreadBufferedEvent::HistoryEntryResponse(_)
+            | ThreadBufferedEvent::FeedbackSubmission(_) => None,
+        };
+        if let Some(item) = item {
+            collect_collab_agent_metadata_from_item(item, metadata);
+        }
+    }
+}
+
+fn collect_collab_agent_metadata_from_item(
+    item: &ThreadItem,
+    metadata: &mut HashMap<ThreadId, CachedCollabAgentMetadata>,
+) {
+    let ThreadItem::CollabAgentToolCall {
+        receiver_agents,
+        agents_states,
+        ..
+    } = item
+    else {
+        return;
+    };
+
+    for agent in receiver_agents {
+        remember_collab_agent_metadata(
+            metadata,
+            &agent.thread_id,
+            agent.agent_nickname.as_deref(),
+            agent.agent_role.as_deref(),
+            agents_states
+                .get(&agent.thread_id)
+                .is_some_and(|state| collab_agent_state_is_closed(&state.status)),
+        );
+    }
+}
+
+fn remember_collab_agent_metadata(
+    metadata: &mut HashMap<ThreadId, CachedCollabAgentMetadata>,
+    thread_id: &str,
+    agent_nickname: Option<&str>,
+    agent_role: Option<&str>,
+    is_closed: bool,
+) {
+    let Ok(thread_id) = ThreadId::from_string(thread_id) else {
+        return;
+    };
+    let agent_nickname = agent_nickname
+        .map(str::trim)
+        .filter(|nickname| !nickname.is_empty())
+        .map(ToOwned::to_owned);
+    let agent_role = agent_role
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .map(ToOwned::to_owned);
+    if agent_nickname.is_none() && agent_role.is_none() {
+        return;
+    }
+
+    let entry = metadata.entry(thread_id).or_default();
+    if entry.agent_nickname.is_none() {
+        entry.agent_nickname = agent_nickname;
+    }
+    if entry.agent_role.is_none() {
+        entry.agent_role = agent_role;
+    }
+    entry.is_closed |= is_closed;
+}
+
+fn collab_agent_state_is_closed(status: &codex_app_server_protocol::CollabAgentStatus) -> bool {
+    matches!(
+        status,
+        codex_app_server_protocol::CollabAgentStatus::Completed
+            | codex_app_server_protocol::CollabAgentStatus::Errored
+            | codex_app_server_protocol::CollabAgentStatus::Shutdown
+            | codex_app_server_protocol::CollabAgentStatus::NotFound
+    )
+}
+
+#[derive(Default)]
+struct CachedCollabAgentMetadata {
+    agent_nickname: Option<String>,
+    agent_role: Option<String>,
+    is_closed: bool,
 }
 
 #[cfg(test)]

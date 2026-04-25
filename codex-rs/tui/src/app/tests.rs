@@ -1343,6 +1343,62 @@ async fn open_agent_picker_preserves_cached_metadata_for_replay_threads() -> Res
 }
 
 #[tokio::test]
+async fn open_agent_picker_hydrates_cached_metadata_from_replay_turns() -> Result<()> {
+    let mut app = make_test_app().await;
+    let mut app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+        .await
+        .expect("embedded app server");
+    let primary_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+    let primary_session = test_thread_session(primary_thread_id, test_path_buf("/tmp/main"));
+    app.thread_event_channels.insert(
+        primary_thread_id,
+        ThreadEventChannel::new_with_session(
+            /*capacity*/ 1,
+            primary_session,
+            vec![test_turn(
+                "turn-1",
+                TurnStatus::Completed,
+                vec![ThreadItem::CollabAgentToolCall {
+                    id: "spawn-1".to_string(),
+                    tool: codex_app_server_protocol::CollabAgentTool::SpawnAgent,
+                    status: codex_app_server_protocol::CollabAgentToolCallStatus::Completed,
+                    sender_thread_id: primary_thread_id.to_string(),
+                    receiver_thread_ids: vec![child_thread_id.to_string()],
+                    receiver_agents: vec![codex_app_server_protocol::CollabAgentRef {
+                        thread_id: child_thread_id.to_string(),
+                        agent_nickname: Some("Robie".to_string()),
+                        agent_role: Some("explorer".to_string()),
+                    }],
+                    prompt: Some("inspect metadata".to_string()),
+                    model: None,
+                    reasoning_effort: None,
+                    agents_states: HashMap::new(),
+                }],
+            )],
+        ),
+    );
+    app.agent_navigation.upsert(
+        child_thread_id,
+        /*agent_nickname*/ None,
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+
+    app.open_agent_picker(&mut app_server).await;
+
+    assert_eq!(
+        app.agent_navigation.get(&child_thread_id),
+        Some(&AgentPickerThreadEntry {
+            agent_nickname: Some("Robie".to_string()),
+            agent_role: Some("explorer".to_string()),
+            is_closed: false,
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn open_agent_picker_keeps_metadata_only_threads_until_selected() -> Result<()> {
     let mut app = make_test_app().await;
     let mut app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
