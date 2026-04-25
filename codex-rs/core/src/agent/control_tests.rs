@@ -17,6 +17,7 @@ use codex_protocol::config_types::ModeKind;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
@@ -2553,6 +2554,236 @@ async fn leaf_only_does_not_wake_parent_with_stale_child_status_when_descendant_
     })
     .await
     .expect("leaf_only child should wake parent with the reconciled completion");
+}
+
+#[tokio::test]
+async fn leaf_only_treats_pending_descendant_turn_as_active() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+    let parent_path = AgentPath::root();
+
+    let mut child_config = harness.config.clone();
+    let _ = child_config.features.enable(Feature::MultiAgentV2);
+    child_config.agent_wake_descendant_policy = AgentWakeDescendantPolicy::LeafOnly;
+    let child_thread_id = harness
+        .manager
+        .start_thread(child_config.clone())
+        .await
+        .expect("child thread should start")
+        .thread_id;
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist");
+    let child_path = parent_path.join("child").expect("child path");
+    let child_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 2,
+        agent_path: Some(child_path.clone()),
+        agent_nickname: None,
+        agent_role: Some("explorer".to_string()),
+    });
+    harness
+        .control
+        .register_parent_wake_subscription(
+            child_thread_id,
+            Some(&child_source),
+            /*wake_parent_on_completion*/ true,
+            AgentWakeDescendantPolicy::LeafOnly,
+        )
+        .await;
+    harness
+        .control
+        .maybe_start_completion_watcher(
+            child_thread_id,
+            Some(child_source),
+            child_path.to_string(),
+            Some(child_path.clone()),
+            CompletionWatcherMode::CurrentOrNextTerminal,
+        )
+        .await;
+
+    let intermediate_path = child_path.join("intermediate").expect("intermediate path");
+    let intermediate_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: child_thread_id,
+        depth: 3,
+        agent_path: Some(intermediate_path.clone()),
+        agent_nickname: None,
+        agent_role: Some("explorer".to_string()),
+    });
+    let intermediate_thread_id = harness
+        .manager
+        .spawn_new_thread_with_source_for_tests(
+            child_config.clone(),
+            harness.control.clone(),
+            intermediate_source,
+            /*persist_extended_history*/ false,
+            /*metrics_service_name*/ None,
+            /*inherited_shell_snapshot*/ None,
+            /*inherited_exec_policy*/ None,
+        )
+        .await
+        .expect("intermediate thread should start")
+        .thread_id;
+    let intermediate_thread = harness
+        .manager
+        .get_thread(intermediate_thread_id)
+        .await
+        .expect("intermediate thread should exist");
+
+    let leaf_path = intermediate_path.join("leaf").expect("leaf path");
+    let leaf_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: intermediate_thread_id,
+        depth: 4,
+        agent_path: Some(leaf_path),
+        agent_nickname: None,
+        agent_role: Some("awaiter".to_string()),
+    });
+    let leaf_thread_id = harness
+        .manager
+        .spawn_new_thread_with_source_for_tests(
+            child_config,
+            harness.control.clone(),
+            leaf_source,
+            /*persist_extended_history*/ false,
+            /*metrics_service_name*/ None,
+            /*inherited_shell_snapshot*/ None,
+            /*inherited_exec_policy*/ None,
+        )
+        .await
+        .expect("leaf thread should start")
+        .thread_id;
+    let leaf_thread = harness
+        .manager
+        .get_thread(leaf_thread_id)
+        .await
+        .expect("leaf thread should exist");
+
+    let child_turn = child_thread.codex.session.new_default_turn().await;
+    child_thread
+        .codex
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: child_turn.sub_id.clone(),
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: ModeKind::Default,
+            }),
+        )
+        .await;
+    child_thread
+        .codex
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: child_turn.sub_id.clone(),
+                last_agent_message: Some("spawned intermediate".to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+
+    let intermediate_turn = intermediate_thread.codex.session.new_default_turn().await;
+    intermediate_thread
+        .codex
+        .session
+        .send_event(
+            intermediate_turn.as_ref(),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: intermediate_turn.sub_id.clone(),
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: ModeKind::Default,
+            }),
+        )
+        .await;
+    intermediate_thread
+        .codex
+        .session
+        .send_event(
+            intermediate_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: intermediate_turn.sub_id.clone(),
+                last_agent_message: Some("spawned leaf".to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+
+    sleep(Duration::from_millis(150)).await;
+
+    let leaf_turn = leaf_thread.codex.session.new_default_turn().await;
+    leaf_thread
+        .codex
+        .session
+        .send_event(
+            leaf_turn.as_ref(),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: leaf_turn.sub_id.clone(),
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: ModeKind::Default,
+            }),
+        )
+        .await;
+    leaf_thread
+        .codex
+        .session
+        .send_event(
+            leaf_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: leaf_turn.sub_id.clone(),
+                last_agent_message: Some("leaf done".to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    intermediate_thread
+        .codex
+        .session
+        .queue_response_items_for_next_turn(vec![ResponseInputItem::Message {
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "leaf completion wake".to_string(),
+            }],
+        }])
+        .await;
+
+    sleep(Duration::from_millis(150)).await;
+
+    let stale_message = crate::session_prefix::format_subagent_notification_message(
+        child_path.as_str(),
+        &AgentStatus::Completed(Some("spawned intermediate".to_string())),
+    );
+    let stale_parent_wake = (
+        parent_thread_id,
+        Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                child_path,
+                parent_path,
+                Vec::new(),
+                stale_message,
+                true,
+            ),
+        },
+    );
+    let stale_wake_count = harness
+        .manager
+        .captured_ops()
+        .into_iter()
+        .filter(|entry| *entry == stale_parent_wake)
+        .count();
+    assert_eq!(stale_wake_count, 0);
 }
 
 #[tokio::test]

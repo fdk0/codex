@@ -1806,7 +1806,9 @@ impl AgentControl {
             return false;
         };
         for descendant_id in descendants {
-            if !is_final(&self.get_status(descendant_id).await) {
+            if !is_final(&self.get_status(descendant_id).await)
+                || self.child_has_scheduled_or_active_turn(descendant_id).await
+            {
                 return true;
             }
         }
