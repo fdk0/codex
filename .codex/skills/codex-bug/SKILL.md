@@ -1,6 +1,6 @@
 ---
 name: codex-bug
-description: Diagnose GitHub bug reports in openai/codex. Use when given a GitHub issue URL from openai/codex and asked to decide next steps such as verifying against the repo, requesting more info, or explaining why it is not a bug; follow any additional user-provided instructions.
+description: "Triage openai/codex GitHub bug reports and next steps."
 ---
 
 # Codex Bug
