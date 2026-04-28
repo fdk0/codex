@@ -105,6 +105,7 @@ use codex_app_server_protocol::TurnPlanStep;
 use codex_app_server_protocol::TurnPlanUpdatedNotification;
 use codex_app_server_protocol::TurnStartedNotification;
 use codex_app_server_protocol::TurnStatus;
+use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_app_server_protocol::WarningNotification;
 use codex_app_server_protocol::build_command_execution_end_item;
 use codex_app_server_protocol::build_file_change_approval_request_item;
@@ -124,11 +125,14 @@ use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem as CoreDynam
 use codex_protocol::dynamic_tools::DynamicToolResponse as CoreDynamicToolResponse;
 use codex_protocol::items::parse_hook_prompt_message;
 use codex_protocol::models::AdditionalPermissionProfile as CoreAdditionalPermissionProfile;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use codex_protocol::protocol::CodexErrorInfo as CoreCodexErrorInfo;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecApprovalRequestEvent;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::McpToolCallBeginEvent;
 use codex_protocol::protocol::McpToolCallEndEvent;
 use codex_protocol::protocol::Op;
@@ -154,8 +158,12 @@ use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 use tracing::error;
 use tracing::warn;
+use uuid::Uuid;
 
 type JsonValue = serde_json::Value;
+
+const SUBAGENT_NOTIFICATION_OPEN_TAG: &str = "<subagent_notification>";
+const SUBAGENT_NOTIFICATION_CLOSE_TAG: &str = "</subagent_notification>";
 
 enum CommandExecutionApprovalPresentation {
     Network(V2NetworkApprovalContext),
@@ -1693,6 +1701,16 @@ pub(crate) async fn apply_bespoke_event_handling(
             )
             .await;
         }
+        EventMsg::UserMessage(user_message_event) => {
+            maybe_emit_subagent_notification_item_completed(
+                api_version,
+                conversation_id,
+                &event_turn_id,
+                &user_message_event,
+                &outgoing,
+            )
+            .await;
+        }
         EventMsg::PatchApplyBegin(patch_begin_event) => {
             // Until we migrate the core to be aware of a first class FileChangeItem
             // and emit the corresponding EventMsg, we repurpose the call_id as the item_id.
@@ -2233,12 +2251,16 @@ async fn maybe_emit_raw_response_item_completed(
     api_version: ApiVersion,
     conversation_id: ThreadId,
     turn_id: &str,
-    item: codex_protocol::models::ResponseItem,
+    item: ResponseItem,
     outgoing: &ThreadScopedOutgoingMessageSender,
 ) {
     let ApiVersion::V2 = api_version else {
         return;
     };
+
+    if response_item_contains_subagent_notification(&item) {
+        return;
+    }
 
     let notification = RawResponseItemCompletedNotification {
         thread_id: conversation_id.to_string(),
@@ -2248,6 +2270,72 @@ async fn maybe_emit_raw_response_item_completed(
     outgoing
         .send_server_notification(ServerNotification::RawResponseItemCompleted(notification))
         .await;
+}
+
+async fn maybe_emit_subagent_notification_item_completed(
+    api_version: ApiVersion,
+    conversation_id: ThreadId,
+    turn_id: &str,
+    event: &codex_protocol::protocol::UserMessageEvent,
+    outgoing: &ThreadScopedOutgoingMessageSender,
+) {
+    let ApiVersion::V2 = api_version else {
+        return;
+    };
+    if !is_subagent_notification_text(&event.message) {
+        return;
+    }
+
+    let notification = ItemCompletedNotification {
+        thread_id: conversation_id.to_string(),
+        turn_id: turn_id.to_string(),
+        item: ThreadItem::UserMessage {
+            id: Uuid::now_v7().to_string(),
+            content: vec![V2UserInput::Text {
+                text: event.message.clone(),
+                text_elements: event
+                    .text_elements
+                    .iter()
+                    .cloned()
+                    .map(codex_app_server_protocol::TextElement::from)
+                    .collect(),
+            }],
+        },
+    };
+    outgoing
+        .send_server_notification(ServerNotification::ItemCompleted(notification))
+        .await;
+}
+
+fn response_item_contains_subagent_notification(item: &ResponseItem) -> bool {
+    let ResponseItem::Message { role, content, .. } = item else {
+        return false;
+    };
+
+    match role.as_str() {
+        "user" => {
+            matches!(content.as_slice(), [ContentItem::InputText { text }] if is_subagent_notification_text(text))
+        }
+        "assistant" => InterAgentCommunication::from_message_content(content)
+            .is_some_and(|communication| is_subagent_notification_text(&communication.content)),
+        _ => false,
+    }
+}
+
+fn is_subagent_notification_text(message: &str) -> bool {
+    let trimmed = message.trim_start();
+    let starts_with_marker = trimmed
+        .get(..SUBAGENT_NOTIFICATION_OPEN_TAG.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(SUBAGENT_NOTIFICATION_OPEN_TAG));
+    let trimmed = trimmed.trim_end();
+    let ends_with_marker = trimmed
+        .get(
+            trimmed
+                .len()
+                .saturating_sub(SUBAGENT_NOTIFICATION_CLOSE_TAG.len())..,
+        )
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(SUBAGENT_NOTIFICATION_CLOSE_TAG));
+    starts_with_marker && ends_with_marker
 }
 
 pub(crate) async fn maybe_emit_hook_prompt_item_completed(
@@ -3170,6 +3258,7 @@ mod tests {
     use codex_app_server_protocol::TurnPlanStepStatus;
     use codex_login::AuthManager;
     use codex_login::CodexAuth;
+    use codex_protocol::AgentPath;
     use codex_protocol::items::HookPromptFragment;
     use codex_protocol::items::build_hook_prompt_message;
     use codex_protocol::mcp::CallToolResult;
@@ -5013,6 +5102,101 @@ mod tests {
             other => bail!("unexpected message: {other:?}"),
         }
         assert!(rx.try_recv().is_err(), "no extra messages expected");
+        Ok(())
+    }
+
+    fn subagent_notification_message() -> String {
+        r#"<subagent_notification>
+{"agent_path":"/root/dispatcher","status":{"completed":"done"}}
+</subagent_notification>"#
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn test_subagent_notification_user_message_emits_item_completed() -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
+        let conversation_id = ThreadId::new();
+        let outgoing = ThreadScopedOutgoingMessageSender::new(
+            outgoing,
+            vec![ConnectionId(1)],
+            conversation_id,
+        );
+        let message = subagent_notification_message();
+        let event = codex_protocol::protocol::UserMessageEvent {
+            message: message.clone(),
+            images: None,
+            local_images: Vec::new(),
+            text_elements: Vec::new(),
+        };
+
+        maybe_emit_subagent_notification_item_completed(
+            ApiVersion::V2,
+            conversation_id,
+            "turn-1",
+            &event,
+            &outgoing,
+        )
+        .await;
+
+        let msg = recv_broadcast_message(&mut rx).await?;
+        match msg {
+            OutgoingMessage::AppServerNotification(ServerNotification::ItemCompleted(
+                notification,
+            )) => {
+                assert_eq!(notification.thread_id, conversation_id.to_string());
+                assert_eq!(notification.turn_id, "turn-1");
+                match notification.item {
+                    ThreadItem::UserMessage { content, .. } => {
+                        assert_eq!(
+                            content,
+                            vec![V2UserInput::Text {
+                                text: message,
+                                text_elements: Vec::new(),
+                            }]
+                        );
+                    }
+                    other => bail!("unexpected item: {other:?}"),
+                }
+            }
+            other => bail!("unexpected message: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "no extra messages expected");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_raw_inter_agent_subagent_notification_is_not_forwarded() -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
+        let conversation_id = ThreadId::new();
+        let outgoing = ThreadScopedOutgoingMessageSender::new(
+            outgoing,
+            vec![ConnectionId(1)],
+            conversation_id,
+        );
+        let communication = InterAgentCommunication::new(
+            AgentPath::try_from("/root/dispatcher").expect("agent path"),
+            AgentPath::root(),
+            Vec::new(),
+            subagent_notification_message(),
+            true,
+        );
+        let item: ResponseItem = communication.to_response_input_item().into();
+
+        maybe_emit_raw_response_item_completed(
+            ApiVersion::V2,
+            conversation_id,
+            "turn-1",
+            item,
+            &outgoing,
+        )
+        .await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "raw inter-agent subagent notification should be suppressed"
+        );
         Ok(())
     }
 }
