@@ -4,7 +4,9 @@ use std::fmt::Debug;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -132,6 +134,7 @@ use codex_thread_store::LocalThreadStore;
 use codex_thread_store::ResumeThreadParams;
 use codex_thread_store::ThreadEventPersistenceMode;
 use codex_thread_store::ThreadStore;
+use codex_thread_store::ThreadStoreError;
 use codex_utils_output_truncation::TruncationPolicy;
 use futures::future::BoxFuture;
 use futures::future::Shared;
@@ -1011,6 +1014,9 @@ impl Session {
                         let Some(sess) = weak_sess.upgrade() else {
                             break;
                         };
+                        if sess.is_shutdown() {
+                            break;
+                        }
                         let event = Event {
                             id: sess.next_internal_sub_id(),
                             msg: EventMsg::SkillsUpdateAvailable,
@@ -1042,6 +1048,14 @@ impl Session {
 
     pub(crate) fn live_thread(&self) -> Option<&LiveThread> {
         self.services.live_thread.as_ref()
+    }
+
+    pub(crate) fn mark_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
     }
 
     /// Flush rollout writes and return the final durability-barrier result.
@@ -2620,10 +2634,18 @@ impl Session {
     }
 
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) {
+        if self.is_shutdown() {
+            return;
+        }
+
         if let Some(live_thread) = self.live_thread()
             && let Err(e) = live_thread.append_items(items).await
         {
-            error!("failed to record rollout items: {e:#}");
+            if matches!(e, ThreadStoreError::ThreadNotFound { .. }) {
+                debug!("skipping rollout item persistence after live thread closed: {e:#}");
+            } else {
+                error!("failed to record rollout items: {e:#}");
+            }
         }
     }
 

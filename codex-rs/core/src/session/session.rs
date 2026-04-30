@@ -27,6 +27,7 @@ pub(crate) struct Session {
     pub(crate) services: SessionServices,
     pub(super) js_repl: Arc<JsReplHandle>,
     pub(super) next_internal_sub_id: AtomicU64,
+    pub(super) shutdown: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -809,6 +810,7 @@ impl Session {
                 services,
                 js_repl,
                 next_internal_sub_id: AtomicU64::new(0),
+                shutdown: AtomicBool::new(false),
             });
             if let Some(network_policy_decider_session) = network_policy_decider_session {
                 let mut guard = network_policy_decider_session.write().await;

@@ -54,6 +54,11 @@ impl SkillsWatcher {
         self.tx.subscribe()
     }
 
+    #[cfg(test)]
+    pub(crate) fn send_event_for_test(&self, event: SkillsWatcherEvent) {
+        let _ = self.tx.send(event);
+    }
+
     pub(crate) async fn register_config(
         &self,
         config: &Config,

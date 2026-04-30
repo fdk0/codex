@@ -3390,6 +3390,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         services,
         js_repl,
         next_internal_sub_id: AtomicU64::new(0),
+        shutdown: AtomicBool::new(false),
     };
 
     (session, turn_context)
@@ -3498,6 +3499,47 @@ async fn make_session_with_config_and_rx(
     .await?;
 
     Ok((session, rx_event))
+}
+
+#[tokio::test]
+async fn skills_watcher_listener_stops_after_session_shutdown() -> anyhow::Result<()> {
+    let (session, rx_event) = make_session_with_config_and_rx(|_| {}).await?;
+    while rx_event.try_recv().is_ok() {}
+
+    session
+        .services
+        .skills_watcher
+        .send_event_for_test(SkillsWatcherEvent::SkillsChanged { paths: Vec::new() });
+    let event = timeout(Duration::from_secs(1), async {
+        loop {
+            let event = rx_event.recv().await.expect("event channel open");
+            if matches!(event.msg, EventMsg::SkillsUpdateAvailable) {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("skills update event");
+    assert!(matches!(event.msg, EventMsg::SkillsUpdateAvailable));
+
+    session.mark_shutdown();
+    while rx_event.try_recv().is_ok() {}
+    session
+        .services
+        .skills_watcher
+        .send_event_for_test(SkillsWatcherEvent::SkillsChanged { paths: Vec::new() });
+
+    let post_shutdown_event = timeout(Duration::from_millis(200), async {
+        loop {
+            let event = rx_event.recv().await.expect("event channel open");
+            if matches!(event.msg, EventMsg::SkillsUpdateAvailable) {
+                return event;
+            }
+        }
+    })
+    .await;
+    assert!(post_shutdown_event.is_err());
+    Ok(())
 }
 
 #[tokio::test]
@@ -4753,6 +4795,7 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
         services,
         js_repl,
         next_internal_sub_id: AtomicU64::new(0),
+        shutdown: AtomicBool::new(false),
     });
 
     (session, turn_context, rx_event)

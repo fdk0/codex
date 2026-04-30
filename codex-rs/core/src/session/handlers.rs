@@ -958,6 +958,12 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
         &[],
     );
 
+    // Stop out-of-band producers before closing thread persistence. Otherwise
+    // long-lived session handles can keep receiving watcher events after the
+    // live writer has been removed and spam "thread not found" persistence
+    // errors.
+    sess.mark_shutdown();
+
     // Gracefully flush and shutdown thread persistence on session end so tests
     // that inspect durable state do not race with the background writer.
     if let Some(live_thread) = sess.live_thread()
@@ -1234,6 +1240,7 @@ pub(super) async fn submission_loop(
     }
     // Also drain cached guardian state if the submission loop exits because
     // the channel closed without receiving an explicit shutdown op.
+    sess.mark_shutdown();
     sess.guardian_review_session.shutdown().await;
     debug!("Agent loop exited");
 }
