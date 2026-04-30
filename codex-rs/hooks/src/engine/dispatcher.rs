@@ -200,7 +200,6 @@ mod tests {
     ) -> ConfiguredHandler {
         ConfiguredHandler {
             event_name,
-            is_managed: false,
             matcher: matcher.map(str::to_owned),
             conditions,
             command: command.to_string(),
@@ -209,6 +208,7 @@ mod tests {
             source_path: test_path_buf("/tmp/hooks.json").abs(),
             source: HookSource::User,
             display_order,
+            env: std::collections::HashMap::new(),
         }
     }
 

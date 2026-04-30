@@ -45,7 +45,8 @@ pub struct ConfigProfile {
     /// Optional inline developer instructions applied when this profile is active.
     pub developer_instructions: Option<String>,
     pub js_repl_node_path: Option<AbsolutePathBuf>,
-    /// Ordered list of directories to search for Node modules in `js_repl`.
+    /// Deprecated: ignored.
+    #[schemars(skip)]
     pub js_repl_node_module_dirs: Option<Vec<AbsolutePathBuf>>,
     /// Optional absolute path to patched zsh used by zsh-exec-bridge-backed shell execution.
     pub zsh_path: Option<AbsolutePathBuf>,

@@ -146,14 +146,6 @@ async fn handle_message_submission(
             "Tasks can't be assigned to the root agent".to_string(),
         ));
     }
-    if interrupt {
-        session
-            .services
-            .agent_control
-            .interrupt_agent(receiver_thread_id)
-            .await
-            .map_err(|err| collab_agent_error(receiver_thread_id, err))?;
-    }
     session
         .send_event(
             &turn,
@@ -178,12 +170,20 @@ async fn handle_message_submission(
         prompt.clone(),
         /*trigger_turn*/ true,
     );
-    let result = session
+    let mut result = session
         .services
         .agent_control
         .send_inter_agent_communication(receiver_thread_id, mode.apply(communication))
         .await
         .map_err(|err| collab_agent_error(receiver_thread_id, err));
+    if result.is_ok() && interrupt {
+        result = session
+            .services
+            .agent_control
+            .interrupt_agent(receiver_thread_id)
+            .await
+            .map_err(|err| collab_agent_error(receiver_thread_id, err));
+    }
     let status = session
         .services
         .agent_control

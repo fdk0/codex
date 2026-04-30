@@ -367,7 +367,6 @@ mod tests {
                 content: vec![ContentItem::InputText {
                     text: "seed".to_string(),
                 }],
-                end_turn: None,
                 phase: None,
             },
             ResponseItem::FunctionCallOutput {
@@ -391,7 +390,6 @@ mod tests {
                 content: vec![ContentItem::InputText {
                     text: "seed".to_string(),
                 }],
-                end_turn: None,
                 phase: None,
             }]
         );

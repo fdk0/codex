@@ -369,7 +369,6 @@ mod tests {
     fn handler() -> ConfiguredHandler {
         ConfiguredHandler {
             event_name: HookEventName::SessionStart,
-            is_managed: false,
             matcher: None,
             conditions: HookConditions::default(),
             command: "echo hook".to_string(),
@@ -378,6 +377,7 @@ mod tests {
             source_path: test_path_buf("/tmp/hooks.json").abs(),
             source: codex_protocol::protocol::HookSource::User,
             display_order: 0,
+            env: std::collections::HashMap::new(),
         }
     }
 

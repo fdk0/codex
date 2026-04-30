@@ -259,7 +259,6 @@ mod tests {
     fn handler(matcher: Option<&str>) -> ConfiguredHandler {
         ConfiguredHandler {
             event_name: HookEventName::AfterCompaction,
-            is_managed: false,
             matcher: matcher.map(str::to_owned),
             conditions: HookConditions::default(),
             command: "echo ok".to_string(),
@@ -268,6 +267,7 @@ mod tests {
             source_path: test_path_buf("/tmp/hooks.json").abs(),
             source: HookSource::User,
             display_order: 0,
+            env: std::collections::HashMap::new(),
         }
     }
 
