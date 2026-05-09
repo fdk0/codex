@@ -56,6 +56,8 @@ pub(crate) fn select_handlers_for_matcher_inputs(
             | HookEventName::PermissionRequest
             | HookEventName::PostToolUse
             | HookEventName::SessionStart
+            | HookEventName::PreCompact
+            | HookEventName::PostCompact
             | HookEventName::AfterCompaction => {
                 if matcher_inputs.is_empty() {
                     matches_matcher(handler.matcher.as_deref(), /*input*/ None)
@@ -171,6 +173,8 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
         HookEventName::PreToolUse
         | HookEventName::PermissionRequest
         | HookEventName::PostToolUse
+        | HookEventName::PreCompact
+        | HookEventName::PostCompact
         | HookEventName::AfterCompaction
         | HookEventName::UserPromptSubmit
         | HookEventName::Stop => HookScope::Turn,
@@ -184,7 +188,6 @@ mod tests {
     use codex_protocol::protocol::HookSource;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
-    use pretty_assertions::assert_eq;
 
     use super::ConfiguredHandler;
     use super::HookSelectionContext;
@@ -194,13 +197,32 @@ mod tests {
     fn make_handler(
         event_name: HookEventName,
         matcher: Option<&str>,
-        conditions: HookConditions,
         command: &str,
         display_order: i64,
     ) -> ConfiguredHandler {
         ConfiguredHandler {
             event_name,
             matcher: matcher.map(str::to_owned),
+            conditions: HookConditions::default(),
+            command: command.to_string(),
+            timeout_sec: 5,
+            status_message: None,
+            source_path: test_path_buf("/tmp/hooks.json").abs(),
+            source: HookSource::User,
+            display_order,
+            env: std::collections::HashMap::new(),
+        }
+    }
+
+    fn make_handler_with_conditions(
+        event_name: HookEventName,
+        command: &str,
+        display_order: i64,
+        conditions: HookConditions,
+    ) -> ConfiguredHandler {
+        ConfiguredHandler {
+            event_name,
+            matcher: None,
             conditions,
             command: command.to_string(),
             timeout_sec: 5,
@@ -212,35 +234,52 @@ mod tests {
         }
     }
 
+    fn selection(
+        event_name: HookEventName,
+        matcher_input: Option<&str>,
+    ) -> HookSelectionContext<'_> {
+        HookSelectionContext {
+            event_name,
+            matcher_input,
+            active_profile: None,
+            model: None,
+            permission_mode: None,
+        }
+    }
+
+    fn selection_with_conditions<'a>(
+        event_name: HookEventName,
+        active_profile: Option<&'a str>,
+        model: Option<&'a str>,
+        permission_mode: Option<&'a str>,
+    ) -> HookSelectionContext<'a> {
+        HookSelectionContext {
+            event_name,
+            matcher_input: None,
+            active_profile,
+            model,
+            permission_mode,
+        }
+    }
+
     #[test]
     fn select_handlers_keeps_duplicate_stop_handlers() {
         let handlers = vec![
             make_handler(
                 HookEventName::Stop,
-                None,
-                HookConditions::default(),
+                /*matcher*/ None,
                 "echo same",
-                0,
+                /*display_order*/ 0,
             ),
             make_handler(
                 HookEventName::Stop,
-                None,
-                HookConditions::default(),
+                /*matcher*/ None,
                 "echo same",
-                1,
+                /*display_order*/ 1,
             ),
         ];
 
-        let selected = select_handlers(
-            &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::Stop,
-                matcher_input: None,
-                active_profile: None,
-                model: None,
-                permission_mode: None,
-            },
-        );
+        let selected = select_handlers(&handlers, selection(HookEventName::Stop, None));
 
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0].display_order, 0);
@@ -253,28 +292,20 @@ mod tests {
             make_handler(
                 HookEventName::SessionStart,
                 Some("start.*"),
-                HookConditions::default(),
                 "echo same",
-                0,
+                /*display_order*/ 0,
             ),
             make_handler(
                 HookEventName::SessionStart,
                 Some("^startup$"),
-                HookConditions::default(),
                 "echo same",
-                1,
+                /*display_order*/ 1,
             ),
         ];
 
         let selected = select_handlers(
             &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::SessionStart,
-                matcher_input: Some("startup"),
-                active_profile: None,
-                model: None,
-                permission_mode: None,
-            },
+            selection(HookEventName::SessionStart, Some("startup")),
         );
 
         assert_eq!(selected.len(), 2);
@@ -283,33 +314,136 @@ mod tests {
     }
 
     #[test]
-    fn pre_tool_use_matches_tool_name() {
+    fn compact_hooks_match_trigger() {
         let handlers = vec![
             make_handler(
-                HookEventName::PreToolUse,
-                Some("^Bash$"),
-                HookConditions::default(),
-                "echo same",
-                0,
+                HookEventName::PreCompact,
+                Some("manual"),
+                "echo manual",
+                /*display_order*/ 0,
             ),
             make_handler(
-                HookEventName::PreToolUse,
-                Some("^Edit$"),
-                HookConditions::default(),
-                "echo same",
-                1,
+                HookEventName::PreCompact,
+                Some("auto"),
+                "echo auto",
+                /*display_order*/ 1,
             ),
         ];
 
         let selected = select_handlers(
             &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::PreToolUse,
-                matcher_input: Some("Bash"),
-                active_profile: None,
-                model: None,
-                permission_mode: None,
+            selection(HookEventName::PreCompact, Some("manual")),
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].display_order, 0);
+    }
+
+    #[test]
+    fn select_handlers_filters_by_active_profile_conditions() {
+        let handlers = vec![
+            make_handler_with_conditions(
+                HookEventName::PostToolUse,
+                "echo default",
+                /*display_order*/ 0,
+                HookConditions::default(),
+            ),
+            make_handler_with_conditions(
+                HookEventName::PostToolUse,
+                "echo assistant",
+                /*display_order*/ 1,
+                HookConditions {
+                    profile: Some("assistant".to_string()),
+                    ..HookConditions::default()
+                },
+            ),
+            make_handler_with_conditions(
+                HookEventName::PostToolUse,
+                "echo bd",
+                /*display_order*/ 2,
+                HookConditions {
+                    profiles: vec!["bd-driver".to_string(), "bd-worker".to_string()],
+                    ..HookConditions::default()
+                },
+            ),
+        ];
+
+        let selected = select_handlers(
+            &handlers,
+            selection_with_conditions(
+                HookEventName::PostToolUse,
+                Some("bd-worker"),
+                /*model*/ None,
+                /*permission_mode*/ None,
+            ),
+        );
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|handler| handler.display_order)
+                .collect::<Vec<_>>(),
+            vec![0, 2],
+        );
+    }
+
+    #[test]
+    fn select_handlers_requires_all_declared_conditions_to_match() {
+        let handlers = vec![make_handler_with_conditions(
+            HookEventName::PermissionRequest,
+            "echo matched",
+            /*display_order*/ 0,
+            HookConditions {
+                profile: Some("bd-worker".to_string()),
+                model: Some("gpt-5.5".to_string()),
+                permission_mode: Some("workspace-write".to_string()),
+                ..HookConditions::default()
             },
+        )];
+
+        let selected = select_handlers(
+            &handlers,
+            selection_with_conditions(
+                HookEventName::PermissionRequest,
+                Some("bd-worker"),
+                Some("gpt-5.5"),
+                Some("workspace-write"),
+            ),
+        );
+        let wrong_profile = select_handlers(
+            &handlers,
+            selection_with_conditions(
+                HookEventName::PermissionRequest,
+                Some("assistant"),
+                Some("gpt-5.5"),
+                Some("workspace-write"),
+            ),
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(wrong_profile.len(), 0);
+    }
+
+    #[test]
+    fn pre_tool_use_matches_tool_name() {
+        let handlers = vec![
+            make_handler(
+                HookEventName::PreToolUse,
+                Some("^Bash$"),
+                "echo same",
+                /*display_order*/ 0,
+            ),
+            make_handler(
+                HookEventName::PreToolUse,
+                Some("^Edit$"),
+                "echo same",
+                /*display_order*/ 1,
+            ),
+        ];
+
+        let selected = select_handlers(
+            &handlers,
+            selection(HookEventName::PreToolUse, Some("Bash")),
         );
 
         assert_eq!(selected.len(), 1);
@@ -322,62 +456,20 @@ mod tests {
             make_handler(
                 HookEventName::PostToolUse,
                 Some("^Bash$"),
-                HookConditions::default(),
                 "echo same",
-                0,
+                /*display_order*/ 0,
             ),
             make_handler(
                 HookEventName::PostToolUse,
                 Some("^Edit$"),
-                HookConditions::default(),
                 "echo same",
-                1,
+                /*display_order*/ 1,
             ),
         ];
 
         let selected = select_handlers(
             &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::PostToolUse,
-                matcher_input: Some("Bash"),
-                active_profile: None,
-                model: None,
-                permission_mode: None,
-            },
-        );
-
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].display_order, 0);
-    }
-
-    #[test]
-    fn after_compaction_matches_source() {
-        let handlers = vec![
-            make_handler(
-                HookEventName::AfterCompaction,
-                Some("^manual$"),
-                HookConditions::default(),
-                "echo same",
-                0,
-            ),
-            make_handler(
-                HookEventName::AfterCompaction,
-                Some("^auto$"),
-                HookConditions::default(),
-                "echo same",
-                1,
-            ),
-        ];
-
-        let selected = select_handlers(
-            &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::AfterCompaction,
-                matcher_input: Some("manual"),
-                active_profile: None,
-                model: None,
-                permission_mode: None,
-            },
+            selection(HookEventName::PostToolUse, Some("Bash")),
         );
 
         assert_eq!(selected.len(), 1);
@@ -390,28 +482,20 @@ mod tests {
             make_handler(
                 HookEventName::PreToolUse,
                 Some("*"),
-                HookConditions::default(),
                 "echo same",
-                0,
+                /*display_order*/ 0,
             ),
             make_handler(
                 HookEventName::PreToolUse,
                 Some("^Edit$"),
-                HookConditions::default(),
                 "echo same",
-                1,
+                /*display_order*/ 1,
             ),
         ];
 
         let selected = select_handlers(
             &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::PreToolUse,
-                matcher_input: Some("Bash"),
-                active_profile: None,
-                model: None,
-                permission_mode: None,
-            },
+            selection(HookEventName::PreToolUse, Some("Bash")),
         );
 
         assert_eq!(selected.len(), 1);
@@ -423,40 +507,21 @@ mod tests {
         let handlers = vec![make_handler(
             HookEventName::PreToolUse,
             Some("Edit|Write"),
-            HookConditions::default(),
             "echo same",
-            0,
+            /*display_order*/ 0,
         )];
 
         let selected_edit = select_handlers(
             &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::PreToolUse,
-                matcher_input: Some("Edit"),
-                active_profile: None,
-                model: None,
-                permission_mode: None,
-            },
+            selection(HookEventName::PreToolUse, Some("Edit")),
         );
         let selected_write = select_handlers(
             &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::PreToolUse,
-                matcher_input: Some("Write"),
-                active_profile: None,
-                model: None,
-                permission_mode: None,
-            },
+            selection(HookEventName::PreToolUse, Some("Write")),
         );
         let selected_bash = select_handlers(
             &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::PreToolUse,
-                matcher_input: Some("Bash"),
-                active_profile: None,
-                model: None,
-                permission_mode: None,
-            },
+            selection(HookEventName::PreToolUse, Some("Bash")),
         );
 
         assert_eq!(selected_edit.len(), 1);
@@ -470,28 +535,24 @@ mod tests {
             make_handler(
                 HookEventName::PreToolUse,
                 Some("^apply_patch$"),
-                HookConditions::default(),
                 "echo apply_patch",
                 /*display_order*/ 0,
             ),
             make_handler(
                 HookEventName::PreToolUse,
                 Some("^Write$"),
-                HookConditions::default(),
                 "echo write",
                 /*display_order*/ 1,
             ),
             make_handler(
                 HookEventName::PreToolUse,
                 Some("^Edit$"),
-                HookConditions::default(),
                 "echo edit",
                 /*display_order*/ 2,
             ),
             make_handler(
                 HookEventName::PreToolUse,
                 Some("apply_patch|Write|Edit"),
-                HookConditions::default(),
                 "echo combined",
                 /*display_order*/ 3,
             ),
@@ -499,13 +560,7 @@ mod tests {
 
         let selected = select_handlers_for_matcher_inputs(
             &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::PreToolUse,
-                matcher_input: Some("apply_patch"),
-                active_profile: None,
-                model: None,
-                permission_mode: None,
-            },
+            selection(HookEventName::PreToolUse, Some("apply_patch")),
             &["apply_patch", "Write", "Edit"],
         );
 
@@ -524,30 +579,19 @@ mod tests {
         let handlers = vec![
             make_handler(
                 HookEventName::UserPromptSubmit,
-                None,
-                HookConditions::default(),
+                Some("^hello"),
                 "echo first",
-                0,
+                /*display_order*/ 0,
             ),
             make_handler(
                 HookEventName::UserPromptSubmit,
-                None,
-                HookConditions::default(),
+                Some("["),
                 "echo second",
-                1,
+                /*display_order*/ 1,
             ),
         ];
 
-        let selected = select_handlers(
-            &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::UserPromptSubmit,
-                matcher_input: None,
-                active_profile: None,
-                model: None,
-                permission_mode: None,
-            },
-        );
+        let selected = select_handlers(&handlers, selection(HookEventName::UserPromptSubmit, None));
 
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0].display_order, 0);
@@ -559,126 +603,29 @@ mod tests {
         let handlers = vec![
             make_handler(
                 HookEventName::Stop,
-                None,
-                HookConditions::default(),
+                /*matcher*/ None,
                 "first",
-                0,
+                /*display_order*/ 0,
             ),
             make_handler(
                 HookEventName::Stop,
-                None,
-                HookConditions::default(),
+                /*matcher*/ None,
                 "second",
-                1,
+                /*display_order*/ 1,
             ),
             make_handler(
                 HookEventName::Stop,
-                None,
-                HookConditions::default(),
+                /*matcher*/ None,
                 "third",
-                2,
+                /*display_order*/ 2,
             ),
         ];
 
-        let selected = select_handlers(
-            &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::Stop,
-                matcher_input: None,
-                active_profile: None,
-                model: None,
-                permission_mode: None,
-            },
-        );
+        let selected = select_handlers(&handlers, selection(HookEventName::Stop, None));
 
         assert_eq!(selected.len(), 3);
-        assert_eq!(selected[0].display_order, 0);
-        assert_eq!(selected[1].display_order, 1);
-        assert_eq!(selected[2].display_order, 2);
-    }
-
-    #[test]
-    fn select_handlers_rejects_profile_scoped_hook_for_other_profiles() {
-        let handlers = vec![make_handler(
-            HookEventName::SessionStart,
-            Some("^startup$"),
-            HookConditions {
-                profile: None,
-                profiles: vec!["review".to_string(), "worker-profile".to_string()],
-                model: None,
-                models: Vec::new(),
-                permission_mode: None,
-                permission_modes: Vec::new(),
-            },
-            "echo scoped",
-            0,
-        )];
-
-        let selected = select_handlers(
-            &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::SessionStart,
-                matcher_input: Some("startup"),
-                active_profile: Some("driver-profile"),
-                model: None,
-                permission_mode: None,
-            },
-        );
-
-        assert_eq!(selected, Vec::<ConfiguredHandler>::new());
-    }
-
-    #[test]
-    fn select_handlers_supports_model_and_permission_mode_conditions() {
-        let handlers = vec![make_handler(
-            HookEventName::Stop,
-            None,
-            HookConditions {
-                profile: Some("review".to_string()),
-                profiles: Vec::new(),
-                model: None,
-                models: vec!["gpt-5.4".to_string()],
-                permission_mode: None,
-                permission_modes: vec!["default".to_string()],
-            },
-            "echo same",
-            0,
-        )];
-
-        let matched = select_handlers(
-            &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::Stop,
-                matcher_input: None,
-                active_profile: Some("review"),
-                model: Some("gpt-5.4"),
-                permission_mode: Some("default"),
-            },
-        );
-        assert_eq!(matched.len(), 1);
-
-        let wrong_model = select_handlers(
-            &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::Stop,
-                matcher_input: None,
-                active_profile: Some("review"),
-                model: Some("gpt-5.4-mini"),
-                permission_mode: Some("default"),
-            },
-        );
-        assert_eq!(wrong_model, Vec::<ConfiguredHandler>::new());
-
-        let wrong_permission = select_handlers(
-            &handlers,
-            HookSelectionContext {
-                event_name: HookEventName::Stop,
-                matcher_input: None,
-                active_profile: Some("review"),
-                model: Some("gpt-5.4"),
-                permission_mode: Some("bypassPermissions"),
-            },
-        );
-        assert_eq!(wrong_permission, Vec::<ConfiguredHandler>::new());
+        assert_eq!(selected[0].command, "first");
+        assert_eq!(selected[1].command, "second");
+        assert_eq!(selected[2].command, "third");
     }
 }

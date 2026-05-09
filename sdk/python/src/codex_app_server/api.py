@@ -10,7 +10,6 @@ from .generated.v2_all import (
     ApprovalsReviewer,
     AskForApproval,
     ModelListResponse,
-    PermissionProfile,
     Personality,
     ReasoningEffort,
     ReasoningSummary,
@@ -39,14 +38,14 @@ from .generated.v2_all import (
 )
 from .models import InitializeResponse, JsonObject, Notification, ServerInfo
 from ._inputs import (
-    ImageInput,
+    ImageInput as ImageInput,
     Input,
-    InputItem,
-    LocalImageInput,
-    MentionInput,
+    InputItem as InputItem,
+    LocalImageInput as LocalImageInput,
+    MentionInput as MentionInput,
     RunInput,
-    SkillInput,
-    TextInput,
+    SkillInput as SkillInput,
+    TextInput as TextInput,
     _normalize_run_input,
     _to_wire_input,
 )
@@ -150,7 +149,6 @@ class Codex:
         ephemeral: bool | None = None,
         model: str | None = None,
         model_provider: str | None = None,
-        permission_profile: PermissionProfile | None = None,
         personality: Personality | None = None,
         sandbox: SandboxMode | None = None,
         service_name: str | None = None,
@@ -167,7 +165,6 @@ class Codex:
             ephemeral=ephemeral,
             model=model,
             model_provider=model_provider,
-            permission_profile=permission_profile,
             personality=personality,
             sandbox=sandbox,
             service_name=service_name,
@@ -215,10 +212,8 @@ class Codex:
         config: JsonObject | None = None,
         cwd: str | None = None,
         developer_instructions: str | None = None,
-        exclude_turns: bool | None = None,
         model: str | None = None,
         model_provider: str | None = None,
-        permission_profile: PermissionProfile | None = None,
         personality: Personality | None = None,
         sandbox: SandboxMode | None = None,
         service_tier: ServiceTier | None = None,
@@ -231,10 +226,8 @@ class Codex:
             config=config,
             cwd=cwd,
             developer_instructions=developer_instructions,
-            exclude_turns=exclude_turns,
             model=model,
             model_provider=model_provider,
-            permission_profile=permission_profile,
             personality=personality,
             sandbox=sandbox,
             service_tier=service_tier,
@@ -253,10 +246,8 @@ class Codex:
         cwd: str | None = None,
         developer_instructions: str | None = None,
         ephemeral: bool | None = None,
-        exclude_turns: bool | None = None,
         model: str | None = None,
         model_provider: str | None = None,
-        permission_profile: PermissionProfile | None = None,
         sandbox: SandboxMode | None = None,
         service_tier: ServiceTier | None = None,
     ) -> Thread:
@@ -269,10 +260,8 @@ class Codex:
             cwd=cwd,
             developer_instructions=developer_instructions,
             ephemeral=ephemeral,
-            exclude_turns=exclude_turns,
             model=model,
             model_provider=model_provider,
-            permission_profile=permission_profile,
             sandbox=sandbox,
             service_tier=service_tier,
         )
@@ -285,6 +274,7 @@ class Codex:
     def thread_unarchive(self, thread_id: str) -> Thread:
         unarchived = self._client.thread_unarchive(thread_id)
         return Thread(self._client, unarchived.thread.id)
+
     # END GENERATED: Codex.flat_methods
 
     def models(self, *, include_hidden: bool = False) -> ModelListResponse:
@@ -356,7 +346,6 @@ class AsyncCodex:
         ephemeral: bool | None = None,
         model: str | None = None,
         model_provider: str | None = None,
-        permission_profile: PermissionProfile | None = None,
         personality: Personality | None = None,
         sandbox: SandboxMode | None = None,
         service_name: str | None = None,
@@ -374,7 +363,6 @@ class AsyncCodex:
             ephemeral=ephemeral,
             model=model,
             model_provider=model_provider,
-            permission_profile=permission_profile,
             personality=personality,
             sandbox=sandbox,
             service_name=service_name,
@@ -423,10 +411,8 @@ class AsyncCodex:
         config: JsonObject | None = None,
         cwd: str | None = None,
         developer_instructions: str | None = None,
-        exclude_turns: bool | None = None,
         model: str | None = None,
         model_provider: str | None = None,
-        permission_profile: PermissionProfile | None = None,
         personality: Personality | None = None,
         sandbox: SandboxMode | None = None,
         service_tier: ServiceTier | None = None,
@@ -440,10 +426,8 @@ class AsyncCodex:
             config=config,
             cwd=cwd,
             developer_instructions=developer_instructions,
-            exclude_turns=exclude_turns,
             model=model,
             model_provider=model_provider,
-            permission_profile=permission_profile,
             personality=personality,
             sandbox=sandbox,
             service_tier=service_tier,
@@ -462,10 +446,8 @@ class AsyncCodex:
         cwd: str | None = None,
         developer_instructions: str | None = None,
         ephemeral: bool | None = None,
-        exclude_turns: bool | None = None,
         model: str | None = None,
         model_provider: str | None = None,
-        permission_profile: PermissionProfile | None = None,
         sandbox: SandboxMode | None = None,
         service_tier: ServiceTier | None = None,
     ) -> AsyncThread:
@@ -479,10 +461,8 @@ class AsyncCodex:
             cwd=cwd,
             developer_instructions=developer_instructions,
             ephemeral=ephemeral,
-            exclude_turns=exclude_turns,
             model=model,
             model_provider=model_provider,
-            permission_profile=permission_profile,
             sandbox=sandbox,
             service_tier=service_tier,
         )
@@ -497,6 +477,7 @@ class AsyncCodex:
         await self._ensure_initialized()
         unarchived = await self._client.thread_unarchive(thread_id)
         return AsyncThread(self, unarchived.thread.id)
+
     # END GENERATED: AsyncCodex.flat_methods
 
     async def models(self, *, include_hidden: bool = False) -> ModelListResponse:
@@ -519,7 +500,6 @@ class Thread:
         effort: ReasoningEffort | None = None,
         model: str | None = None,
         output_schema: JsonObject | None = None,
-        permission_profile: PermissionProfile | None = None,
         personality: Personality | None = None,
         sandbox_policy: SandboxPolicy | None = None,
         service_tier: ServiceTier | None = None,
@@ -533,7 +513,6 @@ class Thread:
             effort=effort,
             model=model,
             output_schema=output_schema,
-            permission_profile=permission_profile,
             personality=personality,
             sandbox_policy=sandbox_policy,
             service_tier=service_tier,
@@ -556,7 +535,6 @@ class Thread:
         effort: ReasoningEffort | None = None,
         model: str | None = None,
         output_schema: JsonObject | None = None,
-        permission_profile: PermissionProfile | None = None,
         personality: Personality | None = None,
         sandbox_policy: SandboxPolicy | None = None,
         service_tier: ServiceTier | None = None,
@@ -572,7 +550,6 @@ class Thread:
             effort=effort,
             model=model,
             output_schema=output_schema,
-            permission_profile=permission_profile,
             personality=personality,
             sandbox_policy=sandbox_policy,
             service_tier=service_tier,
@@ -580,6 +557,7 @@ class Thread:
         )
         turn = self._client.turn_start(self.id, wire_input, params=params)
         return TurnHandle(self._client, self.id, turn.turn.id)
+
     # END GENERATED: Thread.flat_methods
 
     def read(self, *, include_turns: bool = False) -> ThreadReadResponse:
@@ -607,7 +585,6 @@ class AsyncThread:
         effort: ReasoningEffort | None = None,
         model: str | None = None,
         output_schema: JsonObject | None = None,
-        permission_profile: PermissionProfile | None = None,
         personality: Personality | None = None,
         sandbox_policy: SandboxPolicy | None = None,
         service_tier: ServiceTier | None = None,
@@ -621,7 +598,6 @@ class AsyncThread:
             effort=effort,
             model=model,
             output_schema=output_schema,
-            permission_profile=permission_profile,
             personality=personality,
             sandbox_policy=sandbox_policy,
             service_tier=service_tier,
@@ -644,7 +620,6 @@ class AsyncThread:
         effort: ReasoningEffort | None = None,
         model: str | None = None,
         output_schema: JsonObject | None = None,
-        permission_profile: PermissionProfile | None = None,
         personality: Personality | None = None,
         sandbox_policy: SandboxPolicy | None = None,
         service_tier: ServiceTier | None = None,
@@ -661,7 +636,6 @@ class AsyncThread:
             effort=effort,
             model=model,
             output_schema=output_schema,
-            permission_profile=permission_profile,
             personality=personality,
             sandbox_policy=sandbox_policy,
             service_tier=service_tier,
@@ -673,6 +647,7 @@ class AsyncThread:
             params=params,
         )
         return AsyncTurnHandle(self._codex, self.id, turn.turn.id)
+
     # END GENERATED: AsyncThread.flat_methods
 
     async def read(self, *, include_turns: bool = False) -> ThreadReadResponse:
@@ -703,11 +678,10 @@ class TurnHandle:
         return self._client.turn_interrupt(self.thread_id, self.id)
 
     def stream(self) -> Iterator[Notification]:
-        # TODO: replace this client-wide experimental guard with per-turn event demux.
-        self._client.acquire_turn_consumer(self.id)
+        self._client.register_turn_notifications(self.id)
         try:
             while True:
-                event = self._client.next_notification()
+                event = self._client.next_turn_notification(self.id)
                 yield event
                 if (
                     event.method == "turn/completed"
@@ -716,7 +690,7 @@ class TurnHandle:
                 ):
                     break
         finally:
-            self._client.release_turn_consumer(self.id)
+            self._client.unregister_turn_notifications(self.id)
 
     def run(self) -> AppServerTurn:
         completed: TurnCompletedNotification | None = None
@@ -757,11 +731,10 @@ class AsyncTurnHandle:
 
     async def stream(self) -> AsyncIterator[Notification]:
         await self._codex._ensure_initialized()
-        # TODO: replace this client-wide experimental guard with per-turn event demux.
-        self._codex._client.acquire_turn_consumer(self.id)
+        self._codex._client.register_turn_notifications(self.id)
         try:
             while True:
-                event = await self._codex._client.next_notification()
+                event = await self._codex._client.next_turn_notification(self.id)
                 yield event
                 if (
                     event.method == "turn/completed"
@@ -770,7 +743,7 @@ class AsyncTurnHandle:
                 ):
                     break
         finally:
-            self._codex._client.release_turn_consumer(self.id)
+            self._codex._client.unregister_turn_notifications(self.id)
 
     async def run(self) -> AppServerTurn:
         completed: TurnCompletedNotification | None = None

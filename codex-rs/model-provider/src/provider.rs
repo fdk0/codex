@@ -85,6 +85,11 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         ProviderCapabilities::default()
     }
 
+    /// Returns whether requests made through this provider should include attestation.
+    fn supports_attestation(&self) -> bool {
+        false
+    }
+
     /// Returns the provider-scoped auth manager, when this provider uses one.
     ///
     /// TODO(celia-oai): Make auth manager access internal to this crate so callers
@@ -104,6 +109,11 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         let auth = self.auth().await;
         self.info()
             .to_api_provider(auth.as_ref().map(CodexAuth::auth_mode))
+    }
+
+    /// Returns the provider base URL that will be used at request time.
+    async fn runtime_base_url(&self) -> codex_protocol::error::Result<Option<String>> {
+        Ok(self.info().base_url.clone())
     }
 
     /// Returns the auth provider used to attach request credentials.
@@ -160,6 +170,13 @@ impl ModelProvider for ConfiguredModelProvider {
 
     fn auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.auth_manager.clone()
+    }
+
+    fn supports_attestation(&self) -> bool {
+        self.auth_manager
+            .as_ref()
+            .and_then(|auth_manager| auth_manager.auth_cached())
+            .is_some_and(|auth| auth.is_chatgpt_auth())
     }
 
     async fn auth(&self) -> Option<CodexAuth> {
@@ -331,6 +348,22 @@ mod tests {
         );
 
         assert_eq!(provider.capabilities(), ProviderCapabilities::default());
+    }
+
+    #[tokio::test]
+    async fn configured_provider_runtime_base_url_uses_configured_base_url() {
+        let provider = create_model_provider(
+            provider_for("https://example.test/v1".to_string()),
+            /*auth_manager*/ None,
+        );
+
+        assert_eq!(
+            provider
+                .runtime_base_url()
+                .await
+                .expect("runtime base URL should resolve"),
+            Some("https://example.test/v1".to_string())
+        );
     }
 
     #[test]

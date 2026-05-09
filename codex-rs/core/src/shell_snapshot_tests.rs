@@ -83,14 +83,18 @@ fn assert_posix_snapshot_sections(snapshot: &str) {
 async fn get_snapshot(shell_type: ShellType) -> Result<String> {
     let dir = tempdir()?;
     let path = dir.path().join("snapshot.sh");
-    let home_display = dir.path().display().to_string();
-    let env_overrides = [
-        ("HOME", home_display.as_str()),
-        ("ZDOTDIR", home_display.as_str()),
-    ];
-    let shell = crate::shell::get_shell(shell_type, /*path*/ None)
-        .context("test shell should be available")?;
-    write_shell_snapshot(&shell, &path.abs(), &dir.path().abs(), &env_overrides).await?;
+    let shell = Shell {
+        shell_path: match shell_type {
+            ShellType::Zsh => PathBuf::from("/bin/zsh"),
+            ShellType::Bash => PathBuf::from("/bin/bash"),
+            ShellType::Sh => PathBuf::from("/bin/sh"),
+            ShellType::PowerShell => PathBuf::from("powershell.exe"),
+            ShellType::Cmd => PathBuf::from("cmd.exe"),
+        },
+        shell_type,
+        shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
+    };
+    write_shell_snapshot(&shell, &path.abs(), &dir.path().abs(), &[]).await?;
     let content = fs::read_to_string(&path).await?;
     Ok(content)
 }
@@ -204,17 +208,12 @@ async fn try_new_creates_and_deletes_snapshot_file() -> Result<()> {
         shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
     };
 
-    let home_display = dir.path().display().to_string();
-    let env_overrides = [
-        ("HOME", home_display.as_str()),
-        ("ZDOTDIR", home_display.as_str()),
-    ];
-    let snapshot = ShellSnapshot::try_new_with_env_overrides(
+    let snapshot = ShellSnapshot::try_new(
         &dir.path().abs(),
         ThreadId::new(),
         &dir.path().abs(),
         &shell,
-        &env_overrides,
+        /*state_db*/ None,
     )
     .await
     .expect("snapshot should be created");
@@ -240,26 +239,21 @@ async fn try_new_uses_distinct_generation_paths() -> Result<()> {
         shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
     };
 
-    let home_display = dir.path().display().to_string();
-    let env_overrides = [
-        ("HOME", home_display.as_str()),
-        ("ZDOTDIR", home_display.as_str()),
-    ];
-    let initial_snapshot = ShellSnapshot::try_new_with_env_overrides(
+    let initial_snapshot = ShellSnapshot::try_new(
         &dir.path().abs(),
         session_id,
         &dir.path().abs(),
         &shell,
-        &env_overrides,
+        /*state_db*/ None,
     )
     .await
     .expect("initial snapshot should be created");
-    let refreshed_snapshot = ShellSnapshot::try_new_with_env_overrides(
+    let refreshed_snapshot = ShellSnapshot::try_new(
         &dir.path().abs(),
         session_id,
         &dir.path().abs(),
         &shell,
-        &env_overrides,
+        /*state_db*/ None,
     )
     .await
     .expect("refreshed snapshot should be created");
@@ -302,15 +296,18 @@ async fn snapshot_shell_does_not_inherit_stdin() -> Result<()> {
         shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
     };
 
-    let home_display = home.display().to_string();
-    let env_overrides = [("HOME", home_display.as_str())];
+    let home_display = home.display();
+    let script = format!(
+        "HOME=\"{home_display}\"; export HOME; {}",
+        bash_snapshot_script()
+    );
     let output = run_script_with_timeout_with_env(
         &shell,
-        &bash_snapshot_script(),
+        &script,
         Duration::from_secs(2),
         /*use_login_shell*/ true,
         &home,
-        &env_overrides,
+        &[],
     )
     .await
     .context("run snapshot command")?;
@@ -332,35 +329,13 @@ async fn snapshot_shell_does_not_inherit_stdin() -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-async fn assert_process_exits_soon(pid: i32, context: &str) -> Result<()> {
+#[tokio::test]
+async fn timed_out_snapshot_shell_is_terminated() -> Result<()> {
     use std::process::Stdio;
     use tokio::time::Duration as TokioDuration;
     use tokio::time::Instant;
     use tokio::time::sleep;
 
-    let deadline = Instant::now() + TokioDuration::from_secs(1);
-    loop {
-        let kill_status = StdCommand::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .stderr(Stdio::null())
-            .stdout(Stdio::null())
-            .status()?;
-        if !kill_status.success() {
-            break;
-        }
-        if Instant::now() >= deadline {
-            panic!("{context}: pid {pid} is still alive after grace period");
-        }
-        sleep(TokioDuration::from_millis(50)).await;
-    }
-
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn timed_out_snapshot_shell_is_terminated() -> Result<()> {
     let dir = tempdir()?;
     let pid_path = dir.path().join("pid");
     let script = format!("echo $$ > \"{}\"; sleep 30", pid_path.display());
@@ -375,7 +350,7 @@ async fn timed_out_snapshot_shell_is_terminated() -> Result<()> {
         &shell,
         &script,
         Duration::from_secs(1),
-        /*use_login_shell*/ false,
+        /*use_login_shell*/ true,
         &dir.path().abs(),
         &[],
     )
@@ -392,103 +367,22 @@ async fn timed_out_snapshot_shell_is_terminated() -> Result<()> {
         .trim()
         .parse::<i32>()?;
 
-    assert_process_exits_soon(pid, "timed out snapshot shell").await?;
-
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn timed_out_zsh_snapshot_kills_detached_process_group() -> Result<()> {
-    let shell_path = PathBuf::from("/bin/zsh");
-    if !shell_path.exists() {
-        return Ok(());
+    let deadline = Instant::now() + TokioDuration::from_secs(1);
+    loop {
+        let kill_status = StdCommand::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
+            .status()?;
+        if !kill_status.success() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("timed out snapshot shell is still alive after grace period");
+        }
+        sleep(TokioDuration::from_millis(50)).await;
     }
-
-    let dir = tempdir()?;
-    let home = dir.path().abs();
-    let background_pid_path = home.join("background-pid");
-    let zshrc = format!(
-        "sleep 30 &\nprintf '%s' \"$!\" > \"{}\"\nwhile true; do :; done\n",
-        background_pid_path.display()
-    );
-    fs::write(home.join(".zshrc"), zshrc).await?;
-
-    let shell = Shell {
-        shell_type: ShellType::Zsh,
-        shell_path,
-        shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
-    };
-
-    let home_display = home.display().to_string();
-    let env_overrides = [
-        ("HOME", home_display.as_str()),
-        ("ZDOTDIR", home_display.as_str()),
-    ];
-    let err = run_script_with_timeout_with_env(
-        &shell,
-        &zsh_snapshot_script(),
-        Duration::from_secs(1),
-        /*use_login_shell*/ true,
-        &home,
-        &env_overrides,
-    )
-    .await
-    .expect_err("zsh snapshot shell should time out");
-    assert!(
-        err.to_string().contains("timed out"),
-        "expected timeout error, got {err:?}"
-    );
-
-    let background_pid = fs::read_to_string(&background_pid_path)
-        .await
-        .expect("zsh startup should write the background pid before timing out")
-        .trim()
-        .parse::<i32>()?;
-
-    assert_process_exits_soon(background_pid, "timed out zsh snapshot child process").await?;
-
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn timed_out_snapshot_kills_descendant_sessions() -> Result<()> {
-    let dir = tempdir()?;
-    let escaped_pid_path = dir.path().join("escaped-pid");
-    let escaped_pid_display = escaped_pid_path.display();
-    let script = format!(
-        "setsid sh -c 'printf %s $$ > \"{escaped_pid_display}\"; sleep 30' & while true; do :; done"
-    );
-
-    let shell = Shell {
-        shell_type: ShellType::Sh,
-        shell_path: PathBuf::from("/bin/sh"),
-        shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
-    };
-
-    let err = run_script_with_timeout_with_env(
-        &shell,
-        &script,
-        Duration::from_secs(1),
-        /*use_login_shell*/ false,
-        &dir.path().abs(),
-        &[],
-    )
-    .await
-    .expect_err("snapshot shell should time out");
-    assert!(
-        err.to_string().contains("timed out"),
-        "expected timeout error, got {err:?}"
-    );
-
-    let escaped_pid = fs::read_to_string(&escaped_pid_path)
-        .await
-        .expect("snapshot shell should write the escaped child pid before timing out")
-        .trim()
-        .parse::<i32>()?;
-
-    assert_process_exits_soon(escaped_pid, "timed out snapshot escaped child process").await?;
 
     Ok(())
 }
@@ -558,7 +452,7 @@ async fn cleanup_stale_snapshots_removes_orphans_and_keeps_live() -> Result<()> 
     fs::write(&orphan_snapshot, "orphan").await?;
     fs::write(&invalid_snapshot, "invalid").await?;
 
-    cleanup_stale_snapshots(&codex_home, ThreadId::new()).await?;
+    cleanup_stale_snapshots(&codex_home, ThreadId::new(), /*state_db*/ None).await?;
 
     assert_eq!(live_snapshot.exists(), true);
     assert_eq!(orphan_snapshot.exists(), false);
@@ -581,7 +475,7 @@ async fn cleanup_stale_snapshots_removes_stale_rollouts() -> Result<()> {
 
     set_file_mtime(&rollout_path, SNAPSHOT_RETENTION + Duration::from_secs(60))?;
 
-    cleanup_stale_snapshots(&codex_home, ThreadId::new()).await?;
+    cleanup_stale_snapshots(&codex_home, ThreadId::new(), /*state_db*/ None).await?;
 
     assert_eq!(stale_snapshot.exists(), false);
     Ok(())
@@ -602,7 +496,7 @@ async fn cleanup_stale_snapshots_skips_active_session() -> Result<()> {
 
     set_file_mtime(&rollout_path, SNAPSHOT_RETENTION + Duration::from_secs(60))?;
 
-    cleanup_stale_snapshots(&codex_home, active_session).await?;
+    cleanup_stale_snapshots(&codex_home, active_session, /*state_db*/ None).await?;
 
     assert_eq!(active_snapshot.exists(), true);
     Ok(())

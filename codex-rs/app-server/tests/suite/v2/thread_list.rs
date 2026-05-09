@@ -614,6 +614,7 @@ sqlite = true
         generate_memories: false,
     };
     let repaired_page = codex_core::RolloutRecorder::list_threads(
+        Some(state_db.clone()),
         &rollout_config,
         /*page_size*/ 10,
         /*cursor*/ None,
@@ -879,6 +880,7 @@ async fn thread_list_filters_by_source_kind_subagent_thread_spawn() -> Result<()
     assert_ne!(cli_id, subagent_id);
     assert_eq!(data[0].parent_thread_id, Some(parent_thread_id.to_string()));
     assert!(matches!(data[0].source, SessionSource::SubAgent(_)));
+    assert_eq!(data[0].session_id, subagent_id);
 
     Ok(())
 }

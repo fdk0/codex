@@ -1,14 +1,23 @@
 use super::message_tool::MessageDeliveryMode;
 use super::message_tool::SendMessageArgs;
 use super::message_tool::handle_message_string_tool;
-use super::message_tool::send_message_content;
 use super::*;
 use crate::tools::context::FunctionToolOutput;
+use crate::tools::handlers::multi_agents_spec::create_send_message_tool;
+use codex_tools::ToolSpec;
 
 pub(crate) struct Handler;
 
 impl ToolHandler for Handler {
     type Output = FunctionToolOutput;
+
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain("send_message")
+    }
+
+    fn spec(&self) -> Option<ToolSpec> {
+        Some(create_send_message_tool())
+    }
 
     fn kind(&self) -> ToolKind {
         ToolKind::Function
@@ -25,8 +34,8 @@ impl ToolHandler for Handler {
             invocation,
             MessageDeliveryMode::QueueOnly,
             args.target,
-            send_message_content(args.message, args.items)?,
-            args.interrupt,
+            args.message,
+            /*interrupt*/ false,
         )
         .await
     }

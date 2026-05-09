@@ -1,24 +1,21 @@
 use super::*;
 use crate::CodexThread;
+use crate::StateDbHandle;
 use crate::ThreadManager;
 use crate::agent::agent_status_from_event;
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::ConfigBuilder;
-use crate::config::types::AgentWakeDescendantPolicy;
 use crate::context::ContextualUserFragment;
 use crate::context::SubagentNotification;
-use crate::session::turn_context::TurnContext;
-use crate::thread_manager::thread_store_from_config;
+use crate::init_state_db;
 use assert_matches::assert_matches;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::models::ContentItem;
-use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::MessagePhase;
-use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
@@ -31,6 +28,7 @@ use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::LocalThreadStore;
+use codex_thread_store::LocalThreadStoreConfig;
 use codex_thread_store::ThreadStore;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
@@ -57,15 +55,11 @@ async fn test_config() -> (TempDir, Config) {
 }
 
 fn text_input(text: &str) -> Op {
-    Op::UserInput {
-        items: vec![UserInput::Text {
-            text: text.to_string(),
-            text_elements: Vec::new(),
-        }],
-        environments: None,
-        final_output_json_schema: None,
-        responsesapi_client_metadata: None,
-    }
+    vec![UserInput::Text {
+        text: text.to_string(),
+        text_elements: Vec::new(),
+    }]
+    .into()
 }
 
 fn assistant_message(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
@@ -92,6 +86,7 @@ fn spawn_agent_call(call_id: &str) -> ResponseItem {
 struct AgentControlHarness {
     _home: TempDir,
     config: Config,
+    state_db: Option<StateDbHandle>,
     manager: ThreadManager,
     control: AgentControl,
 }
@@ -99,16 +94,19 @@ struct AgentControlHarness {
 impl AgentControlHarness {
     async fn new() -> Self {
         let (home, config) = test_config().await;
-        let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        let state_db = init_state_db(&config).await;
+        let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
             CodexAuth::from_api_key("dummy"),
             config.model_provider.clone(),
             config.codex_home.to_path_buf(),
             std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+            state_db.clone(),
         );
         let control = manager.agent_control();
         Self {
             _home: home,
             config,
+            state_db,
             manager,
             control,
         }
@@ -117,7 +115,7 @@ impl AgentControlHarness {
     async fn start_thread(&self) -> (ThreadId, Arc<CodexThread>) {
         let new_thread = self
             .manager
-            .start_thread(self.config.clone(), thread_store_from_config(&self.config))
+            .start_thread(self.config.clone())
             .await
             .expect("start thread");
         (new_thread.thread_id, new_thread.thread)
@@ -200,36 +198,6 @@ async fn wait_for_subagent_notification(parent_thread: &Arc<CodexThread>) -> boo
     timeout(Duration::from_secs(10), wait).await.is_ok()
 }
 
-async fn wait_for_turn_context(thread: &Arc<CodexThread>, sub_id: &str) -> Arc<TurnContext> {
-    timeout(Duration::from_secs(2), async {
-        loop {
-            if let Some(turn_context) = thread.codex.session.turn_context_for_sub_id(sub_id).await {
-                return turn_context;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("turn context should become active")
-}
-
-async fn wait_for_any_active_turn_context(thread: &Arc<CodexThread>) -> Arc<TurnContext> {
-    timeout(Duration::from_secs(2), async {
-        loop {
-            let active_turn = thread.codex.session.active_turn.lock().await;
-            if let Some(active_turn) = active_turn.as_ref()
-                && let Some((_, task)) = active_turn.tasks.first()
-            {
-                return Arc::clone(&task.turn_context);
-            }
-            drop(active_turn);
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("some turn context should become active")
-}
-
 async fn persist_thread_for_tree_resume(thread: &Arc<CodexThread>, message: &str) {
     thread
         .inject_user_message_without_turn(message.to_string())
@@ -275,7 +243,14 @@ async fn wait_for_live_thread_spawn_children(
 async fn send_input_errors_when_manager_dropped() {
     let control = AgentControl::default();
     let err = control
-        .send_input(ThreadId::new(), text_input("hello"))
+        .send_input(
+            ThreadId::new(),
+            vec![UserInput::Text {
+                text: "hello".to_string(),
+                text_elements: Vec::new(),
+            }]
+            .into(),
+        )
         .await
         .expect_err("send_input should fail without a manager");
     assert_eq!(
@@ -350,7 +325,7 @@ async fn spawn_agent_errors_when_manager_dropped() {
     let control = AgentControl::default();
     let (_home, config) = test_config().await;
     let err = control
-        .spawn_agent(config, text_input("hello"), None)
+        .spawn_agent(config, text_input("hello"), /*session_source*/ None)
         .await
         .expect_err("spawn_agent should fail without a manager");
     assert_eq!(
@@ -379,7 +354,14 @@ async fn send_input_errors_when_thread_missing() {
     let thread_id = ThreadId::new();
     let err = harness
         .control
-        .send_input(thread_id, text_input("hello"))
+        .send_input(
+            thread_id,
+            vec![UserInput::Text {
+                text: "hello".to_string(),
+                text_elements: Vec::new(),
+            }]
+            .into(),
+        )
         .await
         .expect_err("send_input should fail for missing thread");
     assert_matches!(err, CodexErr::ThreadNotFound(id) if id == thread_id);
@@ -439,7 +421,14 @@ async fn send_input_submits_user_message() {
 
     let submission_id = harness
         .control
-        .send_input(thread_id, text_input("hello from tests"))
+        .send_input(
+            thread_id,
+            vec![UserInput::Text {
+                text: "hello from tests".to_string(),
+                text_elements: Vec::new(),
+            }]
+            .into(),
+        )
         .await
         .expect("send_input should succeed");
     assert!(!submission_id.is_empty());
@@ -472,7 +461,7 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
         AgentPath::try_from("/root/worker").expect("agent path"),
         Vec::new(),
         "hello from tests".to_string(),
-        false,
+        /*trigger_turn*/ false,
     );
 
     let submission_id = harness
@@ -497,12 +486,7 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
 
     timeout(Duration::from_secs(5), async {
         loop {
-            if thread
-                .codex
-                .session
-                .has_queued_response_items_for_next_turn()
-                .await
-            {
+            if thread.codex.session.has_pending_input().await {
                 break;
             }
             sleep(Duration::from_millis(10)).await;
@@ -583,7 +567,11 @@ async fn spawn_agent_creates_thread_and_sends_prompt() {
     let harness = AgentControlHarness::new().await;
     let thread_id = harness
         .control
-        .spawn_agent(harness.config.clone(), text_input("spawned"), None)
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("spawned"),
+            /*session_source*/ None,
+        )
         .await
         .expect("spawn_agent should succeed");
     let _thread = harness
@@ -628,10 +616,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         Some("Child subagent guidance.".to_string());
     let new_thread = harness
         .manager
-        .start_thread(
-            parent_config.clone(),
-            thread_store_from_config(&parent_config),
-        )
+        .start_thread(parent_config.clone())
         .await
         .expect("start parent thread");
     let parent_thread_id = new_thread.thread_id;
@@ -735,18 +720,11 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
             phase: None,
         },
         assistant_message("parent final answer", Some(MessagePhase::FinalAnswer)),
-        ResponseItem::FunctionCallOutput {
-            call_id: parent_spawn_call_id.clone(),
-            output: FunctionCallOutputPayload {
-                body: FunctionCallOutputBody::Text(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string()),
-                success: Some(true),
-            },
-        },
     ];
     assert_eq!(
         history.raw_items(),
         &expected_history,
-        "forked child history should keep sanitized parent context plus the synthetic fork notice"
+        "forked child history should keep only parent user messages and assistant final answers"
     );
 
     let expected = (
@@ -767,87 +745,6 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .into_iter()
         .find(|entry| *entry == expected);
     assert_eq!(captured, Some(expected));
-
-    let _ = harness
-        .control
-        .shutdown_live_agent(child_thread_id)
-        .await
-        .expect("child shutdown should submit");
-    let _ = parent_thread
-        .submit(Op::Shutdown {})
-        .await
-        .expect("parent shutdown should submit");
-}
-
-#[tokio::test]
-async fn spawn_agent_fork_injects_output_for_parent_spawn_call() {
-    let harness = AgentControlHarness::new().await;
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    let turn_context = parent_thread.codex.session.new_default_turn().await;
-    let parent_spawn_call_id = "spawn-call-1".to_string();
-    let parent_spawn_call = ResponseItem::FunctionCall {
-        id: None,
-        name: "spawn_agent".to_string(),
-        namespace: None,
-        arguments: "{}".to_string(),
-        call_id: parent_spawn_call_id.clone(),
-    };
-    parent_thread
-        .codex
-        .session
-        .record_conversation_items(turn_context.as_ref(), &[parent_spawn_call])
-        .await;
-    parent_thread
-        .codex
-        .session
-        .ensure_rollout_materialized()
-        .await;
-    let _ = parent_thread.codex.session.flush_rollout().await;
-
-    let child_thread_id = harness
-        .control
-        .spawn_agent_with_metadata(
-            harness.config.clone(),
-            text_input("child task"),
-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id,
-                depth: 1,
-                agent_path: None,
-                agent_nickname: None,
-                agent_role: None,
-            })),
-            SpawnAgentOptions {
-                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
-                fork_mode: Some(SpawnAgentForkMode::FullHistory),
-                wake_parent_on_completion: None,
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("forked spawn should succeed")
-        .thread_id;
-
-    let child_thread = harness
-        .manager
-        .get_thread(child_thread_id)
-        .await
-        .expect("child thread should be registered");
-    let history = child_thread.codex.session.clone_history().await;
-    let injected_output = history.raw_items().iter().find_map(|item| match item {
-        ResponseItem::FunctionCallOutput { call_id, output }
-            if call_id == &parent_spawn_call_id =>
-        {
-            Some(output)
-        }
-        _ => None,
-    });
-    let injected_output =
-        injected_output.expect("forked child should contain synthetic tool output");
-    assert_eq!(
-        injected_output.text_content(),
-        Some(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE)
-    );
-    assert_eq!(injected_output.success, Some(true));
 
     let _ = harness
         .control
@@ -1062,17 +959,25 @@ async fn spawn_agent_respects_max_threads_limit() {
     let control = manager.agent_control();
 
     let _ = manager
-        .start_thread(config.clone(), thread_store_from_config(&config))
+        .start_thread(config.clone())
         .await
         .expect("start thread");
 
     let first_agent_id = control
-        .spawn_agent(config.clone(), text_input("hello"), None)
+        .spawn_agent(
+            config.clone(),
+            text_input("hello"),
+            /*session_source*/ None,
+        )
         .await
         .expect("spawn_agent should succeed");
 
     let err = control
-        .spawn_agent(config, text_input("hello again"), None)
+        .spawn_agent(
+            config,
+            text_input("hello again"),
+            /*session_source*/ None,
+        )
         .await
         .expect_err("spawn_agent should respect max threads");
     let CodexErr::AgentLimitReached {
@@ -1106,7 +1011,11 @@ async fn spawn_agent_releases_slot_after_shutdown() {
     let control = manager.agent_control();
 
     let first_agent_id = control
-        .spawn_agent(config.clone(), text_input("hello"), None)
+        .spawn_agent(
+            config.clone(),
+            text_input("hello"),
+            /*session_source*/ None,
+        )
         .await
         .expect("spawn_agent should succeed");
     let _ = control
@@ -1115,7 +1024,11 @@ async fn spawn_agent_releases_slot_after_shutdown() {
         .expect("shutdown agent");
 
     let second_agent_id = control
-        .spawn_agent(config.clone(), text_input("hello again"), None)
+        .spawn_agent(
+            config.clone(),
+            text_input("hello again"),
+            /*session_source*/ None,
+        )
         .await
         .expect("spawn_agent should succeed after shutdown");
     let _ = control
@@ -1142,12 +1055,20 @@ async fn spawn_agent_limit_shared_across_clones() {
     let cloned = control.clone();
 
     let first_agent_id = cloned
-        .spawn_agent(config.clone(), text_input("hello"), None)
+        .spawn_agent(
+            config.clone(),
+            text_input("hello"),
+            /*session_source*/ None,
+        )
         .await
         .expect("spawn_agent should succeed");
 
     let err = control
-        .spawn_agent(config, text_input("hello again"), None)
+        .spawn_agent(
+            config,
+            text_input("hello again"),
+            /*session_source*/ None,
+        )
         .await
         .expect_err("spawn_agent should respect shared guard");
     let CodexErr::AgentLimitReached { max_threads } = err else {
@@ -1178,7 +1099,11 @@ async fn resume_agent_respects_max_threads_limit() {
     let control = manager.agent_control();
 
     let resumable_id = control
-        .spawn_agent(config.clone(), text_input("hello"), None)
+        .spawn_agent(
+            config.clone(),
+            text_input("hello"),
+            /*session_source*/ None,
+        )
         .await
         .expect("spawn_agent should succeed");
     let _ = control
@@ -1187,7 +1112,11 @@ async fn resume_agent_respects_max_threads_limit() {
         .expect("shutdown resumable thread");
 
     let active_id = control
-        .spawn_agent(config.clone(), text_input("occupy"), None)
+        .spawn_agent(
+            config.clone(),
+            text_input("occupy"),
+            /*session_source*/ None,
+        )
         .await
         .expect("spawn_agent should succeed for active slot");
 
@@ -1231,7 +1160,7 @@ async fn resume_agent_releases_slot_after_resume_failure() {
         .expect_err("resume should fail for missing rollout path");
 
     let resumed_id = control
-        .spawn_agent(config, text_input("hello"), None)
+        .spawn_agent(config, text_input("hello"), /*session_source*/ None)
         .await
         .expect("spawn should succeed after failed resume");
     let _ = control
@@ -1272,157 +1201,6 @@ async fn spawn_child_completion_notifies_parent_history() {
         .expect("child shutdown should submit");
 
     assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);
-}
-
-#[tokio::test]
-async fn completion_watcher_wakes_root_parent_for_legacy_child() {
-    let harness = AgentControlHarness::new().await;
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    let child_thread_id = harness
-        .manager
-        .start_thread(
-            harness.config.clone(),
-            thread_store_from_config(&harness.config),
-        )
-        .await
-        .expect("child thread should start")
-        .thread_id;
-    let child_thread = harness
-        .manager
-        .get_thread(child_thread_id)
-        .await
-        .expect("child thread should exist");
-    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id,
-        depth: 1,
-        agent_path: None,
-        agent_nickname: None,
-        agent_role: Some("dispatcher".to_string()),
-    });
-    harness
-        .control
-        .register_parent_wake_subscription(
-            child_thread_id,
-            Some(&session_source),
-            /*wake_parent_on_completion*/ false,
-            AgentWakeDescendantPolicy::Immediate,
-        )
-        .await;
-    harness
-        .control
-        .maybe_start_completion_watcher(
-            child_thread_id,
-            Some(session_source),
-            child_thread_id.to_string(),
-            None,
-            CompletionWatcherMode::CurrentOrNextTerminal,
-        )
-        .await;
-
-    let child_turn = child_thread.codex.session.new_default_turn().await;
-    child_thread
-        .codex
-        .session
-        .send_event(
-            child_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: child_turn.sub_id.clone(),
-                last_agent_message: Some("done".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-
-    assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);
-}
-
-#[tokio::test]
-async fn completion_watcher_rearm_for_legacy_child_marks_current_status_seen() {
-    let harness = AgentControlHarness::new().await;
-    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
-    let child_thread_id = harness
-        .manager
-        .start_thread(
-            harness.config.clone(),
-            thread_store_from_config(&harness.config),
-        )
-        .await
-        .expect("child thread should start")
-        .thread_id;
-    let child_thread = harness
-        .manager
-        .get_thread(child_thread_id)
-        .await
-        .expect("child thread should exist");
-    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id,
-        depth: 1,
-        agent_path: None,
-        agent_nickname: None,
-        agent_role: Some("dispatcher".to_string()),
-    });
-    harness
-        .control
-        .register_parent_wake_subscription(
-            child_thread_id,
-            Some(&session_source),
-            /*wake_parent_on_completion*/ true,
-            AgentWakeDescendantPolicy::Immediate,
-        )
-        .await;
-    harness
-        .control
-        .maybe_start_completion_watcher(
-            child_thread_id,
-            Some(session_source),
-            child_thread_id.to_string(),
-            None,
-            CompletionWatcherMode::CurrentOrNextTerminal,
-        )
-        .await;
-
-    let first_turn = child_thread.codex.session.new_default_turn().await;
-    child_thread
-        .codex
-        .session
-        .send_event(
-            first_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: first_turn.sub_id.clone(),
-                last_agent_message: Some("done-1".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-    let mut completion_watcher = harness
-        .control
-        .maybe_prepare_completion_watcher_rearm(
-            child_thread_id,
-            /*trigger_turn*/ true,
-            /*suppress_immediate_parent_notification*/ false,
-        )
-        .await
-        .expect("completed child should arm a replacement watcher");
-
-    assert_eq!(completion_watcher.parent_thread_id, parent_thread_id);
-    assert_eq!(
-        completion_watcher.child_reference,
-        child_thread_id.to_string()
-    );
-    assert_eq!(completion_watcher.child_agent_path, None);
-    assert_eq!(
-        timeout(
-            Duration::from_millis(50),
-            completion_watcher.status_rx.changed()
-        )
-        .await
-        .is_err(),
-        true
-    );
 }
 
 #[tokio::test]
@@ -1523,17 +1301,10 @@ async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
             AgentPath::root(),
             Vec::new(),
             "done".to_string(),
-            true,
+            /*trigger_turn*/ true,
         )
     ));
     assert!(!has_subagent_notification(&root_history_items));
-
-    let shutdown_report = harness
-        .manager
-        .shutdown_all_threads_bounded(Duration::from_secs(5))
-        .await;
-    assert_eq!(shutdown_report.submit_failed, Vec::<ThreadId>::new());
-    assert_eq!(shutdown_report.timed_out, Vec::<ThreadId>::new());
 }
 
 #[tokio::test]
@@ -1545,10 +1316,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
     let _ = tester_config.features.enable(Feature::MultiAgentV2);
     let tester_thread_id = harness
         .manager
-        .start_thread(
-            tester_config.clone(),
-            thread_store_from_config(&tester_config),
-        )
+        .start_thread(tester_config.clone())
         .await
         .expect("tester thread should start")
         .thread_id;
@@ -1603,7 +1371,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
                 worker_path.clone(),
                 Vec::new(),
                 expected_message.clone(),
-                false,
+                /*trigger_turn*/ false,
             ),
         },
     );
@@ -1638,67 +1406,90 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
             AgentPath::root(),
             Vec::new(),
             expected_message,
-            false,
+            /*trigger_turn*/ false,
         )
     ));
-
-    let shutdown_report = harness
-        .manager
-        .shutdown_all_threads_bounded(Duration::from_secs(5))
-        .await;
-    assert_eq!(shutdown_report.submit_failed, Vec::<ThreadId>::new());
-    assert_eq!(shutdown_report.timed_out, Vec::<ThreadId>::new());
 }
 
 #[tokio::test]
-async fn multi_agent_v2_completion_triggers_turn_when_child_is_wake_enabled() {
+async fn leaf_only_routes_descendant_completion_to_direct_parent_only() {
     let harness = AgentControlHarness::new().await;
-    let (_root_thread_id, root_thread) = harness.start_thread().await;
-    let (worker_thread_id, _worker_thread) = harness.start_thread().await;
-    let mut tester_config = harness.config.clone();
-    let _ = tester_config.features.enable(Feature::MultiAgentV2);
-    let tester_thread_id = harness
-        .manager
-        .start_thread(
-            tester_config.clone(),
-            thread_store_from_config(&tester_config),
+    let (root_thread_id, root_thread) = harness.start_thread().await;
+    let mut config = harness.config.clone();
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let worker_path = AgentPath::root().join("worker").expect("worker path");
+    let worker_thread_id = harness
+        .control
+        .spawn_agent(
+            config.clone(),
+            text_input("hello worker"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root_thread_id,
+                depth: 1,
+                agent_path: Some(worker_path.clone()),
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
         )
         .await
-        .expect("tester thread should start")
-        .thread_id;
+        .expect("worker spawn should succeed");
+    let tester_path = worker_path.join("tester").expect("tester path");
+    let tester_thread_id = harness
+        .control
+        .spawn_agent(
+            config,
+            text_input("hello tester"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: worker_thread_id,
+                depth: 2,
+                agent_path: Some(tester_path.clone()),
+                agent_nickname: None,
+                agent_role: Some("explorer".to_string()),
+            })),
+        )
+        .await
+        .expect("tester spawn should succeed");
+
+    let worker_thread = harness
+        .manager
+        .get_thread(worker_thread_id)
+        .await
+        .expect("worker thread should exist");
+    let worker_turn = worker_thread.codex.session.new_default_turn().await;
+    worker_thread
+        .codex
+        .session
+        .send_event(
+            worker_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: worker_turn.sub_id.clone(),
+                last_agent_message: Some("worker done".to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    worker_thread.codex.session.active_turn.lock().await.take();
+
+    sleep(Duration::from_millis(250)).await;
+    let root_history_items = root_thread
+        .codex
+        .session
+        .clone_history()
+        .await
+        .raw_items()
+        .to_vec();
+    assert!(
+        !history_contains_text(&root_history_items, "\"agent_path\":\"/root/worker\""),
+        "leaf-only wake should not notify the root while the worker has an active tester child"
+    );
+
     let tester_thread = harness
         .manager
         .get_thread(tester_thread_id)
         .await
         .expect("tester thread should exist");
-    let worker_path = AgentPath::root().join("worker_a").expect("worker path");
-    let tester_path = worker_path.join("tester").expect("tester path");
-    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: worker_thread_id,
-        depth: 2,
-        agent_path: Some(tester_path.clone()),
-        agent_nickname: None,
-        agent_role: Some("explorer".to_string()),
-    });
-    harness
-        .control
-        .register_parent_wake_subscription(
-            tester_thread_id,
-            Some(&session_source),
-            /*wake_parent_on_completion*/ true,
-            AgentWakeDescendantPolicy::Immediate,
-        )
-        .await;
-    harness
-        .control
-        .maybe_start_completion_watcher(
-            tester_thread_id,
-            Some(session_source),
-            tester_path.to_string(),
-            Some(tester_path.clone()),
-            CompletionWatcherMode::CurrentOrNextTerminal,
-        )
-        .await;
     let tester_turn = tester_thread.codex.session.new_default_turn().await;
     tester_thread
         .codex
@@ -1707,46 +1498,46 @@ async fn multi_agent_v2_completion_triggers_turn_when_child_is_wake_enabled() {
             tester_turn.as_ref(),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: tester_turn.sub_id.clone(),
-                last_agent_message: Some("done".to_string()),
+                last_agent_message: Some("tester done".to_string()),
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
             }),
         )
         .await;
+    tester_thread.codex.session.active_turn.lock().await.take();
 
-    let expected_message = crate::session_prefix::format_subagent_notification_message(
+    let expected_tester_message = crate::session_prefix::format_subagent_notification_message(
         tester_path.as_str(),
-        &AgentStatus::Completed(Some("done".to_string())),
+        &AgentStatus::Completed(Some("tester done".to_string())),
     );
-    let expected = (
+    let expected_tester_notification = (
         worker_thread_id,
         Op::InterAgentCommunication {
             communication: InterAgentCommunication::new(
                 tester_path.clone(),
                 worker_path.clone(),
                 Vec::new(),
-                expected_message.clone(),
-                true,
+                expected_tester_message.clone(),
+                /*trigger_turn*/ true,
             ),
         },
     );
-
     timeout(Duration::from_secs(5), async {
         loop {
             let captured = harness
                 .manager
                 .captured_ops()
                 .into_iter()
-                .find(|entry| *entry == expected);
-            if captured == Some(expected.clone()) {
+                .find(|entry| *entry == expected_tester_notification);
+            if captured == Some(expected_tester_notification.clone()) {
                 break;
             }
-            sleep(Duration::from_millis(10)).await;
+            sleep(Duration::from_millis(25)).await;
         }
     })
     .await
-    .expect("completion watcher should trigger a direct-parent wake");
+    .expect("tester completion should wake only its direct parent");
 
     let root_history_items = root_thread
         .codex
@@ -1755,1101 +1546,17 @@ async fn multi_agent_v2_completion_triggers_turn_when_child_is_wake_enabled() {
         .await
         .raw_items()
         .to_vec();
-    assert!(!history_contains_assistant_inter_agent_communication(
-        &root_history_items,
-        &InterAgentCommunication::new(
-            tester_path,
-            AgentPath::root(),
-            Vec::new(),
-            expected_message,
-            true,
-        )
-    ));
-
-    let shutdown_report = harness
-        .manager
-        .shutdown_all_threads_bounded(Duration::from_secs(5))
-        .await;
-    assert_eq!(shutdown_report.submit_failed, Vec::<ThreadId>::new());
-    assert_eq!(shutdown_report.timed_out, Vec::<ThreadId>::new());
-}
-
-#[tokio::test]
-async fn trigger_turn_inter_agent_message_rearms_completion_watcher_for_reused_child() {
-    let harness = AgentControlHarness::new().await;
-    let (_root_thread_id, _root_thread) = harness.start_thread().await;
-    let (worker_thread_id, _worker_thread) = harness.start_thread().await;
-    let mut tester_config = harness.config.clone();
-    let _ = tester_config.features.enable(Feature::MultiAgentV2);
-    let tester_thread_id = harness
-        .manager
-        .start_thread(
-            tester_config.clone(),
-            thread_store_from_config(&tester_config),
-        )
-        .await
-        .expect("tester thread should start")
-        .thread_id;
-    let tester_thread = harness
-        .manager
-        .get_thread(tester_thread_id)
-        .await
-        .expect("tester thread should exist");
-    let worker_path = AgentPath::root().join("worker_a").expect("worker path");
-    let tester_path = worker_path.join("tester").expect("tester path");
-    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: worker_thread_id,
-        depth: 2,
-        agent_path: Some(tester_path.clone()),
-        agent_nickname: None,
-        agent_role: Some("explorer".to_string()),
-    });
-    harness
-        .control
-        .register_parent_wake_subscription(
-            tester_thread_id,
-            Some(&session_source),
-            /*wake_parent_on_completion*/ true,
-            AgentWakeDescendantPolicy::Immediate,
-        )
-        .await;
-    harness
-        .control
-        .maybe_start_completion_watcher(
-            tester_thread_id,
-            Some(session_source),
-            tester_path.to_string(),
-            Some(tester_path.clone()),
-            CompletionWatcherMode::CurrentOrNextTerminal,
-        )
-        .await;
-
-    let first_turn = tester_thread.codex.session.new_default_turn().await;
-    tester_thread
-        .codex
-        .session
-        .send_event(
-            first_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: first_turn.sub_id.clone(),
-                last_agent_message: Some("done-1".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-
-    let first_message = crate::session_prefix::format_subagent_notification_message(
-        tester_path.as_str(),
-        &AgentStatus::Completed(Some("done-1".to_string())),
-    );
-    let first_expected = (
-        worker_thread_id,
-        Op::InterAgentCommunication {
-            communication: InterAgentCommunication::new(
-                tester_path.clone(),
-                worker_path.clone(),
-                Vec::new(),
-                first_message,
-                true,
-            ),
-        },
-    );
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if harness
-                .manager
-                .captured_ops()
-                .into_iter()
-                .any(|entry| entry == first_expected)
-            {
-                break;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("first completion wake should reach the direct parent");
-
-    let communication = InterAgentCommunication::new(
-        worker_path.clone(),
-        tester_path.clone(),
-        Vec::new(),
-        "follow up".to_string(),
-        true,
-    );
-    let submission_id = harness
-        .control
-        .send_inter_agent_communication(tester_thread_id, communication)
-        .await
-        .expect("trigger_turn follow-up should succeed for completed child");
-
-    let second_turn: Arc<TurnContext> = wait_for_turn_context(&tester_thread, &submission_id).await;
-    tester_thread
-        .codex
-        .session
-        .send_event(
-            second_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: second_turn.sub_id.clone(),
-                last_agent_message: Some("done-2".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-
-    let second_message = crate::session_prefix::format_subagent_notification_message(
-        tester_path.as_str(),
-        &AgentStatus::Completed(Some("done-2".to_string())),
-    );
-    let second_expected = (
-        worker_thread_id,
-        Op::InterAgentCommunication {
-            communication: InterAgentCommunication::new(
-                tester_path,
-                worker_path,
-                Vec::new(),
-                second_message,
-                true,
-            ),
-        },
-    );
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if harness
-                .manager
-                .captured_ops()
-                .into_iter()
-                .any(|entry| entry == second_expected)
-            {
-                break;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("second completion wake should reach the direct parent after reuse");
-}
-
-#[tokio::test]
-async fn leaf_only_completion_suppresses_parent_wake_while_descendant_is_active() {
-    let harness = AgentControlHarness::new().await;
-    let (_root_thread_id, _root_thread) = harness.start_thread().await;
-    let (worker_thread_id, _worker_thread) = harness.start_thread().await;
-    let mut tester_config = harness.config.clone();
-    let _ = tester_config.features.enable(Feature::MultiAgentV2);
-    tester_config.agent_wake_descendant_policy = AgentWakeDescendantPolicy::LeafOnly;
-    let tester_thread_id = harness
-        .manager
-        .start_thread(
-            tester_config.clone(),
-            thread_store_from_config(&tester_config),
-        )
-        .await
-        .expect("tester thread should start")
-        .thread_id;
-    let tester_thread = harness
-        .manager
-        .get_thread(tester_thread_id)
-        .await
-        .expect("tester thread should exist");
-    let worker_path = AgentPath::root().join("worker_a").expect("worker path");
-    let tester_path = worker_path.join("tester").expect("tester path");
-    let tester_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: worker_thread_id,
-        depth: 2,
-        agent_path: Some(tester_path.clone()),
-        agent_nickname: None,
-        agent_role: Some("explorer".to_string()),
-    });
-    harness
-        .control
-        .register_parent_wake_subscription(
-            tester_thread_id,
-            Some(&tester_source),
-            /*wake_parent_on_completion*/ true,
-            AgentWakeDescendantPolicy::LeafOnly,
-        )
-        .await;
-    harness
-        .control
-        .maybe_start_completion_watcher(
-            tester_thread_id,
-            Some(tester_source),
-            tester_path.to_string(),
-            Some(tester_path.clone()),
-            CompletionWatcherMode::CurrentOrNextTerminal,
-        )
-        .await;
-
-    let leaf_path = tester_path.join("leaf").expect("leaf path");
-    let leaf_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: tester_thread_id,
-        depth: 3,
-        agent_path: Some(leaf_path),
-        agent_nickname: None,
-        agent_role: Some("awaiter".to_string()),
-    });
-    let _leaf_thread = harness
-        .manager
-        .spawn_new_thread_with_source_for_tests(
-            tester_config,
-            harness.control.clone(),
-            leaf_source,
-            /*persist_extended_history*/ false,
-            /*metrics_service_name*/ None,
-            /*inherited_shell_snapshot*/ None,
-            /*inherited_exec_policy*/ None,
-        )
-        .await
-        .expect("leaf thread should start");
-
-    let tester_turn = tester_thread.codex.session.new_default_turn().await;
-    tester_thread
-        .codex
-        .session
-        .send_event(
-            tester_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: tester_turn.sub_id.clone(),
-                last_agent_message: Some("done".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-
-    sleep(Duration::from_millis(150)).await;
-
     assert!(
-        !harness
-            .manager
-            .captured_ops()
-            .into_iter()
-            .any(|(thread_id, op)| {
-                thread_id == worker_thread_id
-                    && matches!(op, Op::InterAgentCommunication { communication } if communication.trigger_turn)
-            }),
-        "leaf_only child should not wake its parent while descendants are still active"
-    );
-}
-
-#[tokio::test]
-async fn leaf_only_completion_wakes_parent_after_descendants_finish() {
-    let harness = AgentControlHarness::new().await;
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    let mut dispatcher_config = harness.config.clone();
-    dispatcher_config.agent_wake_descendant_policy = AgentWakeDescendantPolicy::LeafOnly;
-    let dispatcher_thread_id = harness
-        .manager
-        .start_thread(
-            dispatcher_config.clone(),
-            thread_store_from_config(&dispatcher_config),
-        )
-        .await
-        .expect("dispatcher thread should start")
-        .thread_id;
-    let dispatcher_thread = harness
-        .manager
-        .get_thread(dispatcher_thread_id)
-        .await
-        .expect("dispatcher thread should exist");
-    let dispatcher_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id,
-        depth: 1,
-        agent_path: None,
-        agent_nickname: None,
-        agent_role: Some("dispatcher".to_string()),
-    });
-    harness
-        .control
-        .register_parent_wake_subscription(
-            dispatcher_thread_id,
-            Some(&dispatcher_source),
-            /*wake_parent_on_completion*/ true,
-            AgentWakeDescendantPolicy::LeafOnly,
-        )
-        .await;
-    harness
-        .control
-        .maybe_start_completion_watcher(
-            dispatcher_thread_id,
-            Some(dispatcher_source),
-            dispatcher_thread_id.to_string(),
-            None,
-            CompletionWatcherMode::CurrentOrNextTerminal,
-        )
-        .await;
-
-    let worker_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: dispatcher_thread_id,
-        depth: 2,
-        agent_path: None,
-        agent_nickname: None,
-        agent_role: Some("worker".to_string()),
-    });
-    let _worker_thread = harness
-        .manager
-        .spawn_new_thread_with_source_for_tests(
-            dispatcher_config,
-            harness.control.clone(),
-            worker_source,
-            /*persist_extended_history*/ false,
-            /*metrics_service_name*/ None,
-            /*inherited_shell_snapshot*/ None,
-            /*inherited_exec_policy*/ None,
-        )
-        .await
-        .expect("worker thread should start");
-
-    let first_turn = dispatcher_thread.codex.session.new_default_turn().await;
-    dispatcher_thread
-        .codex
-        .session
-        .send_event(
-            first_turn.as_ref(),
-            EventMsg::TurnStarted(TurnStartedEvent {
-                turn_id: first_turn.sub_id.clone(),
-                started_at: None,
-                model_context_window: None,
-                collaboration_mode_kind: ModeKind::Default,
-            }),
-        )
-        .await;
-    dispatcher_thread
-        .codex
-        .session
-        .send_event(
-            first_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: first_turn.sub_id.clone(),
-                last_agent_message: Some("delegated".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-
-    sleep(Duration::from_millis(150)).await;
-    assert!(
-        !has_subagent_notification(
-            parent_thread
-                .codex
-                .session
-                .clone_history()
-                .await
-                .raw_items()
+        !history_contains_text(
+            &root_history_items,
+            "\"agent_path\":\"/root/worker/tester\""
         ),
-        "leaf_only child should not wake parent before descendants finish"
+        "tester completion should be delivered to the direct parent only"
     );
-
-    let descendants = harness
-        .control
-        .live_thread_spawn_descendants(dispatcher_thread_id)
-        .await
-        .expect("descendants should list worker");
-    assert_eq!(descendants.len(), 1);
-    harness
-        .control
-        .shutdown_live_agent(descendants[0])
-        .await
-        .expect("worker shutdown should succeed");
-
-    let second_turn = dispatcher_thread.codex.session.new_default_turn().await;
-    dispatcher_thread
-        .codex
-        .session
-        .send_event(
-            second_turn.as_ref(),
-            EventMsg::TurnStarted(TurnStartedEvent {
-                turn_id: second_turn.sub_id.clone(),
-                started_at: None,
-                model_context_window: None,
-                collaboration_mode_kind: ModeKind::Default,
-            }),
-        )
-        .await;
-    dispatcher_thread
-        .codex
-        .session
-        .send_event(
-            second_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: second_turn.sub_id.clone(),
-                last_agent_message: Some("reconciled".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-
-    assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);
-}
-
-#[tokio::test]
-async fn leaf_only_reused_child_wakes_parent_only_once_after_descendants_finish() {
-    let harness = AgentControlHarness::new().await;
-    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
-    let parent_path = AgentPath::root().join("driver").expect("parent path");
-    let mut dispatcher_config = harness.config.clone();
-    let _ = dispatcher_config.features.enable(Feature::MultiAgentV2);
-    dispatcher_config.agent_wake_descendant_policy = AgentWakeDescendantPolicy::LeafOnly;
-    let dispatcher_thread_id = harness
-        .manager
-        .start_thread(
-            dispatcher_config.clone(),
-            thread_store_from_config(&dispatcher_config),
-        )
-        .await
-        .expect("dispatcher thread should start")
-        .thread_id;
-    let dispatcher_thread = harness
-        .manager
-        .get_thread(dispatcher_thread_id)
-        .await
-        .expect("dispatcher thread should exist");
-    let dispatcher_path = parent_path.join("dispatcher").expect("dispatcher path");
-    let dispatcher_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id,
-        depth: 2,
-        agent_path: Some(dispatcher_path.clone()),
-        agent_nickname: None,
-        agent_role: Some("dispatcher".to_string()),
-    });
-    harness
-        .control
-        .register_parent_wake_subscription(
-            dispatcher_thread_id,
-            Some(&dispatcher_source),
-            /*wake_parent_on_completion*/ true,
-            AgentWakeDescendantPolicy::LeafOnly,
-        )
-        .await;
-    harness
-        .control
-        .maybe_start_completion_watcher(
-            dispatcher_thread_id,
-            Some(dispatcher_source),
-            dispatcher_path.to_string(),
-            Some(dispatcher_path.clone()),
-            CompletionWatcherMode::CurrentOrNextTerminal,
-        )
-        .await;
-
-    let worker_path = dispatcher_path.join("worker_1").expect("worker path");
-    let worker_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: dispatcher_thread_id,
-        depth: 3,
-        agent_path: Some(worker_path.clone()),
-        agent_nickname: None,
-        agent_role: Some("worker".to_string()),
-    });
-    let _worker_thread = harness
-        .manager
-        .spawn_new_thread_with_source_for_tests(
-            dispatcher_config,
-            harness.control.clone(),
-            worker_source,
-            /*persist_extended_history*/ false,
-            /*metrics_service_name*/ None,
-            /*inherited_shell_snapshot*/ None,
-            /*inherited_exec_policy*/ None,
-        )
-        .await
-        .expect("worker thread should start");
-
-    let first_turn = dispatcher_thread.codex.session.new_default_turn().await;
-    dispatcher_thread
-        .codex
-        .session
-        .send_event(
-            first_turn.as_ref(),
-            EventMsg::TurnStarted(TurnStartedEvent {
-                turn_id: first_turn.sub_id.clone(),
-                started_at: None,
-                model_context_window: None,
-                collaboration_mode_kind: ModeKind::Default,
-            }),
-        )
-        .await;
-    dispatcher_thread
-        .codex
-        .session
-        .send_event(
-            first_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: first_turn.sub_id.clone(),
-                last_agent_message: Some("delegated".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-
-    sleep(Duration::from_millis(150)).await;
-
-    let reuse_submission_id = harness
-        .control
-        .send_inter_agent_communication(
-            dispatcher_thread_id,
-            InterAgentCommunication::new(
-                parent_path.clone(),
-                dispatcher_path.clone(),
-                Vec::new(),
-                "resume work".to_string(),
-                true,
-            ),
-        )
-        .await
-        .expect("reusing completed dispatcher should succeed");
-
-    let descendants = harness
-        .control
-        .live_thread_spawn_descendants(dispatcher_thread_id)
-        .await
-        .expect("descendants should list worker");
-    assert_eq!(descendants.len(), 1);
-    harness
-        .control
-        .shutdown_live_agent(descendants[0])
-        .await
-        .expect("worker shutdown should succeed");
-
-    let second_turn: Arc<TurnContext> =
-        wait_for_turn_context(&dispatcher_thread, &reuse_submission_id).await;
-    dispatcher_thread
-        .codex
-        .session
-        .send_event(
-            second_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: second_turn.sub_id.clone(),
-                last_agent_message: Some("reconciled".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-
-    let expected_message = crate::session_prefix::format_subagent_notification_message(
-        dispatcher_path.as_str(),
-        &AgentStatus::Completed(Some("reconciled".to_string())),
+    assert!(
+        !history_contains_text(&root_history_items, "\"agent_path\":\"/root/worker\""),
+        "worker completion should stay held while the worker has tester work to process"
     );
-    let expected_parent_wake = (
-        parent_thread_id,
-        Op::InterAgentCommunication {
-            communication: InterAgentCommunication::new(
-                dispatcher_path,
-                parent_path,
-                Vec::new(),
-                expected_message,
-                true,
-            ),
-        },
-    );
-    timeout(Duration::from_secs(5), async {
-        loop {
-            let wake_count = harness
-                .manager
-                .captured_ops()
-                .into_iter()
-                .filter(|entry| *entry == expected_parent_wake)
-                .count();
-            if wake_count >= 1 {
-                break;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("reused leaf_only child should wake the parent");
-
-    sleep(Duration::from_millis(150)).await;
-
-    let wake_count = harness
-        .manager
-        .captured_ops()
-        .into_iter()
-        .filter(|entry| *entry == expected_parent_wake)
-        .count();
-    assert_eq!(wake_count, 1);
-}
-
-#[tokio::test]
-async fn leaf_only_does_not_wake_parent_with_stale_child_status_when_descendant_finishes() {
-    let harness = AgentControlHarness::new().await;
-    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
-    let parent_path = AgentPath::root();
-
-    let mut dispatcher_config = harness.config.clone();
-    let _ = dispatcher_config.features.enable(Feature::MultiAgentV2);
-    dispatcher_config.agent_wake_descendant_policy = AgentWakeDescendantPolicy::LeafOnly;
-    let dispatcher_thread_id = harness
-        .manager
-        .start_thread(
-            dispatcher_config.clone(),
-            thread_store_from_config(&dispatcher_config),
-        )
-        .await
-        .expect("dispatcher thread should start")
-        .thread_id;
-    let dispatcher_thread = harness
-        .manager
-        .get_thread(dispatcher_thread_id)
-        .await
-        .expect("dispatcher thread should exist");
-    let dispatcher_path = parent_path.join("dispatcher").expect("dispatcher path");
-    let dispatcher_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id,
-        depth: 2,
-        agent_path: Some(dispatcher_path.clone()),
-        agent_nickname: None,
-        agent_role: Some("dispatcher".to_string()),
-    });
-    harness
-        .control
-        .register_parent_wake_subscription(
-            dispatcher_thread_id,
-            Some(&dispatcher_source),
-            /*wake_parent_on_completion*/ true,
-            AgentWakeDescendantPolicy::LeafOnly,
-        )
-        .await;
-    harness
-        .control
-        .maybe_start_completion_watcher(
-            dispatcher_thread_id,
-            Some(dispatcher_source),
-            dispatcher_path.to_string(),
-            Some(dispatcher_path.clone()),
-            CompletionWatcherMode::CurrentOrNextTerminal,
-        )
-        .await;
-
-    let review_path = dispatcher_path.join("review_1").expect("review path");
-    let review_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: dispatcher_thread_id,
-        depth: 3,
-        agent_path: Some(review_path.clone()),
-        agent_nickname: None,
-        agent_role: Some("review".to_string()),
-    });
-    let review_thread_id = harness
-        .manager
-        .spawn_new_thread_with_source_for_tests(
-            dispatcher_config,
-            harness.control.clone(),
-            review_source.clone(),
-            /*persist_extended_history*/ false,
-            /*metrics_service_name*/ None,
-            /*inherited_shell_snapshot*/ None,
-            /*inherited_exec_policy*/ None,
-        )
-        .await
-        .expect("review thread should start")
-        .thread_id;
-    let review_thread = harness
-        .manager
-        .get_thread(review_thread_id)
-        .await
-        .expect("review thread should exist");
-    harness
-        .control
-        .register_parent_wake_subscription(
-            review_thread_id,
-            Some(&review_source),
-            /*wake_parent_on_completion*/ true,
-            AgentWakeDescendantPolicy::LeafOnly,
-        )
-        .await;
-    harness
-        .control
-        .maybe_start_completion_watcher(
-            review_thread_id,
-            Some(review_source),
-            review_path.to_string(),
-            Some(review_path.clone()),
-            CompletionWatcherMode::CurrentOrNextTerminal,
-        )
-        .await;
-
-    let first_turn = dispatcher_thread.codex.session.new_default_turn().await;
-    dispatcher_thread
-        .codex
-        .session
-        .send_event(
-            first_turn.as_ref(),
-            EventMsg::TurnStarted(TurnStartedEvent {
-                turn_id: first_turn.sub_id.clone(),
-                started_at: None,
-                model_context_window: None,
-                collaboration_mode_kind: ModeKind::Default,
-            }),
-        )
-        .await;
-    dispatcher_thread
-        .codex
-        .session
-        .send_event(
-            first_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: first_turn.sub_id.clone(),
-                last_agent_message: Some("spawned review_1".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-
-    sleep(Duration::from_millis(150)).await;
-
-    let stale_message = crate::session_prefix::format_subagent_notification_message(
-        dispatcher_path.as_str(),
-        &AgentStatus::Completed(Some("spawned review_1".to_string())),
-    );
-    let stale_parent_wake = (
-        parent_thread_id,
-        Op::InterAgentCommunication {
-            communication: InterAgentCommunication::new(
-                dispatcher_path.clone(),
-                parent_path.clone(),
-                Vec::new(),
-                stale_message,
-                true,
-            ),
-        },
-    );
-
-    let review_turn = review_thread.codex.session.new_default_turn().await;
-    review_thread
-        .codex
-        .session
-        .send_event(
-            review_turn.as_ref(),
-            EventMsg::TurnStarted(TurnStartedEvent {
-                turn_id: review_turn.sub_id.clone(),
-                started_at: None,
-                model_context_window: None,
-                collaboration_mode_kind: ModeKind::Default,
-            }),
-        )
-        .await;
-    review_thread
-        .codex
-        .session
-        .send_event(
-            review_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: review_turn.sub_id.clone(),
-                last_agent_message: Some("review complete".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-
-    let second_turn: Arc<TurnContext> = wait_for_any_active_turn_context(&dispatcher_thread).await;
-    sleep(Duration::from_millis(150)).await;
-
-    let stale_wake_count = harness
-        .manager
-        .captured_ops()
-        .into_iter()
-        .filter(|entry| *entry == stale_parent_wake)
-        .count();
-    assert_eq!(stale_wake_count, 0);
-
-    dispatcher_thread
-        .codex
-        .session
-        .send_event(
-            second_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: second_turn.sub_id.clone(),
-                last_agent_message: Some("handing back".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-
-    let final_message = crate::session_prefix::format_subagent_notification_message(
-        dispatcher_path.as_str(),
-        &AgentStatus::Completed(Some("handing back".to_string())),
-    );
-    let final_parent_wake = (
-        parent_thread_id,
-        Op::InterAgentCommunication {
-            communication: InterAgentCommunication::new(
-                dispatcher_path,
-                parent_path,
-                Vec::new(),
-                final_message,
-                true,
-            ),
-        },
-    );
-    timeout(Duration::from_secs(5), async {
-        loop {
-            let wake_count = harness
-                .manager
-                .captured_ops()
-                .into_iter()
-                .filter(|entry| *entry == final_parent_wake)
-                .count();
-            if wake_count >= 1 {
-                break;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("leaf_only child should wake parent with the reconciled completion");
-}
-
-#[tokio::test]
-async fn leaf_only_treats_pending_descendant_turn_as_active() {
-    let harness = AgentControlHarness::new().await;
-    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
-    let parent_path = AgentPath::root();
-
-    let mut child_config = harness.config.clone();
-    let _ = child_config.features.enable(Feature::MultiAgentV2);
-    child_config.agent_wake_descendant_policy = AgentWakeDescendantPolicy::LeafOnly;
-    let child_thread_id = harness
-        .manager
-        .start_thread(
-            child_config.clone(),
-            thread_store_from_config(&child_config),
-        )
-        .await
-        .expect("child thread should start")
-        .thread_id;
-    let child_thread = harness
-        .manager
-        .get_thread(child_thread_id)
-        .await
-        .expect("child thread should exist");
-    let child_path = parent_path.join("child").expect("child path");
-    let child_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id,
-        depth: 2,
-        agent_path: Some(child_path.clone()),
-        agent_nickname: None,
-        agent_role: Some("explorer".to_string()),
-    });
-    harness
-        .control
-        .register_parent_wake_subscription(
-            child_thread_id,
-            Some(&child_source),
-            /*wake_parent_on_completion*/ true,
-            AgentWakeDescendantPolicy::LeafOnly,
-        )
-        .await;
-    harness
-        .control
-        .maybe_start_completion_watcher(
-            child_thread_id,
-            Some(child_source),
-            child_path.to_string(),
-            Some(child_path.clone()),
-            CompletionWatcherMode::CurrentOrNextTerminal,
-        )
-        .await;
-
-    let intermediate_path = child_path.join("intermediate").expect("intermediate path");
-    let intermediate_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: child_thread_id,
-        depth: 3,
-        agent_path: Some(intermediate_path.clone()),
-        agent_nickname: None,
-        agent_role: Some("explorer".to_string()),
-    });
-    let intermediate_thread_id = harness
-        .manager
-        .spawn_new_thread_with_source_for_tests(
-            child_config.clone(),
-            harness.control.clone(),
-            intermediate_source,
-            /*persist_extended_history*/ false,
-            /*metrics_service_name*/ None,
-            /*inherited_shell_snapshot*/ None,
-            /*inherited_exec_policy*/ None,
-        )
-        .await
-        .expect("intermediate thread should start")
-        .thread_id;
-    let intermediate_thread = harness
-        .manager
-        .get_thread(intermediate_thread_id)
-        .await
-        .expect("intermediate thread should exist");
-
-    let leaf_path = intermediate_path.join("leaf").expect("leaf path");
-    let leaf_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: intermediate_thread_id,
-        depth: 4,
-        agent_path: Some(leaf_path),
-        agent_nickname: None,
-        agent_role: Some("awaiter".to_string()),
-    });
-    let leaf_thread_id = harness
-        .manager
-        .spawn_new_thread_with_source_for_tests(
-            child_config,
-            harness.control.clone(),
-            leaf_source,
-            /*persist_extended_history*/ false,
-            /*metrics_service_name*/ None,
-            /*inherited_shell_snapshot*/ None,
-            /*inherited_exec_policy*/ None,
-        )
-        .await
-        .expect("leaf thread should start")
-        .thread_id;
-    let leaf_thread = harness
-        .manager
-        .get_thread(leaf_thread_id)
-        .await
-        .expect("leaf thread should exist");
-
-    let child_turn = child_thread.codex.session.new_default_turn().await;
-    child_thread
-        .codex
-        .session
-        .send_event(
-            child_turn.as_ref(),
-            EventMsg::TurnStarted(TurnStartedEvent {
-                turn_id: child_turn.sub_id.clone(),
-                started_at: None,
-                model_context_window: None,
-                collaboration_mode_kind: ModeKind::Default,
-            }),
-        )
-        .await;
-    child_thread
-        .codex
-        .session
-        .send_event(
-            child_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: child_turn.sub_id.clone(),
-                last_agent_message: Some("spawned intermediate".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-
-    let intermediate_turn = intermediate_thread.codex.session.new_default_turn().await;
-    intermediate_thread
-        .codex
-        .session
-        .send_event(
-            intermediate_turn.as_ref(),
-            EventMsg::TurnStarted(TurnStartedEvent {
-                turn_id: intermediate_turn.sub_id.clone(),
-                started_at: None,
-                model_context_window: None,
-                collaboration_mode_kind: ModeKind::Default,
-            }),
-        )
-        .await;
-    intermediate_thread
-        .codex
-        .session
-        .send_event(
-            intermediate_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: intermediate_turn.sub_id.clone(),
-                last_agent_message: Some("spawned leaf".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-
-    sleep(Duration::from_millis(150)).await;
-
-    let leaf_turn = leaf_thread.codex.session.new_default_turn().await;
-    leaf_thread
-        .codex
-        .session
-        .send_event(
-            leaf_turn.as_ref(),
-            EventMsg::TurnStarted(TurnStartedEvent {
-                turn_id: leaf_turn.sub_id.clone(),
-                started_at: None,
-                model_context_window: None,
-                collaboration_mode_kind: ModeKind::Default,
-            }),
-        )
-        .await;
-    leaf_thread
-        .codex
-        .session
-        .send_event(
-            leaf_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: leaf_turn.sub_id.clone(),
-                last_agent_message: Some("leaf done".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-    intermediate_thread
-        .codex
-        .session
-        .queue_response_items_for_next_turn(vec![ResponseInputItem::Message {
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "leaf completion wake".to_string(),
-            }],
-            phase: None,
-        }])
-        .await;
-
-    sleep(Duration::from_millis(150)).await;
-
-    let stale_message = crate::session_prefix::format_subagent_notification_message(
-        child_path.as_str(),
-        &AgentStatus::Completed(Some("spawned intermediate".to_string())),
-    );
-    let stale_parent_wake = (
-        parent_thread_id,
-        Op::InterAgentCommunication {
-            communication: InterAgentCommunication::new(
-                child_path,
-                parent_path,
-                Vec::new(),
-                stale_message,
-                true,
-            ),
-        },
-    );
-    let stale_wake_count = harness
-        .manager
-        .captured_ops()
-        .into_iter()
-        .filter(|entry| *entry == stale_parent_wake)
-        .count();
-    assert_eq!(stale_wake_count, 0);
 }
 
 #[tokio::test]
@@ -2870,7 +1577,7 @@ async fn completion_watcher_notifies_parent_when_child_is_missing() {
                 agent_role: Some("explorer".to_string()),
             })),
             child_thread_id.to_string(),
-            None,
+            /*child_agent_path*/ None,
             CompletionWatcherMode::CurrentOrNextTerminal,
         )
         .await;
@@ -2992,16 +1699,19 @@ async fn resume_thread_subagent_restores_stored_nickname_and_role() {
         .features
         .enable(Feature::Sqlite)
         .expect("test config should allow sqlite");
-    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+    let state_db = init_state_db(&config).await;
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
         config.codex_home.to_path_buf(),
         std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        state_db.clone(),
     );
     let control = manager.agent_control();
     let harness = AgentControlHarness {
         _home: home,
         config,
+        state_db,
         manager,
         control,
     };
@@ -3131,7 +1841,11 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
     let harness = AgentControlHarness::new().await;
     let child_thread_id = harness
         .control
-        .spawn_agent(harness.config.clone(), text_input("hello"), None)
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello"),
+            /*session_source*/ None,
+        )
         .await
         .expect("child spawn should succeed");
 
@@ -3146,7 +1860,10 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
         .shutdown_live_agent(child_thread_id)
         .await
         .expect("child shutdown should succeed");
-    let store = LocalThreadStore::new(codex_rollout::RolloutConfig::from_view(&harness.config));
+    let store = LocalThreadStore::new(
+        LocalThreadStoreConfig::from_config(&harness.config),
+        harness.state_db.clone(),
+    );
     store
         .archive_thread(ArchiveThreadParams {
             thread_id: child_thread_id,

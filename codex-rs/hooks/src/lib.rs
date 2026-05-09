@@ -1,21 +1,26 @@
 mod config_rules;
+mod declarations;
 mod engine;
 pub(crate) mod events;
 mod legacy_notify;
+mod output_spill;
 mod registry;
 mod schema;
 mod types;
 
-pub use engine::HookListEntry;
-pub use events::after_compaction::AfterCompactionOutcome;
-pub use events::after_compaction::AfterCompactionRequest;
-pub use events::after_compaction::AfterCompactionSource;
+use codex_protocol::protocol::HookEventName;
 
+pub use config_rules::hook_states_from_stack;
+pub use declarations::PluginHookDeclaration;
+pub use declarations::plugin_hook_declarations;
+pub use engine::HookListEntry;
 /// Hook event names as they appear in hooks JSON and config files.
-pub const HOOK_EVENT_NAMES: [&str; 7] = [
+pub const HOOK_EVENT_NAMES: [&str; 9] = [
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
+    "PreCompact",
+    "PostCompact",
     "SessionStart",
     "AfterCompaction",
     "UserPromptSubmit",
@@ -25,15 +30,25 @@ pub const HOOK_EVENT_NAMES: [&str; 7] = [
 /// Hook event names whose matcher fields are meaningful during dispatch.
 ///
 /// Other events can appear in hooks JSON, but Codex ignores their matcher
-/// fields because those events do not dispatch against a tool or session-start
-/// source.
-pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 5] = [
+/// fields because those events do not dispatch against a tool, compaction
+/// trigger, or session-start source.
+pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 7] = [
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
+    "PreCompact",
+    "PostCompact",
     "SessionStart",
     "AfterCompaction",
 ];
+
+pub use events::after_compaction::AfterCompactionOutcome;
+pub use events::after_compaction::AfterCompactionRequest;
+pub use events::after_compaction::AfterCompactionSource;
+pub use events::compact::PostCompactRequest;
+pub use events::compact::PreCompactOutcome;
+pub use events::compact::PreCompactRequest;
+pub use events::compact::StatelessHookOutcome;
 pub use events::permission_request::PermissionRequestDecision;
 pub use events::permission_request::PermissionRequestOutcome;
 pub use events::permission_request::PermissionRequestRequest;
@@ -59,10 +74,34 @@ pub use schema::write_schema_fixtures;
 pub use types::Hook;
 pub use types::HookEvent;
 pub use types::HookEventAfterAgent;
-pub use types::HookEventAfterToolUse;
 pub use types::HookPayload;
 pub use types::HookResponse;
 pub use types::HookResult;
-pub use types::HookToolInput;
-pub use types::HookToolInputLocalShell;
-pub use types::HookToolKind;
+
+/// Returns the hook event label used in persisted hook-state keys.
+pub fn hook_event_key_label(event_name: HookEventName) -> &'static str {
+    match event_name {
+        HookEventName::PreToolUse => "pre_tool_use",
+        HookEventName::PermissionRequest => "permission_request",
+        HookEventName::PostToolUse => "post_tool_use",
+        HookEventName::PreCompact => "pre_compact",
+        HookEventName::PostCompact => "post_compact",
+        HookEventName::SessionStart => "session_start",
+        HookEventName::AfterCompaction => "after_compaction",
+        HookEventName::UserPromptSubmit => "user_prompt_submit",
+        HookEventName::Stop => "stop",
+    }
+}
+
+/// Builds the persisted config-state key for one discovered hook handler.
+pub fn hook_key(
+    key_source: &str,
+    event_name: HookEventName,
+    group_index: usize,
+    handler_index: usize,
+) -> String {
+    format!(
+        "{key_source}:{}:{group_index}:{handler_index}",
+        hook_event_key_label(event_name)
+    )
+}

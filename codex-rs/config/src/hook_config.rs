@@ -25,6 +25,8 @@ pub struct HooksToml {
 pub struct HookStateToml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_hash: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -35,6 +37,10 @@ pub struct HookEventsToml {
     pub permission_request: Vec<MatcherGroup>,
     #[serde(rename = "PostToolUse", default)]
     pub post_tool_use: Vec<MatcherGroup>,
+    #[serde(rename = "PreCompact", default)]
+    pub pre_compact: Vec<MatcherGroup>,
+    #[serde(rename = "PostCompact", default)]
+    pub post_compact: Vec<MatcherGroup>,
     #[serde(rename = "SessionStart", default)]
     pub session_start: Vec<MatcherGroup>,
     #[serde(rename = "AfterCompaction", default)]
@@ -51,6 +57,8 @@ impl HookEventsToml {
             pre_tool_use,
             permission_request,
             post_tool_use,
+            pre_compact,
+            post_compact,
             session_start,
             after_compaction,
             user_prompt_submit,
@@ -59,6 +67,8 @@ impl HookEventsToml {
         pre_tool_use.is_empty()
             && permission_request.is_empty()
             && post_tool_use.is_empty()
+            && pre_compact.is_empty()
+            && post_compact.is_empty()
             && session_start.is_empty()
             && after_compaction.is_empty()
             && user_prompt_submit.is_empty()
@@ -70,6 +80,8 @@ impl HookEventsToml {
             pre_tool_use,
             permission_request,
             post_tool_use,
+            pre_compact,
+            post_compact,
             session_start,
             after_compaction,
             user_prompt_submit,
@@ -79,6 +91,8 @@ impl HookEventsToml {
             pre_tool_use,
             permission_request,
             post_tool_use,
+            pre_compact,
+            post_compact,
             session_start,
             after_compaction,
             user_prompt_submit,
@@ -90,11 +104,13 @@ impl HookEventsToml {
         .sum()
     }
 
-    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 7] {
+    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 9] {
         [
             (HookEventName::PreToolUse, self.pre_tool_use),
             (HookEventName::PermissionRequest, self.permission_request),
             (HookEventName::PostToolUse, self.post_tool_use),
+            (HookEventName::PreCompact, self.pre_compact),
+            (HookEventName::PostCompact, self.post_compact),
             (HookEventName::SessionStart, self.session_start),
             (HookEventName::AfterCompaction, self.after_compaction),
             (HookEventName::UserPromptSubmit, self.user_prompt_submit),

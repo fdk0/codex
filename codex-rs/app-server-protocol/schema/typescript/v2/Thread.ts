@@ -4,10 +4,19 @@
 import type { AbsolutePathBuf } from "../AbsolutePathBuf";
 import type { GitInfo } from "./GitInfo";
 import type { SessionSource } from "./SessionSource";
+import type { ThreadSource } from "./ThreadSource";
 import type { ThreadStatus } from "./ThreadStatus";
 import type { Turn } from "./Turn";
 
 export type Thread = { id: string,
+/**
+ * Session id shared by threads that belong to the same session tree.
+ */
+sessionId: string,
+/**
+ * Parent thread id when this thread was spawned by another thread.
+ */
+parentThreadId: string | null,
 /**
  * Source thread id when this thread was created by forking another thread.
  */
@@ -53,9 +62,9 @@ cliVersion: string,
  */
 source: SessionSource,
 /**
- * Direct parent thread id for AgentControl-spawned child threads.
+ * Optional analytics source classification for this thread.
  */
-parentThreadId: string | null,
+threadSource: ThreadSource | null,
 /**
  * Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
  */

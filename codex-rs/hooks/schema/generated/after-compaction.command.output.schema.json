@@ -23,6 +23,8 @@
         "PreToolUse",
         "PermissionRequest",
         "PostToolUse",
+        "PreCompact",
+        "PostCompact",
         "SessionStart",
         "AfterCompaction",
         "UserPromptSubmit",

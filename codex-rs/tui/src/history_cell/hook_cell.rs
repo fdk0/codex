@@ -11,15 +11,17 @@
 //!    first drawn.
 //! 4. Completed runs only persist when they have output or a non-success status.
 use super::HistoryCell;
-use crate::exec_cell::spinner;
-use crate::render::line_utils::prefix_lines;
+use super::plain_lines;
+use crate::motion::MotionMode;
+use crate::motion::ReducedMotionIndicator;
+use crate::motion::activity_indicator;
+use crate::motion::shimmer_text;
 use crate::render::renderable::Renderable;
-use crate::shimmer::shimmer_spans;
-use codex_protocol::protocol::HookEventName;
-use codex_protocol::protocol::HookOutputEntry;
-use codex_protocol::protocol::HookOutputEntryKind;
-use codex_protocol::protocol::HookRunStatus;
-use codex_protocol::protocol::HookRunSummary;
+use codex_app_server_protocol::HookEventName;
+use codex_app_server_protocol::HookOutputEntry;
+use codex_app_server_protocol::HookOutputEntryKind;
+use codex_app_server_protocol::HookRunStatus;
+use codex_app_server_protocol::HookRunSummary;
 use ratatui::prelude::*;
 use ratatui::style::Stylize;
 use ratatui::widgets::Paragraph;
@@ -339,6 +341,10 @@ impl HistoryCell for HookCell {
         self.display_lines(width)
     }
 
+    fn raw_lines(&self) -> Vec<Line<'static>> {
+        plain_lines(self.display_lines(u16::MAX))
+    }
+
     /// Produces a coarse cache key for transcript overlays while hook animations are active.
     fn transcript_animation_tick(&self) -> Option<u64> {
         if !self.animations_enabled {
@@ -437,7 +443,10 @@ impl HookRunCell {
                     .into(),
                 );
                 for entry in entries {
-                    push_hook_output_entry(lines, entry);
+                    // Output entries are already short hook-authored strings; keep their prefixes
+                    // explicit so warnings/stops/errors remain easy to scan in history.
+                    lines
+                        .push(format!("  {}{}", hook_output_prefix(entry.kind), entry.text).into());
                 }
             }
             HookRunState::PendingReveal { .. } => {}
@@ -482,9 +491,9 @@ impl HookRunState {
     /// Returns true for completed runs that should survive outside the active cell.
     fn has_persistent_output(&self) -> bool {
         match self {
-            HookRunState::Completed {
-                status, entries, ..
-            } => *status != HookRunStatus::Completed || !entries.is_empty(),
+            HookRunState::Completed { status, entries } => {
+                *status != HookRunStatus::Completed || !entries.is_empty()
+            }
             HookRunState::PendingReveal { .. }
             | HookRunState::VisibleRunning { .. }
             | HookRunState::QuietLinger { .. } => false,
@@ -624,11 +633,17 @@ fn push_running_hook_header(
     status_message: Option<&str>,
     animations_enabled: bool,
 ) {
-    let mut header = vec![spinner(start_time, animations_enabled), " ".into()];
-    if animations_enabled {
-        header.extend(shimmer_spans(hook_text));
-    } else {
-        header.push(hook_text.to_string().bold());
+    let mut header = Vec::new();
+    let motion_mode = MotionMode::from_animations_enabled(animations_enabled);
+    if let Some(indicator) =
+        activity_indicator(start_time, motion_mode, ReducedMotionIndicator::Hidden)
+    {
+        header.push(indicator);
+        header.push(" ".into());
+    }
+    header.extend(shimmer_text(hook_text, motion_mode));
+    if !animations_enabled && let Some(span) = header.last_mut() {
+        span.style = span.style.patch(Style::default().bold());
     }
     if let Some(status_message) = status_message
         && !status_message.is_empty()
@@ -696,31 +711,15 @@ fn hook_output_prefix(kind: HookOutputEntryKind) -> &'static str {
     }
 }
 
-fn push_hook_output_entry(lines: &mut Vec<Line<'static>>, entry: &HookOutputEntry) {
-    let prefix = format!("  {}", hook_output_prefix(entry.kind));
-    let continuation_prefix = " ".repeat(prefix.len());
-    let body_lines = split_hook_output_lines(&entry.text);
-    lines.extend(prefix_lines(
-        body_lines,
-        prefix.into(),
-        continuation_prefix.into(),
-    ));
-}
-
-fn split_hook_output_lines(text: &str) -> Vec<Line<'static>> {
-    if text.is_empty() {
-        return vec![Line::default()];
-    }
-    text.lines().map(|line| line.to_string().into()).collect()
-}
-
 fn hook_event_label(event_name: HookEventName) -> &'static str {
     match event_name {
         HookEventName::PreToolUse => "PreToolUse",
         HookEventName::PermissionRequest => "PermissionRequest",
         HookEventName::PostToolUse => "PostToolUse",
-        HookEventName::SessionStart => "SessionStart",
+        HookEventName::PreCompact => "PreCompact",
+        HookEventName::PostCompact => "PostCompact",
         HookEventName::AfterCompaction => "AfterCompaction",
+        HookEventName::SessionStart => "SessionStart",
         HookEventName::UserPromptSubmit => "UserPromptSubmit",
         HookEventName::Stop => "Stop",
     }
@@ -779,38 +778,28 @@ mod tests {
     }
 
     #[test]
-    fn completed_hook_multiline_context_preserves_line_breaks() {
-        let mut run = hook_run_summary("hook-1");
-        run.status = HookRunStatus::Completed;
-        run.completed_at = Some(2);
-        run.duration_ms = Some(1);
-        run.entries = vec![HookOutputEntry {
-            kind: HookOutputEntryKind::Context,
-            text: "BD_AFTER_COMPACTION_ANCHOR v1\nLane: driver\n\nCorrectedRoute: spec_repair"
-                .to_string(),
-        }];
+    fn visible_hook_without_animations_omits_spinner() {
+        let mut cell = HookCell::new_active(
+            hook_run_summary("hook-1"),
+            /*animations_enabled*/ false,
+        );
+        cell.reveal_running_runs_now_for_test();
+        cell.advance_time(Instant::now());
 
-        let cell = HookCell::new_completed(run, /*animations_enabled*/ false);
-        let rendered = cell
-            .display_lines(120)
-            .into_iter()
+        let rendered: Vec<String> = cell
+            .display_lines(/*width*/ 80)
+            .iter()
             .map(|line| {
                 line.spans
-                    .into_iter()
-                    .map(|span| span.content.into_owned())
+                    .iter()
+                    .map(|span| span.content.as_ref())
                     .collect::<String>()
             })
-            .collect::<Vec<_>>();
+            .collect();
 
         assert_eq!(
             rendered,
-            vec![
-                "• PostToolUse hook (completed)".to_string(),
-                "  hook context: BD_AFTER_COMPACTION_ANCHOR v1".to_string(),
-                "                Lane: driver".to_string(),
-                "                ".to_string(),
-                "                CorrectedRoute: spec_repair".to_string(),
-            ]
+            vec!["Running PostToolUse hook: checking output policy".to_string()]
         );
     }
 
@@ -818,11 +807,11 @@ mod tests {
         HookRunSummary {
             id: id.to_string(),
             event_name: HookEventName::PostToolUse,
-            handler_type: codex_protocol::protocol::HookHandlerType::Command,
-            execution_mode: codex_protocol::protocol::HookExecutionMode::Sync,
-            scope: codex_protocol::protocol::HookScope::Turn,
+            handler_type: codex_app_server_protocol::HookHandlerType::Command,
+            execution_mode: codex_app_server_protocol::HookExecutionMode::Sync,
+            scope: codex_app_server_protocol::HookScope::Turn,
             source_path: test_path_buf("/tmp/hooks.json").abs(),
-            source: codex_protocol::protocol::HookSource::User,
+            source: codex_app_server_protocol::HookSource::User,
             display_order: 0,
             status: HookRunStatus::Running,
             status_message: Some("checking output policy".to_string()),

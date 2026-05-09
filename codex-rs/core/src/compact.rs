@@ -4,6 +4,11 @@ use std::time::Instant;
 use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
+use crate::hook_runtime::PostCompactHookOutcome;
+use crate::hook_runtime::PreCompactHookOutcome;
+use crate::hook_runtime::run_after_compaction_hooks;
+use crate::hook_runtime::run_post_compact_hooks;
+use crate::hook_runtime::run_pre_compact_hooks;
 #[cfg(test)]
 use crate::session::PreviousTurnSettings;
 use crate::session::session::Session;
@@ -19,7 +24,6 @@ use codex_analytics::CompactionStrategy;
 use codex_analytics::CompactionTrigger;
 use codex_analytics::now_unix_seconds;
 use codex_hooks::AfterCompactionSource;
-use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::ContextCompactionItem;
@@ -38,6 +42,8 @@ use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
 use futures::prelude::*;
 use tracing::error;
+
+use codex_model_provider_info::ModelProviderInfo;
 
 pub const SUMMARIZATION_PROMPT: &str = include_str!("../templates/compact/prompt.md");
 pub const SUMMARY_PREFIX: &str = include_str!("../templates/compact/summary_prefix.md");
@@ -68,7 +74,6 @@ pub(crate) async fn run_inline_auto_compact_task(
     initial_context_injection: InitialContextInjection,
     reason: CompactionReason,
     phase: CompactionPhase,
-    source: AfterCompactionSource,
 ) -> CodexResult<()> {
     let prompt = turn_context.compact_prompt().to_string();
     let input = vec![UserInput::Text {
@@ -85,7 +90,6 @@ pub(crate) async fn run_inline_auto_compact_task(
         CompactionTrigger::Auto,
         reason,
         phase,
-        source,
     )
     .await?;
     Ok(())
@@ -111,9 +115,9 @@ pub(crate) async fn run_compact_task(
         CompactionTrigger::Manual,
         CompactionReason::UserRequested,
         CompactionPhase::StandaloneTurn,
-        AfterCompactionSource::Manual,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 async fn run_compact_task_inner(
@@ -124,7 +128,6 @@ async fn run_compact_task_inner(
     trigger: CompactionTrigger,
     reason: CompactionReason,
     phase: CompactionPhase,
-    source: AfterCompactionSource,
 ) -> CodexResult<()> {
     let attempt = CompactionAnalyticsAttempt::begin(
         sess.as_ref(),
@@ -135,22 +138,41 @@ async fn run_compact_task_inner(
         phase,
     )
     .await;
+    let pre_compact_outcome = run_pre_compact_hooks(&sess, &turn_context, trigger).await;
+    match pre_compact_outcome {
+        PreCompactHookOutcome::Continue => {}
+        PreCompactHookOutcome::Stopped { reason } => {
+            let error = reason.unwrap_or_else(|| "PreCompact hook stopped execution".to_string());
+            attempt
+                .track(sess.as_ref(), CompactionStatus::Interrupted, Some(error))
+                .await;
+            return Err(CodexErr::TurnAborted);
+        }
+    }
     let result = run_compact_task_inner_impl(
         Arc::clone(&sess),
         Arc::clone(&turn_context),
         input,
         initial_context_injection,
-        source,
     )
     .await;
-    attempt
-        .track(
-            sess.as_ref(),
-            compaction_status_from_result(&result),
-            result.as_ref().err().map(ToString::to_string),
+    let status = compaction_status_from_result(&result);
+    let error = result.as_ref().err().map(ToString::to_string);
+    if result.is_ok() {
+        let post_compact_outcome = run_post_compact_hooks(&sess, &turn_context, trigger).await;
+        if let PostCompactHookOutcome::Stopped = post_compact_outcome {
+            attempt.track(sess.as_ref(), status, error).await;
+            return Err(CodexErr::TurnAborted);
+        }
+        run_after_compaction_hooks(
+            &sess,
+            &turn_context,
+            after_compaction_source(trigger, reason),
         )
         .await;
-    result
+    }
+    attempt.track(sess.as_ref(), status, error).await;
+    result.map(|_| ())
 }
 
 async fn run_compact_task_inner_impl(
@@ -158,8 +180,7 @@ async fn run_compact_task_inner_impl(
     turn_context: Arc<TurnContext>,
     input: Vec<UserInput>,
     initial_context_injection: InitialContextInjection,
-    source: AfterCompactionSource,
-) -> CodexResult<()> {
+) -> CodexResult<String> {
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
     sess.emit_turn_item_started(&turn_context, &compaction_item)
         .await;
@@ -170,8 +191,6 @@ async fn run_compact_task_inner_impl(
         &[initial_input_for_turn.into()],
         turn_context.truncation_policy,
     );
-
-    let mut truncated_count = 0usize;
 
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
@@ -204,15 +223,6 @@ async fn run_compact_task_inner_impl(
 
         match attempt_result {
             Ok(()) => {
-                if truncated_count > 0 {
-                    sess.notify_background_event(
-                        turn_context.as_ref(),
-                        format!(
-                            "Trimmed {truncated_count} older thread item(s) before compacting so the prompt fits the model context window."
-                        ),
-                    )
-                    .await;
-                }
                 break;
             }
             Err(CodexErr::Interrupted) => {
@@ -225,7 +235,6 @@ async fn run_compact_task_inner_impl(
                         "Context window exceeded while compacting; removing oldest history item. Error: {e}"
                     );
                     history.remove_first_item();
-                    truncated_count += 1;
                     retries = 0;
                     continue;
                 }
@@ -282,7 +291,6 @@ async fn run_compact_task_inner_impl(
     sess.replace_compacted_history(new_history, reference_context_item, compacted_item)
         .await;
     client_session.reset_websocket_session();
-    crate::hook_runtime::run_after_compaction_hooks(&sess, &turn_context, source).await;
     sess.recompute_token_usage(&turn_context).await;
 
     sess.emit_turn_item_completed(&turn_context, compaction_item)
@@ -291,7 +299,20 @@ async fn run_compact_task_inner_impl(
         message: "Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.".to_string(),
     });
     sess.send_event(&turn_context, warning).await;
-    Ok(())
+    Ok(summary_suffix)
+}
+
+pub(crate) fn after_compaction_source(
+    trigger: CompactionTrigger,
+    reason: CompactionReason,
+) -> AfterCompactionSource {
+    if matches!(reason, CompactionReason::ModelDownshift) {
+        return AfterCompactionSource::ModelSwitch;
+    }
+    match trigger {
+        CompactionTrigger::Manual => AfterCompactionSource::Manual,
+        CompactionTrigger::Auto => AfterCompactionSource::Auto,
+    }
 }
 
 pub(crate) struct CompactionAnalyticsAttempt {
@@ -439,7 +460,13 @@ pub(crate) fn insert_initial_context_before_last_real_user_or_summary(
         .iter()
         .enumerate()
         .rev()
-        .find_map(|(i, item)| matches!(item, ResponseItem::Compaction { .. }).then_some(i));
+        .find_map(|(i, item)| {
+            matches!(
+                item,
+                ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+            )
+            .then_some(i)
+        });
     let insertion_index = last_real_user_index
         .or(last_user_or_summary_index)
         .or(last_compaction_index);
@@ -537,7 +564,7 @@ async fn drain_to_completed(
             &turn_context.session_telemetry,
             turn_context.reasoning_effort,
             turn_context.reasoning_summary,
-            turn_context.config.service_tier,
+            turn_context.config.service_tier.clone(),
             turn_metadata_header,
             // Rollout tracing currently models remote compaction only; local compaction streams
             // are left untraced until the reducer has a first-class local compaction lifecycle.

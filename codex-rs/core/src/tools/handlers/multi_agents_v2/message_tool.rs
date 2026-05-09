@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::tools::context::FunctionToolOutput;
+use crate::turn_timing::now_unix_timestamp_ms;
 use codex_protocol::protocol::InterAgentCommunication;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -34,10 +35,7 @@ impl MessageDeliveryMode {
 /// Input for the MultiAgentV2 `send_message` tool.
 pub(crate) struct SendMessageArgs {
     pub(crate) target: String,
-    pub(crate) message: Option<String>,
-    pub(crate) items: Option<Vec<UserInput>>,
-    #[serde(default)]
-    pub(crate) interrupt: bool,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,46 +57,6 @@ fn message_content(message: String) -> Result<String, FunctionCallError> {
     Ok(message)
 }
 
-pub(crate) fn send_message_content(
-    message: Option<String>,
-    items: Option<Vec<UserInput>>,
-) -> Result<String, FunctionCallError> {
-    match (message, items) {
-        (Some(_), Some(_)) => Err(FunctionCallError::RespondToModel(
-            "Provide either message or items, but not both".to_string(),
-        )),
-        (None, None) => Err(FunctionCallError::RespondToModel(
-            "Provide one of: message or items".to_string(),
-        )),
-        (Some(message), None) => message_content(message),
-        (None, Some(items)) => {
-            if items.is_empty() {
-                return Err(FunctionCallError::RespondToModel(
-                    "Items can't be empty".to_string(),
-                ));
-            }
-
-            let mut text = String::new();
-            for item in items {
-                match item {
-                    UserInput::Text {
-                        text: item_text,
-                        text_elements,
-                    } if text_elements.is_empty() => text.push_str(&item_text),
-                    _ => {
-                        return Err(FunctionCallError::RespondToModel(
-                            "send_message only supports text content in MultiAgentV2 for now"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-
-            message_content(text)
-        }
-    }
-}
-
 /// Handles the shared MultiAgentV2 plain-text message flow for both `send_message` and `followup_task`.
 pub(crate) async fn handle_message_string_tool(
     invocation: ToolInvocation,
@@ -107,23 +65,7 @@ pub(crate) async fn handle_message_string_tool(
     message: String,
     interrupt: bool,
 ) -> Result<FunctionToolOutput, FunctionCallError> {
-    handle_message_submission(
-        invocation,
-        mode,
-        target,
-        message_content(message)?,
-        interrupt,
-    )
-    .await
-}
-
-async fn handle_message_submission(
-    invocation: ToolInvocation,
-    mode: MessageDeliveryMode,
-    target: String,
-    prompt: String,
-    interrupt: bool,
-) -> Result<FunctionToolOutput, FunctionCallError> {
+    let prompt = message_content(message)?;
     let ToolInvocation {
         session,
         turn,
@@ -146,11 +88,20 @@ async fn handle_message_submission(
             "Tasks can't be assigned to the root agent".to_string(),
         ));
     }
+    if interrupt {
+        session
+            .services
+            .agent_control
+            .interrupt_agent(receiver_thread_id)
+            .await
+            .map_err(|err| collab_agent_error(receiver_thread_id, err))?;
+    }
     session
         .send_event(
             &turn,
             CollabAgentInteractionBeginEvent {
                 call_id: call_id.clone(),
+                started_at_ms: now_unix_timestamp_ms(),
                 sender_thread_id: session.conversation_id,
                 receiver_thread_id,
                 prompt: prompt.clone(),
@@ -170,20 +121,12 @@ async fn handle_message_submission(
         prompt.clone(),
         /*trigger_turn*/ true,
     );
-    let mut result = session
+    let result = session
         .services
         .agent_control
         .send_inter_agent_communication(receiver_thread_id, mode.apply(communication))
         .await
         .map_err(|err| collab_agent_error(receiver_thread_id, err));
-    if result.is_ok() && interrupt {
-        result = session
-            .services
-            .agent_control
-            .interrupt_agent(receiver_thread_id)
-            .await
-            .map_err(|err| collab_agent_error(receiver_thread_id, err));
-    }
     let status = session
         .services
         .agent_control
@@ -194,6 +137,7 @@ async fn handle_message_submission(
             &turn,
             CollabAgentInteractionEndEvent {
                 call_id,
+                completed_at_ms: now_unix_timestamp_ms(),
                 sender_thread_id: session.conversation_id,
                 receiver_thread_id,
                 receiver_agent_nickname: receiver_agent.agent_nickname,

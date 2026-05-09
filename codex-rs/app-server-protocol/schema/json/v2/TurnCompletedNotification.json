@@ -164,18 +164,21 @@
     "CollabAgentRef": {
       "properties": {
         "agentNickname": {
+          "description": "Optional nickname assigned to an AgentControl-spawned sub-agent.",
           "type": [
             "string",
             "null"
           ]
         },
         "agentRole": {
+          "description": "Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.",
           "type": [
             "string",
             "null"
           ]
         },
         "threadId": {
+          "description": "Thread ID of the receiver/new agent.",
           "type": "string"
         }
       },
@@ -430,58 +433,6 @@
       ],
       "type": "object"
     },
-    "HookEventName": {
-      "enum": [
-        "preToolUse",
-        "permissionRequest",
-        "postToolUse",
-        "sessionStart",
-        "afterCompaction",
-        "userPromptSubmit",
-        "stop"
-      ],
-      "type": "string"
-    },
-    "HookExecutionMode": {
-      "enum": [
-        "sync",
-        "async"
-      ],
-      "type": "string"
-    },
-    "HookHandlerType": {
-      "enum": [
-        "command",
-        "prompt",
-        "agent"
-      ],
-      "type": "string"
-    },
-    "HookOutputEntry": {
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/HookOutputEntryKind"
-        },
-        "text": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "kind",
-        "text"
-      ],
-      "type": "object"
-    },
-    "HookOutputEntryKind": {
-      "enum": [
-        "warning",
-        "stop",
-        "feedback",
-        "context",
-        "error"
-      ],
-      "type": "string"
-    },
     "HookPromptFragment": {
       "properties": {
         "hookRunId": {
@@ -496,118 +447,6 @@
         "text"
       ],
       "type": "object"
-    },
-    "HookRunStatus": {
-      "enum": [
-        "running",
-        "completed",
-        "failed",
-        "blocked",
-        "stopped"
-      ],
-      "type": "string"
-    },
-    "HookRunSummary": {
-      "properties": {
-        "completedAt": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "displayOrder": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "durationMs": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "entries": {
-          "items": {
-            "$ref": "#/definitions/HookOutputEntry"
-          },
-          "type": "array"
-        },
-        "eventName": {
-          "$ref": "#/definitions/HookEventName"
-        },
-        "executionMode": {
-          "$ref": "#/definitions/HookExecutionMode"
-        },
-        "handlerType": {
-          "$ref": "#/definitions/HookHandlerType"
-        },
-        "id": {
-          "type": "string"
-        },
-        "scope": {
-          "$ref": "#/definitions/HookScope"
-        },
-        "source": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/HookSource"
-            }
-          ],
-          "default": "unknown"
-        },
-        "sourcePath": {
-          "$ref": "#/definitions/AbsolutePathBuf"
-        },
-        "startedAt": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "status": {
-          "$ref": "#/definitions/HookRunStatus"
-        },
-        "statusMessage": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "displayOrder",
-        "entries",
-        "eventName",
-        "executionMode",
-        "handlerType",
-        "id",
-        "scope",
-        "sourcePath",
-        "startedAt",
-        "status"
-      ],
-      "type": "object"
-    },
-    "HookScope": {
-      "enum": [
-        "thread",
-        "turn"
-      ],
-      "type": "string"
-    },
-    "HookSource": {
-      "enum": [
-        "system",
-        "user",
-        "project",
-        "mdm",
-        "sessionFlags",
-        "plugin",
-        "cloudRequirements",
-        "legacyManagedConfigFile",
-        "legacyManagedConfigMdm",
-        "unknown"
-      ],
-      "type": "string"
     },
     "McpToolCallError": {
       "properties": {
@@ -872,30 +711,6 @@
             "type"
           ],
           "title": "HookPromptThreadItem",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "run": {
-              "$ref": "#/definitions/HookRunSummary"
-            },
-            "type": {
-              "enum": [
-                "hookRun"
-              ],
-              "title": "HookRunThreadItemType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "id",
-            "run",
-            "type"
-          ],
-          "title": "HookRunThreadItem",
           "type": "object"
         },
         {
@@ -1284,8 +1099,7 @@
               "description": "Reasoning effort requested for the spawned agent, when applicable."
             },
             "receiverAgents": {
-              "default": [],
-              "description": "Optional nickname/role metadata for receiving agents when available.",
+              "description": "Optional metadata for receiver agents, when known.",
               "items": {
                 "$ref": "#/definitions/CollabAgentRef"
               },
@@ -1543,11 +1357,20 @@
           "type": "string"
         },
         "items": {
-          "description": "Only populated on a `thread/resume` or `thread/fork` response. For all other responses and notifications returning a Turn, the items field will be an empty list.",
+          "description": "Thread items currently included in this turn payload.",
           "items": {
             "$ref": "#/definitions/ThreadItem"
           },
           "type": "array"
+        },
+        "itemsView": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TurnItemsView"
+            }
+          ],
+          "default": "full",
+          "description": "Describes how much of `items` has been loaded for this turn."
         },
         "startedAt": {
           "description": "Unix timestamp (in seconds) when the turn started.",
@@ -1595,6 +1418,31 @@
         "message"
       ],
       "type": "object"
+    },
+    "TurnItemsView": {
+      "oneOf": [
+        {
+          "description": "`items` was not loaded for this turn. The field is intentionally empty.",
+          "enum": [
+            "notLoaded"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`items` contains only a display summary for this turn.",
+          "enum": [
+            "summary"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`items` contains every ThreadItem available from persisted app-server history for this turn.",
+          "enum": [
+            "full"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "TurnStatus": {
       "enum": [
