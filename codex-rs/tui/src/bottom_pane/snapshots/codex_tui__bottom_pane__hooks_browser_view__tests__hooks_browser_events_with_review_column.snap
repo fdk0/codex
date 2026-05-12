@@ -13,6 +13,7 @@ expression: "render_lines(&view, 112)"
   PreCompact            0           0           0           Before context compaction                           
   PostCompact           0           0           0           After context compaction                            
   SessionStart          0           0           0           When a new session starts                           
+  AfterCompaction       0           0           0           After context compaction completes                  
   UserPromptSubmit      0           0           0           When the user submits a prompt                      
   Stop                  0           0           0           Right before Codex ends its turn                    
                                                                                                                 

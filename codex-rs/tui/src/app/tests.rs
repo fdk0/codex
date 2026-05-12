@@ -3124,7 +3124,8 @@ fn agent_picker_item_name_snapshot() {
             format_agent_picker_item_name(
                 Some("Robie"),
                 Some("explorer"),
-                /*is_primary*/ true
+                /*is_primary*/ true,
+                /*active_profile*/ None,
             ),
             thread_id
         ),
@@ -3133,7 +3134,8 @@ fn agent_picker_item_name_snapshot() {
             format_agent_picker_item_name(
                 Some("Robie"),
                 Some("explorer"),
-                /*is_primary*/ false
+                /*is_primary*/ false,
+                /*active_profile*/ None,
             ),
             thread_id
         ),
@@ -3142,7 +3144,8 @@ fn agent_picker_item_name_snapshot() {
             format_agent_picker_item_name(
                 Some("Robie"),
                 /*agent_role*/ None,
-                /*is_primary*/ false
+                /*is_primary*/ false,
+                /*active_profile*/ None,
             ),
             thread_id
         ),
@@ -3151,14 +3154,16 @@ fn agent_picker_item_name_snapshot() {
             format_agent_picker_item_name(
                 /*agent_nickname*/ None,
                 Some("explorer"),
-                /*is_primary*/ false
+                /*is_primary*/ false,
+                /*active_profile*/ None,
             ),
             thread_id
         ),
         format!(
             "{} | {}",
             format_agent_picker_item_name(
-                /*agent_nickname*/ None, /*agent_role*/ None, /*is_primary*/ false
+                /*agent_nickname*/ None, /*agent_role*/ None, /*is_primary*/ false,
+                /*active_profile*/ None,
             ),
             thread_id
         ),
@@ -4879,6 +4884,7 @@ async fn replace_chat_widget_reseeds_collab_agent_metadata_for_replay() {
                                 codex_app_server_protocol::CollabAgentToolCallStatus::InProgress,
                             sender_thread_id: ThreadId::new().to_string(),
                             receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                            receiver_agents: Vec::new(),
                             prompt: None,
                             model: None,
                             reasoning_effort: None,
