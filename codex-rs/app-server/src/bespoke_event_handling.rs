@@ -87,6 +87,7 @@ use codex_core::ThreadManager;
 use codex_core::review_format::format_review_findings_block;
 use codex_core::review_prompts;
 use codex_protocol::ThreadId;
+use codex_protocol::items::TurnItem;
 use codex_protocol::items::parse_hook_prompt_message;
 use codex_protocol::models::AdditionalPermissionProfile as CoreAdditionalPermissionProfile;
 use codex_protocol::models::ContentItem;
@@ -110,6 +111,7 @@ use codex_protocol::request_permissions::RequestPermissionProfile as CoreRequest
 use codex_protocol::request_permissions::RequestPermissionsResponse as CoreRequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputAnswer as CoreRequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputResponse as CoreRequestUserInputResponse;
+use codex_protocol::user_input::UserInput as CoreUserInput;
 use codex_sandboxing::policy_transforms::intersect_permission_profiles;
 use codex_shell_command::parse_command::shlex_join;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -979,6 +981,9 @@ pub(crate) async fn apply_bespoke_event_handling(
         | EventMsg::ItemCompleted(_)
         | EventMsg::PatchApplyUpdated(_)
         | EventMsg::TerminalInteraction(_)) => {
+            if item_event_contains_subagent_notification(&msg) {
+                return;
+            }
             let notification = item_event_to_server_notification(
                 msg,
                 &conversation_id.to_string(),
@@ -1462,6 +1467,26 @@ fn response_item_contains_subagent_notification(item: &ResponseItem) -> bool {
         }
         "assistant" => InterAgentCommunication::from_message_content(content)
             .is_some_and(|communication| is_subagent_notification_text(&communication.content)),
+        _ => false,
+    }
+}
+
+fn item_event_contains_subagent_notification(msg: &EventMsg) -> bool {
+    match msg {
+        EventMsg::ItemStarted(event) => turn_item_contains_subagent_notification(&event.item),
+        EventMsg::ItemCompleted(event) => turn_item_contains_subagent_notification(&event.item),
+        _ => false,
+    }
+}
+
+fn turn_item_contains_subagent_notification(item: &TurnItem) -> bool {
+    match item {
+        TurnItem::UserMessage(user) => {
+            matches!(
+                user.content.as_slice(),
+                [CoreUserInput::Text { text, .. }] if is_subagent_notification_text(text)
+            )
+        }
         _ => false,
     }
 }
@@ -2205,6 +2230,54 @@ mod tests {
             OutgoingEnvelope::Broadcast { message } => Ok(message),
             OutgoingEnvelope::ToConnection { message, .. } => Ok(message),
         }
+    }
+
+    #[test]
+    fn subagent_notification_item_events_are_suppressed() {
+        let item = TurnItem::UserMessage(codex_protocol::items::UserMessageItem {
+            id: "subagent-notification".to_string(),
+            content: vec![CoreUserInput::Text {
+                text: "<subagent_notification>{}</subagent_notification>".to_string(),
+                text_elements: Vec::new(),
+            }],
+        });
+
+        assert!(item_event_contains_subagent_notification(
+            &EventMsg::ItemStarted(codex_protocol::protocol::ItemStartedEvent {
+                thread_id: ThreadId::new(),
+                turn_id: "turn-1".to_string(),
+                item: item.clone(),
+                started_at_ms: 1,
+            })
+        ));
+        assert!(item_event_contains_subagent_notification(
+            &EventMsg::ItemCompleted(codex_protocol::protocol::ItemCompletedEvent {
+                thread_id: ThreadId::new(),
+                turn_id: "turn-1".to_string(),
+                item,
+                completed_at_ms: 2,
+            })
+        ));
+    }
+
+    #[test]
+    fn regular_user_message_item_events_are_not_suppressed() {
+        let item = TurnItem::UserMessage(codex_protocol::items::UserMessageItem {
+            id: "regular-user-message".to_string(),
+            content: vec![CoreUserInput::Text {
+                text: "hello".to_string(),
+                text_elements: Vec::new(),
+            }],
+        });
+
+        assert!(!item_event_contains_subagent_notification(
+            &EventMsg::ItemCompleted(codex_protocol::protocol::ItemCompletedEvent {
+                thread_id: ThreadId::new(),
+                turn_id: "turn-1".to_string(),
+                item,
+                completed_at_ms: 2,
+            })
+        ));
     }
 
     #[test]
