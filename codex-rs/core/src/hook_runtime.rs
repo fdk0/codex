@@ -32,6 +32,7 @@ use codex_protocol::protocol::HookRunSummary;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::HookStartedEvent;
 use codex_protocol::user_input::UserInput;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value;
 
 use crate::context::ContextualUserFragment;
@@ -72,6 +73,17 @@ pub(crate) enum PendingInputRecord {
 struct ContextInjectingHookOutcome {
     hook_events: Vec<HookCompletedEvent>,
     outcome: HookRuntimeOutcome,
+}
+
+fn hook_cwd(turn_context: &TurnContext) -> AbsolutePathBuf {
+    if let Some(turn_environment) = turn_context.environments.primary() {
+        turn_environment.cwd.clone()
+    } else {
+        #[allow(deprecated)]
+        {
+            turn_context.cwd.clone()
+        }
+    }
 }
 
 impl From<SessionStartOutcome> for ContextInjectingHookOutcome {
@@ -136,8 +148,7 @@ pub(crate) async fn run_pending_session_start_hooks(
 
     let request = codex_hooks::SessionStartRequest {
         session_id: sess.session_id().into(),
-        #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: hook_cwd(turn_context),
         transcript_path: sess.hook_transcript_path().await,
         active_profile: hook_active_profile(turn_context),
         model: turn_context.model_info.slug.clone(),
@@ -172,8 +183,7 @@ pub(crate) async fn run_pre_tool_use_hooks(
     let request = PreToolUseRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
-        #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: hook_cwd(turn_context),
         transcript_path: sess.hook_transcript_path().await,
         active_profile: hook_active_profile(turn_context),
         model: turn_context.model_info.slug.clone(),
@@ -233,8 +243,7 @@ pub(crate) async fn run_permission_request_hooks(
     let request = PermissionRequestRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
-        #[allow(deprecated)]
-        cwd: turn_context.cwd.to_path_buf(),
+        cwd: hook_cwd(turn_context).into_path_buf(),
         transcript_path: sess.hook_transcript_path().await,
         active_profile: hook_active_profile(turn_context),
         model: turn_context.model_info.slug.clone(),
@@ -275,8 +284,7 @@ pub(crate) async fn run_post_tool_use_hooks(
     let request = PostToolUseRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
-        #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: hook_cwd(turn_context),
         transcript_path: sess.hook_transcript_path().await,
         active_profile: hook_active_profile(turn_context),
         model: turn_context.model_info.slug.clone(),
@@ -304,8 +312,7 @@ pub(crate) async fn run_pre_compact_hooks(
     let request = codex_hooks::PreCompactRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
-        #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: hook_cwd(turn_context),
         transcript_path: sess.hook_transcript_path().await,
         active_profile: hook_active_profile(turn_context),
         model: turn_context.model_info.slug.clone(),
@@ -343,8 +350,7 @@ pub(crate) async fn run_post_compact_hooks(
     let request = codex_hooks::PostCompactRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
-        #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: hook_cwd(turn_context),
         transcript_path: sess.hook_transcript_path().await,
         active_profile: hook_active_profile(turn_context),
         model: turn_context.model_info.slug.clone(),
@@ -370,8 +376,7 @@ pub(crate) async fn run_user_prompt_submit_hooks(
     let request = UserPromptSubmitRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
-        #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: hook_cwd(turn_context),
         transcript_path: sess.hook_transcript_path().await,
         active_profile: hook_active_profile(turn_context),
         model: turn_context.model_info.slug.clone(),
@@ -397,7 +402,7 @@ pub(crate) async fn run_after_compaction_hooks(
     let request = AfterCompactionRequest {
         session_id: sess.conversation_id,
         turn_id: turn_context.sub_id.clone(),
-        cwd: turn_context.cwd.to_path_buf(),
+        cwd: hook_cwd(turn_context).into_path_buf(),
         transcript_path: sess.hook_transcript_path().await,
         active_profile: hook_active_profile(turn_context),
         model: turn_context.model_info.slug.clone(),
@@ -684,6 +689,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::additional_context_messages;
+    use super::hook_cwd;
     use super::hook_run_analytics_payload;
     use super::hook_run_metric_tags;
     use crate::session::tests::make_session_and_context;
@@ -724,6 +730,27 @@ mod tests {
                 ("developer", "second tide note".to_string()),
             ],
         );
+    }
+
+    #[tokio::test]
+    async fn hook_cwd_uses_primary_turn_environment() {
+        let (_session, mut turn_context) = make_session_and_context().await;
+        let expected_cwd = turn_context.environments.turn_environments[0]
+            .cwd
+            .join("selected-env");
+        turn_context.environments.turn_environments[0].cwd = expected_cwd.clone();
+
+        assert_eq!(hook_cwd(&turn_context), expected_cwd);
+    }
+
+    #[tokio::test]
+    async fn hook_cwd_falls_back_when_turn_environments_are_empty() {
+        let (_session, mut turn_context) = make_session_and_context().await;
+        turn_context.environments.turn_environments.clear();
+        #[allow(deprecated)]
+        let expected_cwd = turn_context.cwd.clone();
+
+        assert_eq!(hook_cwd(&turn_context), expected_cwd);
     }
 
     #[tokio::test]
