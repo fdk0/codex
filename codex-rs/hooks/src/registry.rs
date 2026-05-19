@@ -32,6 +32,7 @@ use crate::types::HookResponse;
 pub struct HooksConfig {
     pub legacy_notify_argv: Option<Vec<String>>,
     pub feature_enabled: bool,
+    pub bypass_hook_trust: bool,
     pub config_layer_stack: Option<ConfigLayerStack>,
     pub plugin_hook_sources: Vec<PluginHookSource>,
     pub plugin_hook_load_warnings: Vec<String>,
@@ -67,6 +68,7 @@ impl Hooks {
             .collect();
         let engine = ClaudeHooksEngine::new(
             config.feature_enabled,
+            config.bypass_hook_trust,
             config.config_layer_stack.as_ref(),
             config.plugin_hook_sources,
             config.plugin_hook_load_warnings,
@@ -228,6 +230,7 @@ pub fn list_hooks(config: HooksConfig) -> HookListOutcome {
         config.config_layer_stack.as_ref(),
         config.plugin_hook_sources,
         config.plugin_hook_load_warnings,
+        config.bypass_hook_trust,
     );
     HookListOutcome {
         hooks: discovered.hook_entries,

@@ -526,7 +526,7 @@ impl App {
                     if let Some(usage_line) = summary.usage_line {
                         lines.push(usage_line.into());
                     }
-                    if let Some(command) = summary.resume_command {
+                    if let Some(command) = summary.resume_hint {
                         let spans = vec!["To continue this session, run ".into(), command.cyan()];
                         lines.push(spans.into());
                     }
@@ -686,7 +686,7 @@ impl App {
         }
 
         let current_cwd = self.config.cwd.to_path_buf();
-        let resume_cwd = if self.remote_app_server_url.is_some() {
+        let resume_cwd = if self.remote_app_server_endpoint.is_some() {
             current_cwd.clone()
         } else {
             match crate::session_resume::resolve_cwd_for_resume_or_fork(
@@ -754,7 +754,7 @@ impl App {
                             if let Some(usage_line) = summary.usage_line {
                                 lines.push(usage_line.into());
                             }
-                            if let Some(command) = summary.resume_command {
+                            if let Some(command) = summary.resume_hint {
                                 let spans =
                                     vec!["To continue this session, run ".into(), command.cyan()];
                                 lines.push(spans.into());

@@ -6,7 +6,10 @@ use tempfile::TempDir;
 use super::PidBackend;
 use super::PidCommandKind;
 use super::PidFileState;
+use super::PidLogTail;
 use super::PidRecord;
+use super::read_stderr_log_tail;
+use super::stderr_log_file_for_pid_file;
 use super::try_lock_file;
 
 #[tokio::test]
@@ -181,13 +184,48 @@ fn remote_control_client_name_is_passed_to_app_server() {
     assert_eq!(
         backend.command_args(),
         vec![
-            "--enable".to_string(),
-            "remote_control".to_string(),
             "app-server".to_string(),
+            "--remote-control".to_string(),
             "--listen".to_string(),
             "unix://".to_string(),
             "--remote-control-client-name".to_string(),
             "Codex Desktop".to_string(),
         ]
+    );
+}
+
+#[test]
+fn app_server_remote_control_uses_runtime_flag() {
+    let backend = PidBackend::new(
+        "codex".into(),
+        "app-server.pid".into(),
+        /*remote_control_enabled*/ true,
+        /*remote_control_client_name*/ None,
+    );
+
+    assert_eq!(
+        backend.command_args(),
+        vec!["app-server", "--remote-control", "--listen", "unix://"]
+    );
+}
+
+#[tokio::test]
+async fn read_stderr_log_tail_returns_recent_complete_lines() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let pid_file = temp_dir.path().join("app-server.pid");
+    let log_file = stderr_log_file_for_pid_file(&pid_file);
+    let contents = format!("{}\nrecent error\nusage", "x".repeat(4100));
+    tokio::fs::write(&log_file, contents)
+        .await
+        .expect("write stderr log");
+
+    assert_eq!(
+        read_stderr_log_tail(&pid_file)
+            .await
+            .expect("read stderr log"),
+        Some(PidLogTail {
+            path: log_file,
+            contents: "recent error\nusage".to_string(),
+        })
     );
 }

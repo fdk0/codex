@@ -229,6 +229,7 @@ fn parse_completed(
         data: AfterCompactionHandlerData {
             additional_contexts_for_model,
         },
+        completion_order: 0,
     }
 }
 

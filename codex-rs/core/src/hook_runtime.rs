@@ -48,6 +48,11 @@ pub(crate) struct HookRuntimeOutcome {
     pub additional_contexts: Vec<String>,
 }
 
+pub(crate) enum PreToolUseHookResult {
+    Continue { updated_input: Option<Value> },
+    Blocked(String),
+}
+
 pub(crate) enum PendingInputHookDisposition {
     Accepted(Box<PendingInputRecord>),
     Blocked { additional_contexts: Vec<String> },
@@ -130,7 +135,8 @@ pub(crate) async fn run_pending_session_start_hooks(
     };
 
     let request = codex_hooks::SessionStartRequest {
-        session_id: sess.conversation_id,
+        session_id: sess.session_id().into(),
+        #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         transcript_path: sess.hook_transcript_path().await,
         active_profile: hook_active_profile(turn_context),
@@ -162,10 +168,11 @@ pub(crate) async fn run_pre_tool_use_hooks(
     tool_use_id: String,
     tool_name: &HookToolName,
     tool_input: &Value,
-) -> Option<String> {
+) -> PreToolUseHookResult {
     let request = PreToolUseRequest {
-        session_id: sess.conversation_id,
+        session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
+        #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         transcript_path: sess.hook_transcript_path().await,
         active_profile: hook_active_profile(turn_context),
@@ -185,25 +192,32 @@ pub(crate) async fn run_pre_tool_use_hooks(
         should_block,
         block_reason,
         additional_contexts,
+        updated_input,
     } = hooks.run_pre_tool_use(request).await;
     emit_hook_completed_events(sess, turn_context, hook_events).await;
     record_additional_contexts(sess, turn_context, additional_contexts).await;
 
-    if should_block {
-        block_reason.map(|reason| {
-            if (tool_name.name() == "Bash" || tool_name.name() == "apply_patch")
-                && let Some(command) = tool_input.get("command").and_then(Value::as_str)
-            {
-                format!("Command blocked by PreToolUse hook: {reason}. Command: {command}")
-            } else {
-                format!(
-                    "Tool call blocked by PreToolUse hook: {reason}. Tool: {}",
-                    tool_name.name()
-                )
-            }
-        })
+    if !should_block {
+        return PreToolUseHookResult::Continue { updated_input };
+    }
+
+    let Some(reason) = block_reason else {
+        return PreToolUseHookResult::Continue {
+            updated_input: None,
+        };
+    };
+
+    if (tool_name.name() == "Bash" || tool_name.name() == "apply_patch")
+        && let Some(command) = tool_input.get("command").and_then(Value::as_str)
+    {
+        PreToolUseHookResult::Blocked(format!(
+            "Command blocked by PreToolUse hook: {reason}. Command: {command}"
+        ))
     } else {
-        None
+        PreToolUseHookResult::Blocked(format!(
+            "Tool call blocked by PreToolUse hook: {reason}. Tool: {}",
+            tool_name.name()
+        ))
     }
 }
 
@@ -217,8 +231,9 @@ pub(crate) async fn run_permission_request_hooks(
     payload: PermissionRequestPayload,
 ) -> Option<PermissionRequestDecision> {
     let request = PermissionRequestRequest {
-        session_id: sess.conversation_id,
+        session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
+        #[allow(deprecated)]
         cwd: turn_context.cwd.to_path_buf(),
         transcript_path: sess.hook_transcript_path().await,
         active_profile: hook_active_profile(turn_context),
@@ -258,8 +273,9 @@ pub(crate) async fn run_post_tool_use_hooks(
     tool_response: Value,
 ) -> PostToolUseOutcome {
     let request = PostToolUseRequest {
-        session_id: sess.conversation_id,
+        session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
+        #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         transcript_path: sess.hook_transcript_path().await,
         active_profile: hook_active_profile(turn_context),
@@ -286,8 +302,9 @@ pub(crate) async fn run_pre_compact_hooks(
     trigger: CompactionTrigger,
 ) -> PreCompactHookOutcome {
     let request = codex_hooks::PreCompactRequest {
-        session_id: sess.conversation_id,
+        session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
+        #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         transcript_path: sess.hook_transcript_path().await,
         active_profile: hook_active_profile(turn_context),
@@ -324,8 +341,9 @@ pub(crate) async fn run_post_compact_hooks(
     trigger: CompactionTrigger,
 ) -> PostCompactHookOutcome {
     let request = codex_hooks::PostCompactRequest {
-        session_id: sess.conversation_id,
+        session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
+        #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         transcript_path: sess.hook_transcript_path().await,
         active_profile: hook_active_profile(turn_context),
@@ -350,8 +368,9 @@ pub(crate) async fn run_user_prompt_submit_hooks(
     prompt: String,
 ) -> HookRuntimeOutcome {
     let request = UserPromptSubmitRequest {
-        session_id: sess.conversation_id,
+        session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
+        #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         transcript_path: sess.hook_transcript_path().await,
         active_profile: hook_active_profile(turn_context),

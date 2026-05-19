@@ -111,6 +111,7 @@ pub(crate) struct ClaudeHooksEngine {
 impl ClaudeHooksEngine {
     pub(crate) fn new(
         enabled: bool,
+        bypass_hook_trust: bool,
         config_layer_stack: Option<&ConfigLayerStack>,
         plugin_hook_sources: Vec<PluginHookSource>,
         plugin_hook_load_warnings: Vec<String>,
@@ -130,6 +131,7 @@ impl ClaudeHooksEngine {
             config_layer_stack,
             plugin_hook_sources,
             plugin_hook_load_warnings,
+            bypass_hook_trust,
         );
         Self {
             handlers: discovered.handlers,
@@ -183,7 +185,13 @@ impl ClaudeHooksEngine {
     }
 
     pub(crate) async fn run_pre_tool_use(&self, request: PreToolUseRequest) -> PreToolUseOutcome {
-        crate::events::pre_tool_use::run(&self.handlers, &self.shell, request).await
+        let session_id = request.session_id;
+        let mut outcome =
+            crate::events::pre_tool_use::run(&self.handlers, &self.shell, request).await;
+        outcome.additional_contexts = self
+            .maybe_spill_texts(session_id, outcome.additional_contexts)
+            .await;
+        outcome
     }
 
     pub(crate) async fn run_permission_request(
