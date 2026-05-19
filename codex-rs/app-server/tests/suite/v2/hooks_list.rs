@@ -51,6 +51,7 @@ fn command_hook_hash(
         event_name,
         group: codex_config::MatcherGroup {
             matcher: matcher.map(ToOwned::to_owned),
+            conditions: Default::default(),
             hooks: vec![codex_config::HookHandlerConfig::Command {
                 command: command.to_string(),
                 timeout_sec: Some(timeout_sec),

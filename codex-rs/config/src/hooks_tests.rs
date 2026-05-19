@@ -38,6 +38,7 @@ fn hooks_file_deserializes_existing_json_shape() {
             hooks: HookEventsToml {
                 pre_tool_use: vec![MatcherGroup {
                     matcher: Some("^Bash$".to_string()),
+                    conditions: Default::default(),
                     hooks: vec![HookHandlerConfig::Command {
                         command: "python3 /tmp/pre.py".to_string(),
                         timeout_sec: Some(10),
@@ -72,6 +73,7 @@ statusMessage = "checking"
         HookEventsToml {
             pre_tool_use: vec![MatcherGroup {
                 matcher: Some("^Bash$".to_string()),
+                conditions: Default::default(),
                 hooks: vec![HookHandlerConfig::Command {
                     command: "python3 /tmp/pre.py".to_string(),
                     timeout_sec: Some(10),
@@ -108,6 +110,7 @@ command = "python3 /tmp/pre.py"
             events: HookEventsToml {
                 pre_tool_use: vec![MatcherGroup {
                     matcher: Some("^Bash$".to_string()),
+                    conditions: Default::default(),
                     hooks: vec![HookHandlerConfig::Command {
                         command: "python3 /tmp/pre.py".to_string(),
                         timeout_sec: None,
@@ -152,6 +155,7 @@ command = "python3 /enterprise/place/pre.py"
             hooks: HookEventsToml {
                 pre_tool_use: vec![MatcherGroup {
                     matcher: Some("^Bash$".to_string()),
+                    conditions: Default::default(),
                     hooks: vec![HookHandlerConfig::Command {
                         command: "python3 /enterprise/place/pre.py".to_string(),
                         timeout_sec: None,
