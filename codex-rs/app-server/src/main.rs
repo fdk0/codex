@@ -42,6 +42,11 @@ struct AppServerArgs {
     #[command(flatten)]
     auth: AppServerWebsocketAuthArgs,
 
+    /// Override the client name used for remote-control enrollment when the
+    /// app-server is not connected over stdio.
+    #[arg(long = "remote-control-client-name", value_name = "NAME")]
+    remote_control_client_name: Option<String>,
+
     /// Hidden debug-only test hook used by integration tests that spawn the
     /// production app-server binary.
     #[cfg(debug_assertions)]
@@ -62,16 +67,12 @@ fn main() -> anyhow::Result<()> {
         let transport = args.listen;
         let session_source = args.session_source;
         let auth = args.auth.try_into_settings()?;
+        let mut runtime_options = AppServerRuntimeOptions::default();
+        runtime_options.remote_control_client_name = args.remote_control_client_name;
         #[cfg(debug_assertions)]
-        let runtime_options = {
-            let mut runtime_options = AppServerRuntimeOptions::default();
-            if args.disable_plugin_startup_tasks_for_tests {
-                runtime_options.plugin_startup_tasks = PluginStartupTasks::Skip;
-            }
-            runtime_options
-        };
-        #[cfg(not(debug_assertions))]
-        let runtime_options = AppServerRuntimeOptions::default();
+        if args.disable_plugin_startup_tasks_for_tests {
+            runtime_options.plugin_startup_tasks = PluginStartupTasks::Skip;
+        }
 
         run_main_with_transport_options(
             arg0_paths,

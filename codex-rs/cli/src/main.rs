@@ -6,6 +6,7 @@ use clap_complete::generate;
 use codex_app_server_daemon::BootstrapOptions as AppServerBootstrapOptions;
 use codex_app_server_daemon::LifecycleCommand as AppServerLifecycleCommand;
 use codex_app_server_daemon::RemoteControlMode as AppServerRemoteControlMode;
+use codex_app_server_daemon::RemoteControlOptions as AppServerRemoteControlOptions;
 use codex_arg0::Arg0DispatchPaths;
 use codex_arg0::arg0_dispatch_or_else;
 use codex_chatgpt::apply_command::ApplyCommand;
@@ -130,7 +131,7 @@ enum Subcommand {
     AppServer(AppServerCommand),
 
     /// [experimental] Start a headless app-server with remote control enabled.
-    RemoteControl,
+    RemoteControl(RemoteControlCommand),
 
     /// Launch the Codex desktop app (opens the app installer if missing).
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -446,8 +447,24 @@ struct AppServerCommand {
     #[arg(long = "analytics-default-enabled")]
     analytics_default_enabled: bool,
 
+    /// Override the client name used for remote-control enrollment when the
+    /// app-server is not connected over stdio.
+    #[arg(long = "remote-control-client-name", value_name = "NAME")]
+    remote_control_client_name: Option<String>,
+
     #[command(flatten)]
     auth: codex_app_server::AppServerWebsocketAuthArgs,
+}
+
+#[derive(Debug, Parser)]
+struct RemoteControlCommand {
+    /// Client name used for remote-control enrollment.
+    #[arg(
+        long = "client-name",
+        alias = "remote-control-client-name",
+        value_name = "NAME"
+    )]
+    client_name: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -507,7 +524,7 @@ enum AppServerDaemonSubcommand {
     Restart,
 
     /// Enable remote_control for future starts and a currently running managed daemon.
-    EnableRemoteControl,
+    EnableRemoteControl(EnableRemoteControlCommand),
 
     /// Disable remote_control for future starts and a currently running managed daemon.
     DisableRemoteControl,
@@ -524,6 +541,17 @@ enum AppServerDaemonSubcommand {
 }
 
 #[derive(Debug, Args)]
+struct EnableRemoteControlCommand {
+    /// Client name used for remote-control enrollment.
+    #[arg(
+        long = "client-name",
+        alias = "remote-control-client-name",
+        value_name = "NAME"
+    )]
+    client_name: Option<String>,
+}
+
+#[derive(Debug, Args)]
 struct AppServerProxyCommand {
     /// Path to the app-server Unix domain socket to connect to.
     #[arg(long = "sock", value_name = "SOCKET_PATH", value_parser = parse_socket_path)]
@@ -535,6 +563,14 @@ struct AppServerBootstrapCommand {
     /// Launch the managed app-server with remote_control enabled.
     #[arg(long = "remote-control")]
     remote_control: bool,
+
+    /// Client name used for remote-control enrollment.
+    #[arg(
+        long = "remote-control-client-name",
+        value_name = "NAME",
+        requires = "remote_control"
+    )]
+    remote_control_client_name: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -900,6 +936,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 subcommand,
                 listen,
                 analytics_default_enabled,
+                remote_control_client_name,
                 auth,
             } = app_server_cli;
             reject_remote_mode_for_app_server_subcommand(
@@ -911,7 +948,11 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 None => {
                     let transport = listen;
                     let auth = auth.try_into_settings()?;
-                    codex_app_server::run_main_with_transport(
+                    let runtime_options = codex_app_server::AppServerRuntimeOptions {
+                        remote_control_client_name,
+                        ..Default::default()
+                    };
+                    codex_app_server::run_main_with_transport_options(
                         arg0_paths.clone(),
                         root_config_overrides,
                         codex_config::LoaderOverrides::default(),
@@ -919,6 +960,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                         transport,
                         codex_protocol::protocol::SessionSource::VSCode,
                         auth,
+                        runtime_options,
                     )
                     .await?;
                 }
@@ -930,6 +972,8 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                         let output =
                             codex_app_server_daemon::bootstrap(AppServerBootstrapOptions {
                                 remote_control_enabled: bootstrap_cli.remote_control,
+                                remote_control_client_name: bootstrap_cli
+                                    .remote_control_client_name,
                             })
                             .await?;
                         println!("{}", serde_json::to_string(&output)?);
@@ -937,14 +981,18 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                     AppServerDaemonSubcommand::Restart => {
                         print_app_server_daemon_output(AppServerLifecycleCommand::Restart).await?;
                     }
-                    AppServerDaemonSubcommand::EnableRemoteControl => {
-                        print_app_server_remote_control_output(AppServerRemoteControlMode::Enabled)
-                            .await?;
+                    AppServerDaemonSubcommand::EnableRemoteControl(enable_cli) => {
+                        print_app_server_remote_control_output(AppServerRemoteControlOptions {
+                            mode: AppServerRemoteControlMode::Enabled,
+                            client_name: enable_cli.client_name,
+                        })
+                        .await?;
                     }
                     AppServerDaemonSubcommand::DisableRemoteControl => {
-                        print_app_server_remote_control_output(
-                            AppServerRemoteControlMode::Disabled,
-                        )
+                        print_app_server_remote_control_output(AppServerRemoteControlOptions {
+                            mode: AppServerRemoteControlMode::Disabled,
+                            client_name: None,
+                        })
                         .await?;
                     }
                     AppServerDaemonSubcommand::Stop => {
@@ -989,14 +1037,18 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 }
             }
         }
-        Some(Subcommand::RemoteControl) => {
+        Some(Subcommand::RemoteControl(remote_control_cli)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
                 root_remote_auth_token_env.as_deref(),
                 "remote-control",
             )?;
             enable_remote_control_for_invocation(&mut root_config_overrides);
-            codex_app_server::run_main_with_transport(
+            let runtime_options = codex_app_server::AppServerRuntimeOptions {
+                remote_control_client_name: remote_control_cli.client_name,
+                ..Default::default()
+            };
+            codex_app_server::run_main_with_transport_options(
                 arg0_paths.clone(),
                 root_config_overrides,
                 codex_config::LoaderOverrides::default(),
@@ -1004,6 +1056,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 codex_app_server::AppServerTransport::Off,
                 codex_protocol::protocol::SessionSource::Cli,
                 codex_app_server::AppServerWebsocketAuthSettings::default(),
+                runtime_options,
             )
             .await?;
         }
@@ -1633,7 +1686,7 @@ fn reject_remote_mode_for_app_server_subcommand(
             AppServerDaemonSubcommand::Bootstrap(_) => "app-server daemon bootstrap",
             AppServerDaemonSubcommand::Start => "app-server daemon start",
             AppServerDaemonSubcommand::Restart => "app-server daemon restart",
-            AppServerDaemonSubcommand::EnableRemoteControl => {
+            AppServerDaemonSubcommand::EnableRemoteControl(_) => {
                 "app-server daemon enable-remote-control"
             }
             AppServerDaemonSubcommand::DisableRemoteControl => {
@@ -1660,9 +1713,9 @@ async fn print_app_server_daemon_output(command: AppServerLifecycleCommand) -> a
 }
 
 async fn print_app_server_remote_control_output(
-    mode: AppServerRemoteControlMode,
+    options: AppServerRemoteControlOptions,
 ) -> anyhow::Result<()> {
-    let output = codex_app_server_daemon::set_remote_control(mode).await?;
+    let output = codex_app_server_daemon::set_remote_control_with_options(options).await?;
     println!("{}", serde_json::to_string(&output)?);
     Ok(())
 }
@@ -2416,6 +2469,41 @@ mod tests {
     }
 
     #[test]
+    fn app_server_remote_control_client_name_parses() {
+        let app_server = app_server_from_args(
+            [
+                "codex",
+                "app-server",
+                "--listen",
+                "off",
+                "--remote-control-client-name",
+                "Codex Desktop",
+            ]
+            .as_ref(),
+        );
+        assert_eq!(
+            app_server.remote_control_client_name.as_deref(),
+            Some("Codex Desktop")
+        );
+    }
+
+    #[test]
+    fn remote_control_client_name_parses() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "remote-control",
+            "--client-name",
+            "Codex Desktop",
+        ])
+        .expect("parse");
+
+        let Some(Subcommand::RemoteControl(remote_control)) = cli.subcommand else {
+            panic!("expected remote-control subcommand");
+        };
+        assert_eq!(remote_control.client_name.as_deref(), Some("Codex Desktop"));
+    }
+
+    #[test]
     fn remote_control_override_is_appended_after_root_toggles() {
         let mut config_overrides = CliConfigOverrides::default();
         config_overrides
@@ -2442,7 +2530,7 @@ mod tests {
             "remote-control",
         ])
         .expect("parse");
-        assert_matches!(cli.subcommand, Some(Subcommand::RemoteControl));
+        assert_matches!(cli.subcommand, Some(Subcommand::RemoteControl(_)));
 
         let err = reject_remote_mode_for_subcommand(
             cli.remote.remote.as_deref(),
@@ -2650,10 +2738,34 @@ mod tests {
             .subcommand,
             Some(AppServerSubcommand::Daemon(AppServerDaemonCommand {
                 subcommand: AppServerDaemonSubcommand::Bootstrap(AppServerBootstrapCommand {
-                    remote_control: true
+                    remote_control: true,
+                    remote_control_client_name: None
                 })
             }))
         ));
+        let app_server = app_server_from_args(
+            [
+                "codex",
+                "app-server",
+                "daemon",
+                "bootstrap",
+                "--remote-control",
+                "--remote-control-client-name",
+                "Codex Desktop",
+            ]
+            .as_ref(),
+        );
+        let Some(AppServerSubcommand::Daemon(AppServerDaemonCommand {
+            subcommand: AppServerDaemonSubcommand::Bootstrap(bootstrap),
+        })) = app_server.subcommand
+        else {
+            panic!("expected app-server daemon bootstrap subcommand");
+        };
+        assert!(bootstrap.remote_control);
+        assert_eq!(
+            bootstrap.remote_control_client_name.as_deref(),
+            Some("Codex Desktop")
+        );
         assert!(matches!(
             app_server_from_args(["codex", "app-server", "daemon", "start"].as_ref()).subcommand,
             Some(AppServerSubcommand::Daemon(AppServerDaemonCommand {
@@ -2672,9 +2784,29 @@ mod tests {
             )
             .subcommand,
             Some(AppServerSubcommand::Daemon(AppServerDaemonCommand {
-                subcommand: AppServerDaemonSubcommand::EnableRemoteControl
+                subcommand: AppServerDaemonSubcommand::EnableRemoteControl(
+                    EnableRemoteControlCommand { client_name: None }
+                )
             }))
         ));
+        let app_server = app_server_from_args(
+            [
+                "codex",
+                "app-server",
+                "daemon",
+                "enable-remote-control",
+                "--client-name",
+                "Codex Desktop",
+            ]
+            .as_ref(),
+        );
+        let Some(AppServerSubcommand::Daemon(AppServerDaemonCommand {
+            subcommand: AppServerDaemonSubcommand::EnableRemoteControl(enable),
+        })) = app_server.subcommand
+        else {
+            panic!("expected app-server daemon enable-remote-control subcommand");
+        };
+        assert_eq!(enable.client_name.as_deref(), Some("Codex Desktop"));
         assert!(matches!(
             app_server_from_args(
                 ["codex", "app-server", "daemon", "disable-remote-control"].as_ref()

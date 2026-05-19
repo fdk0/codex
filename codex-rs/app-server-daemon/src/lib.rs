@@ -64,9 +64,10 @@ pub struct LifecycleOutput {
     pub app_server_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapOptions {
     pub remote_control_enabled: bool,
+    pub remote_control_client_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -122,6 +123,12 @@ pub struct RemoteControlOutput {
     pub app_server_version: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteControlOptions {
+    pub mode: RemoteControlMode,
+    pub client_name: Option<String>,
+}
+
 #[cfg(unix)]
 pub(crate) enum RestartIfRunningOutcome {
     Completed,
@@ -139,8 +146,20 @@ pub async fn bootstrap(options: BootstrapOptions) -> Result<BootstrapOutput> {
 }
 
 pub async fn set_remote_control(mode: RemoteControlMode) -> Result<RemoteControlOutput> {
+    set_remote_control_with_options(RemoteControlOptions {
+        mode,
+        client_name: None,
+    })
+    .await
+}
+
+pub async fn set_remote_control_with_options(
+    options: RemoteControlOptions,
+) -> Result<RemoteControlOutput> {
     ensure_supported_platform()?;
-    Daemon::from_environment()?.set_remote_control(mode).await
+    Daemon::from_environment()?
+        .set_remote_control(options)
+        .await
 }
 
 pub async fn run_pid_update_loop() -> Result<()> {
@@ -354,11 +373,16 @@ impl Daemon {
         self.bootstrap_locked(options).await
     }
 
-    async fn set_remote_control(&self, mode: RemoteControlMode) -> Result<RemoteControlOutput> {
+    async fn set_remote_control(
+        &self,
+        options: RemoteControlOptions,
+    ) -> Result<RemoteControlOutput> {
         let _operation_lock = self.acquire_operation_lock().await?;
         let previous_settings = self.load_settings().await?;
         let mut settings = previous_settings.clone();
+        let mode = options.mode;
         let remote_control_enabled = mode.is_enabled();
+        let remote_control_client_name = normalize_remote_control_client_name(options.client_name)?;
         let backend = self.running_backend_instance(&previous_settings).await?;
 
         if backend.is_none() && client::probe(&self.socket_path).await.is_ok() {
@@ -367,7 +391,13 @@ impl Daemon {
             ));
         }
 
-        if settings.remote_control_enabled == remote_control_enabled {
+        settings.remote_control_enabled = remote_control_enabled;
+        if let Some(client_name) = remote_control_client_name {
+            settings.remote_control_client_name = Some(client_name);
+        }
+        let settings_changed = settings != previous_settings;
+
+        if !settings_changed {
             let info = if backend.is_some() {
                 Some(self.wait_until_ready().await?)
             } else {
@@ -376,12 +406,11 @@ impl Daemon {
             return Ok(self.remote_control_output(
                 already_remote_control_status(mode),
                 backend.map(|_| BackendKind::Pid),
-                remote_control_enabled,
+                settings.remote_control_enabled,
                 info.map(|info| info.app_server_version),
             ));
         }
 
-        settings.remote_control_enabled = remote_control_enabled;
         settings.save(&self.settings_file).await?;
 
         let app_server_version = if let Some(backend) = backend {
@@ -396,7 +425,7 @@ impl Daemon {
         Ok(self.remote_control_output(
             remote_control_status(mode),
             app_server_version.as_ref().map(|_| BackendKind::Pid),
-            remote_control_enabled,
+            settings.remote_control_enabled,
             app_server_version,
         ))
     }
@@ -406,6 +435,9 @@ impl Daemon {
 
         let settings = DaemonSettings {
             remote_control_enabled: options.remote_control_enabled,
+            remote_control_client_name: normalize_remote_control_client_name(
+                options.remote_control_client_name,
+            )?,
         };
         if client::probe(&self.socket_path).await.is_ok()
             && self.running_backend(&settings).await?.is_none()
@@ -481,6 +513,7 @@ impl Daemon {
             pid_file: self.pid_file.clone(),
             update_pid_file: self.update_pid_file.clone(),
             remote_control_enabled: settings.remote_control_enabled,
+            remote_control_client_name: settings.remote_control_client_name.clone(),
         }
     }
 
@@ -572,6 +605,19 @@ fn already_remote_control_status(mode: RemoteControlMode) -> RemoteControlStatus
     match mode {
         RemoteControlMode::Enabled => RemoteControlStatus::AlreadyEnabled,
         RemoteControlMode::Disabled => RemoteControlStatus::AlreadyDisabled,
+    }
+}
+
+fn normalize_remote_control_client_name(client_name: Option<String>) -> Result<Option<String>> {
+    match client_name {
+        Some(client_name) => {
+            let client_name = client_name.trim().to_string();
+            if client_name.is_empty() {
+                return Err(anyhow!("remote-control client name cannot be empty"));
+            }
+            Ok(Some(client_name))
+        }
+        None => Ok(None),
     }
 }
 

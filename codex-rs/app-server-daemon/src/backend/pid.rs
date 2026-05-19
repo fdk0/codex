@@ -42,15 +42,23 @@ enum PidFileState {
     Running(PidRecord),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[cfg_attr(not(unix), allow(dead_code))]
 enum PidCommandKind {
-    AppServer { remote_control_enabled: bool },
+    AppServer {
+        remote_control_enabled: bool,
+        remote_control_client_name: Option<String>,
+    },
     UpdateLoop,
 }
 
 impl PidBackend {
-    pub(crate) fn new(codex_bin: PathBuf, pid_file: PathBuf, remote_control_enabled: bool) -> Self {
+    pub(crate) fn new(
+        codex_bin: PathBuf,
+        pid_file: PathBuf,
+        remote_control_enabled: bool,
+        remote_control_client_name: Option<String>,
+    ) -> Self {
         let lock_file = pid_file.with_extension("pid.lock");
         Self {
             codex_bin,
@@ -58,6 +66,7 @@ impl PidBackend {
             lock_file,
             command_kind: PidCommandKind::AppServer {
                 remote_control_enabled,
+                remote_control_client_name,
             },
         }
     }
@@ -345,33 +354,50 @@ impl PidBackend {
     }
 
     #[cfg(unix)]
-    fn command_args(&self) -> Vec<&'static str> {
-        match self.command_kind {
+    fn command_args(&self) -> Vec<String> {
+        match &self.command_kind {
             PidCommandKind::AppServer {
                 remote_control_enabled: true,
-            } => vec![
-                "--enable",
-                "remote_control",
-                "app-server",
-                "--listen",
-                "unix://",
-            ],
+                remote_control_client_name,
+            } => {
+                let mut args = vec![
+                    "--enable".to_string(),
+                    "remote_control".to_string(),
+                    "app-server".to_string(),
+                    "--listen".to_string(),
+                    "unix://".to_string(),
+                ];
+                if let Some(client_name) = remote_control_client_name {
+                    args.push("--remote-control-client-name".to_string());
+                    args.push(client_name.clone());
+                }
+                args
+            }
             PidCommandKind::AppServer {
                 remote_control_enabled: false,
-            } => vec!["app-server", "--listen", "unix://"],
-            PidCommandKind::UpdateLoop => vec!["app-server", "daemon", "pid-update-loop"],
+                ..
+            } => vec![
+                "app-server".to_string(),
+                "--listen".to_string(),
+                "unix://".to_string(),
+            ],
+            PidCommandKind::UpdateLoop => vec![
+                "app-server".to_string(),
+                "daemon".to_string(),
+                "pid-update-loop".to_string(),
+            ],
         }
     }
 
     fn terminate_process(&self, pid: u32) -> Result<()> {
-        match self.command_kind {
+        match &self.command_kind {
             PidCommandKind::AppServer { .. } => terminate_process(pid),
             PidCommandKind::UpdateLoop => terminate_process(pid),
         }
     }
 
     fn force_terminate_process(&self, pid: u32) -> Result<()> {
-        match self.command_kind {
+        match &self.command_kind {
             PidCommandKind::AppServer { .. } => force_terminate_process(pid),
             PidCommandKind::UpdateLoop => force_terminate_process_group(pid),
         }

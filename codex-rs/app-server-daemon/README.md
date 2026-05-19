@@ -20,10 +20,12 @@ support Windows lifecycle management.
 codex app-server daemon start
 codex app-server daemon restart
 codex app-server daemon enable-remote-control
+codex app-server daemon enable-remote-control --client-name "Codex Desktop"
 codex app-server daemon disable-remote-control
 codex app-server daemon stop
 codex app-server daemon version
 codex app-server daemon bootstrap --remote-control
+codex app-server daemon bootstrap --remote-control --remote-control-client-name "Codex Desktop"
 ```
 
 On success, every command writes exactly one JSON object to stdout. Consumers
@@ -43,6 +45,9 @@ $HOME/.codex/packages/standalone/current/codex app-server daemon bootstrap --rem
 `bootstrap` requires the standalone managed install. It records the daemon
 settings under `CODEX_HOME/app-server-daemon/`, starts app-server as a
 pidfile-backed detached process, and launches a detached updater loop.
+Use `--remote-control-client-name` during bootstrap, or `--client-name` with
+`enable-remote-control`, when the enrolled machine should appear under a
+specific app name such as `Codex Desktop`.
 
 ## Installation and update cases
 
@@ -84,8 +89,10 @@ JSON-RPC initialize handshake on the Unix control socket.
 `restart` stops any managed daemon and starts it again.
 
 `enable-remote-control` and `disable-remote-control` persist the launch setting
-for future starts. If a managed app-server is already running, they restart it
-so the new setting takes effect immediately.
+for future starts. `enable-remote-control --client-name <NAME>` also persists
+the remote-control client name passed to managed app-server launches. If a
+managed app-server is already running, they restart it so the new setting takes
+effect immediately.
 
 `stop` sends a graceful termination request first, then sends a second
 termination signal after the grace window if the process is still alive.

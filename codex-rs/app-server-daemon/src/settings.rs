@@ -10,6 +10,8 @@ use tokio::fs;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DaemonSettings {
     pub(crate) remote_control_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) remote_control_client_name: Option<String>,
 }
 
 impl DaemonSettings {
@@ -55,9 +57,22 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&DaemonSettings {
                 remote_control_enabled: true,
+                remote_control_client_name: None,
             })
             .expect("serialize"),
             r#"{"remoteControlEnabled":true}"#
+        );
+    }
+
+    #[test]
+    fn daemon_settings_serialize_remote_control_client_name() {
+        assert_eq!(
+            serde_json::to_string(&DaemonSettings {
+                remote_control_enabled: true,
+                remote_control_client_name: Some("Codex Desktop".to_string()),
+            })
+            .expect("serialize"),
+            r#"{"remoteControlEnabled":true,"remoteControlClientName":"Codex Desktop"}"#
         );
     }
 }

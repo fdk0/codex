@@ -18,6 +18,7 @@ pub(crate) struct BackendPaths {
     pub(crate) pid_file: PathBuf,
     pub(crate) update_pid_file: PathBuf,
     pub(crate) remote_control_enabled: bool,
+    pub(crate) remote_control_client_name: Option<String>,
 }
 
 pub(crate) fn pid_backend(paths: BackendPaths) -> PidBackend {
@@ -25,6 +26,7 @@ pub(crate) fn pid_backend(paths: BackendPaths) -> PidBackend {
         paths.codex_bin,
         paths.pid_file,
         paths.remote_control_enabled,
+        paths.remote_control_client_name,
     )
 }
 

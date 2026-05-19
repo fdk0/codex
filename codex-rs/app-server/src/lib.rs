@@ -54,6 +54,9 @@ use codex_core::config::find_codex_home;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerRuntimePaths;
 use codex_feedback::CodexFeedback;
+use codex_login::default_client::SetOriginatorError;
+use codex_login::default_client::originator;
+use codex_login::default_client::set_default_originator;
 use codex_protocol::protocol::SessionSource;
 use codex_rollout::state_db as rollout_state_db;
 use codex_state::log_db;
@@ -393,15 +396,17 @@ pub enum PluginStartupTasks {
     Skip,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppServerRuntimeOptions {
     pub plugin_startup_tasks: PluginStartupTasks,
+    pub remote_control_client_name: Option<String>,
 }
 
 impl Default for AppServerRuntimeOptions {
     fn default() -> Self {
         Self {
             plugin_startup_tasks: PluginStartupTasks::Start,
+            remote_control_client_name: None,
         }
     }
 }
@@ -439,6 +444,10 @@ pub async fn run_main_with_transport_options(
     auth: AppServerWebsocketAuthSettings,
     runtime_options: AppServerRuntimeOptions,
 ) -> IoResult<()> {
+    let AppServerRuntimeOptions {
+        plugin_startup_tasks,
+        remote_control_client_name,
+    } = runtime_options;
     let (transport_event_tx, mut transport_event_rx) =
         mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
     let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(CHANNEL_CAPACITY);
@@ -655,6 +664,13 @@ pub async fn run_main_with_transport_options(
     let graceful_signal_restart_enabled = !single_client_mode;
     let mut app_server_client_name_rx = None;
 
+    if remote_control_client_name.is_some() && matches!(&transport, AppServerTransport::Stdio) {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "--remote-control-client-name cannot be used with stdio transport; stdio clients provide their name during initialize",
+        ));
+    }
+
     match &transport {
         AppServerTransport::Stdio => {
             let (stdio_client_name_tx, stdio_client_name_rx) = oneshot::channel::<String>();
@@ -686,6 +702,43 @@ pub async fn run_main_with_transport_options(
             transport_accept_handles.push(accept_handle);
         }
         AppServerTransport::Off => {}
+    }
+
+    if let Some(client_name) = remote_control_client_name {
+        let client_name = client_name.trim().to_string();
+        if client_name.is_empty() {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "--remote-control-client-name cannot be empty",
+            ));
+        }
+
+        match set_default_originator(client_name.clone()) {
+            Ok(()) => {}
+            Err(SetOriginatorError::InvalidHeaderValue) => {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "--remote-control-client-name is not a valid HTTP header value: {client_name:?}"
+                    ),
+                ));
+            }
+            Err(SetOriginatorError::AlreadyInitialized) => {
+                let current_originator = originator().value;
+                if current_originator != client_name {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidInput,
+                        format!(
+                            "cannot set --remote-control-client-name to {client_name:?}; originator was already initialized as {current_originator:?}"
+                        ),
+                    ));
+                }
+            }
+        }
+
+        let (client_name_tx, client_name_rx) = oneshot::channel();
+        let _ = client_name_tx.send(client_name);
+        app_server_client_name_rx = Some(client_name_rx);
     }
 
     let auth_manager =
@@ -804,7 +857,7 @@ pub async fn run_main_with_transport_options(
             installation_id,
             rpc_transport: analytics_rpc_transport(&transport),
             remote_control_handle: Some(remote_control_handle.clone()),
-            plugin_startup_tasks: runtime_options.plugin_startup_tasks,
+            plugin_startup_tasks,
         }));
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();

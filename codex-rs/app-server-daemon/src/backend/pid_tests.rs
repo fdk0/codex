@@ -20,6 +20,7 @@ async fn locked_empty_pid_file_is_treated_as_active_reservation() {
         temp_dir.path().join("codex"),
         pid_file.clone(),
         /*remote_control_enabled*/ false,
+        /*remote_control_client_name*/ None,
     );
     let reservation = tokio::fs::OpenOptions::new()
         .create(true)
@@ -48,6 +49,7 @@ async fn unlocked_empty_pid_file_is_treated_as_stale_reservation() {
         temp_dir.path().join("codex"),
         pid_file.clone(),
         /*remote_control_enabled*/ false,
+        /*remote_control_client_name*/ None,
     );
 
     assert_eq!(
@@ -68,6 +70,7 @@ async fn stop_waits_for_live_reservation_to_resolve() {
         temp_dir.path().join("codex"),
         pid_file.clone(),
         /*remote_control_enabled*/ false,
+        /*remote_control_client_name*/ None,
     );
     let reservation = tokio::fs::OpenOptions::new()
         .create(true)
@@ -100,6 +103,7 @@ async fn start_retries_stale_empty_pid_file_under_its_own_lock() {
         temp_dir.path().join("missing-codex"),
         pid_file,
         /*remote_control_enabled*/ false,
+        /*remote_control_client_name*/ None,
     );
 
     let err = backend.start().await.expect_err("start");
@@ -117,6 +121,7 @@ async fn stale_record_cleanup_preserves_replacement_record() {
         temp_dir.path().join("codex"),
         pid_file.clone(),
         /*remote_control_enabled*/ false,
+        /*remote_control_client_name*/ None,
     );
     let stale = PidRecord {
         pid: 1,
@@ -153,6 +158,36 @@ fn update_loop_uses_hidden_app_server_subcommand() {
 
     assert_eq!(
         backend.command_args(),
-        vec!["app-server", "daemon", "pid-update-loop"]
+        vec![
+            "app-server".to_string(),
+            "daemon".to_string(),
+            "pid-update-loop".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn remote_control_client_name_is_passed_to_app_server() {
+    let backend = PidBackend {
+        codex_bin: "codex".into(),
+        pid_file: "app-server.pid".into(),
+        lock_file: "app-server.pid.lock".into(),
+        command_kind: PidCommandKind::AppServer {
+            remote_control_enabled: true,
+            remote_control_client_name: Some("Codex Desktop".to_string()),
+        },
+    };
+
+    assert_eq!(
+        backend.command_args(),
+        vec![
+            "--enable".to_string(),
+            "remote_control".to_string(),
+            "app-server".to_string(),
+            "--listen".to_string(),
+            "unix://".to_string(),
+            "--remote-control-client-name".to_string(),
+            "Codex Desktop".to_string(),
+        ]
     );
 }
