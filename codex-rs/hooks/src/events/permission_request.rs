@@ -24,6 +24,7 @@ use crate::engine::dispatcher::HookSelectionContext;
 use crate::engine::output_parser;
 use crate::schema::NullableString;
 use crate::schema::PermissionRequestCommandInput;
+use crate::schema::SubagentCommandInputFields;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookEventName;
@@ -37,6 +38,7 @@ use serde_json::Value;
 pub struct PermissionRequestRequest {
     pub session_id: ThreadId,
     pub turn_id: String,
+    pub subagent: Option<common::SubagentHookContext>,
     pub cwd: PathBuf,
     pub transcript_path: Option<PathBuf>,
     pub active_profile: Option<String>,
@@ -183,9 +185,12 @@ fn resolve_permission_request_decision<'a>(
 }
 
 fn build_command_input(request: &PermissionRequestRequest) -> PermissionRequestCommandInput {
+    let subagent = SubagentCommandInputFields::from(request.subagent.as_ref());
     PermissionRequestCommandInput {
         session_id: request.session_id.to_string(),
         turn_id: request.turn_id.clone(),
+        agent_id: subagent.agent_id,
+        agent_type: subagent.agent_type,
         transcript_path: NullableString::from_path(request.transcript_path.clone()),
         cwd: request.cwd.display().to_string(),
         hook_event_name: "PermissionRequest".to_string(),

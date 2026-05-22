@@ -737,6 +737,8 @@ fn hook_event_label(event_name: HookEventName) -> &'static str {
         HookEventName::AfterCompaction => "AfterCompaction",
         HookEventName::SessionStart => "SessionStart",
         HookEventName::UserPromptSubmit => "UserPromptSubmit",
+        HookEventName::SubagentStart => "SubagentStart",
+        HookEventName::SubagentStop => "SubagentStop",
         HookEventName::Stop => "Stop",
     }
 }

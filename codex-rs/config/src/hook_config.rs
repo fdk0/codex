@@ -47,6 +47,10 @@ pub struct HookEventsToml {
     pub after_compaction: Vec<MatcherGroup>,
     #[serde(rename = "UserPromptSubmit", default)]
     pub user_prompt_submit: Vec<MatcherGroup>,
+    #[serde(rename = "SubagentStart", default)]
+    pub subagent_start: Vec<MatcherGroup>,
+    #[serde(rename = "SubagentStop", default)]
+    pub subagent_stop: Vec<MatcherGroup>,
     #[serde(rename = "Stop", default)]
     pub stop: Vec<MatcherGroup>,
 }
@@ -62,6 +66,8 @@ impl HookEventsToml {
             session_start,
             after_compaction,
             user_prompt_submit,
+            subagent_start,
+            subagent_stop,
             stop,
         } = self;
         pre_tool_use.is_empty()
@@ -72,6 +78,8 @@ impl HookEventsToml {
             && session_start.is_empty()
             && after_compaction.is_empty()
             && user_prompt_submit.is_empty()
+            && subagent_start.is_empty()
+            && subagent_stop.is_empty()
             && stop.is_empty()
     }
 
@@ -85,6 +93,8 @@ impl HookEventsToml {
             session_start,
             after_compaction,
             user_prompt_submit,
+            subagent_start,
+            subagent_stop,
             stop,
         } = self;
         [
@@ -96,6 +106,8 @@ impl HookEventsToml {
             session_start,
             after_compaction,
             user_prompt_submit,
+            subagent_start,
+            subagent_stop,
             stop,
         ]
         .into_iter()
@@ -104,7 +116,7 @@ impl HookEventsToml {
         .sum()
     }
 
-    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 9] {
+    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 11] {
         [
             (HookEventName::PreToolUse, self.pre_tool_use),
             (HookEventName::PermissionRequest, self.permission_request),
@@ -114,6 +126,8 @@ impl HookEventsToml {
             (HookEventName::SessionStart, self.session_start),
             (HookEventName::AfterCompaction, self.after_compaction),
             (HookEventName::UserPromptSubmit, self.user_prompt_submit),
+            (HookEventName::SubagentStart, self.subagent_start),
+            (HookEventName::SubagentStop, self.subagent_stop),
             (HookEventName::Stop, self.stop),
         ]
     }

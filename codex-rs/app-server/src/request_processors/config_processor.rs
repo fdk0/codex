@@ -9,6 +9,7 @@ use crate::outgoing_message::OutgoingMessageSender;
 use codex_analytics::AnalyticsEventsClient;
 use codex_app_server_protocol::AppListUpdatedNotification;
 use codex_app_server_protocol::ClientResponsePayload;
+use codex_app_server_protocol::ComputerUseRequirements;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigReadParams;
 use codex_app_server_protocol::ConfigReadResponse;
@@ -221,7 +222,7 @@ impl ConfigRequestProcessor {
                 connectors::list_accessible_connectors_from_mcp_tools_with_environment_manager(
                     &config,
                     /*force_refetch*/ true,
-                    &environment_manager,
+                    Arc::clone(&environment_manager),
                 ),
             );
             let all_connectors = match all_connectors_result {
@@ -420,6 +421,7 @@ fn map_requirements_toml_to_api(requirements: ConfigRequirementsToml) -> ConfigR
                 .filter_map(map_sandbox_mode_requirement_to_api)
                 .collect()
         }),
+        allowed_permissions: requirements.allowed_permissions,
         allowed_web_search_modes: requirements.allowed_web_search_modes.map(|modes| {
             let mut normalized = modes
                 .into_iter()
@@ -431,6 +433,9 @@ fn map_requirements_toml_to_api(requirements: ConfigRequirementsToml) -> ConfigR
             normalized
         }),
         allow_managed_hooks_only: requirements.allow_managed_hooks_only,
+        computer_use: requirements
+            .computer_use
+            .map(map_computer_use_requirements_to_api),
         feature_requirements: requirements
             .feature_requirements
             .map(|requirements| requirements.entries),
@@ -439,6 +444,14 @@ fn map_requirements_toml_to_api(requirements: ConfigRequirementsToml) -> ConfigR
             .enforce_residency
             .map(map_residency_requirement_to_api),
         network: requirements.network.map(map_network_requirements_to_api),
+    }
+}
+
+fn map_computer_use_requirements_to_api(
+    computer_use: codex_config::ComputerUseRequirementsToml,
+) -> ComputerUseRequirements {
+    ComputerUseRequirements {
+        allow_locked_computer_use: computer_use.allow_locked_computer_use,
     }
 }
 
@@ -457,6 +470,8 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         session_start,
         after_compaction,
         user_prompt_submit,
+        subagent_start,
+        subagent_stop,
         stop,
     } = hooks;
 
@@ -471,6 +486,8 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         session_start: map_hook_matcher_groups_to_api(session_start),
         after_compaction: map_hook_matcher_groups_to_api(after_compaction),
         user_prompt_submit: map_hook_matcher_groups_to_api(user_prompt_submit),
+        subagent_start: map_hook_matcher_groups_to_api(subagent_start),
+        subagent_stop: map_hook_matcher_groups_to_api(subagent_stop),
         stop: map_hook_matcher_groups_to_api(stop),
     }
 }
@@ -631,17 +648,46 @@ fn config_write_error(code: ConfigWriteErrorCode, message: impl Into<String>) ->
 #[cfg(test)]
 mod tests {
     use super::map_requirements_toml_to_api;
+    use codex_config::ComputerUseRequirementsToml;
     use codex_config::ConfigRequirementsToml;
     use pretty_assertions::assert_eq;
 
     #[test]
     fn requirements_api_includes_allow_managed_hooks_only() {
         let mapped = map_requirements_toml_to_api(ConfigRequirementsToml {
+            allowed_permissions: Some(vec![
+                "managed-standard".to_string(),
+                "managed-build".to_string(),
+            ]),
             allow_managed_hooks_only: Some(true),
             ..ConfigRequirementsToml::default()
         });
 
+        assert_eq!(
+            mapped.allowed_permissions,
+            Some(vec![
+                "managed-standard".to_string(),
+                "managed-build".to_string(),
+            ])
+        );
         assert_eq!(mapped.allow_managed_hooks_only, Some(true));
         assert_eq!(mapped.hooks, None);
+    }
+
+    #[test]
+    fn requirements_api_includes_computer_use_requirements() {
+        let mapped = map_requirements_toml_to_api(ConfigRequirementsToml {
+            computer_use: Some(ComputerUseRequirementsToml {
+                allow_locked_computer_use: Some(false),
+            }),
+            ..ConfigRequirementsToml::default()
+        });
+
+        assert_eq!(
+            mapped
+                .computer_use
+                .and_then(|requirements| requirements.allow_locked_computer_use),
+            Some(false)
+        );
     }
 }

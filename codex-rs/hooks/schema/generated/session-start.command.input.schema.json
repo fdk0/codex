@@ -40,7 +40,8 @@
       "enum": [
         "startup",
         "resume",
-        "clear"
+        "clear",
+        "compact"
       ],
       "type": "string"
     },

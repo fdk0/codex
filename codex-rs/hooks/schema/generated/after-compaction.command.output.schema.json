@@ -28,6 +28,8 @@
         "SessionStart",
         "AfterCompaction",
         "UserPromptSubmit",
+        "SubagentStart",
+        "SubagentStop",
         "Stop"
       ],
       "type": "string"

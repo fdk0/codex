@@ -1338,6 +1338,8 @@ pub enum HookEventName {
     SessionStart,
     AfterCompaction,
     UserPromptSubmit,
+    SubagentStart,
+    SubagentStop,
     Stop,
 }
 
@@ -2185,6 +2187,9 @@ pub struct McpToolCallBeginEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub mcp_app_resource_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub plugin_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq)]
@@ -2195,6 +2200,9 @@ pub struct McpToolCallEndEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub mcp_app_resource_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub plugin_id: Option<String>,
     #[ts(type = "string")]
     pub duration: Duration,
     /// Result of the tool call. Note this could be an error.
@@ -4212,7 +4220,7 @@ mod tests {
             },
             FileSystemSandboxEntry {
                 path: FileSystemPath::Path { path: blocked },
-                access: FileSystemAccessMode::None,
+                access: FileSystemAccessMode::Deny,
             },
         ]);
 
@@ -4269,7 +4277,7 @@ mod tests {
             },
             FileSystemSandboxEntry {
                 path: FileSystemPath::Path { path: secret },
-                access: FileSystemAccessMode::None,
+                access: FileSystemAccessMode::Deny,
             },
         ]);
 
@@ -4535,6 +4543,7 @@ mod tests {
                 tool: "tool".into(),
                 arguments: json!({"arg": "value"}),
                 mcp_app_resource_uri: Some("app://connector".into()),
+                plugin_id: Some("sample@test".into()),
                 status: McpToolCallStatus::InProgress,
                 result: None,
                 error: None,
@@ -4553,6 +4562,7 @@ mod tests {
                     event.mcp_app_resource_uri.as_deref(),
                     Some("app://connector")
                 );
+                assert_eq!(event.plugin_id.as_deref(), Some("sample@test"));
             }
             _ => panic!("expected McpToolCallBegin event"),
         }
@@ -4640,6 +4650,7 @@ mod tests {
                 tool: "tool".into(),
                 arguments: json!({"arg": "value"}),
                 mcp_app_resource_uri: Some("app://connector".into()),
+                plugin_id: Some("sample@test".into()),
                 status: McpToolCallStatus::Completed,
                 result: Some(CallToolResult {
                     content: vec![json!({"type": "text", "text": "ok"})],
@@ -4663,6 +4674,7 @@ mod tests {
                     event.mcp_app_resource_uri.as_deref(),
                     Some("app://connector")
                 );
+                assert_eq!(event.plugin_id.as_deref(), Some("sample@test"));
                 assert_eq!(event.duration, Duration::from_millis(42));
                 assert!(event.is_success());
             }
@@ -5164,7 +5176,7 @@ mod tests {
                     path: FileSystemPath::GlobPattern {
                         pattern: "/tmp/private/**/*.txt".to_string(),
                     },
-                    access: FileSystemAccessMode::None,
+                    access: FileSystemAccessMode::Deny,
                 },
             ])),
             model: "gpt-5".to_string(),
@@ -5192,7 +5204,7 @@ mod tests {
                         "type": "glob_pattern",
                         "pattern": "/tmp/private/**/*.txt"
                     },
-                    "access": "none"
+                    "access": "deny"
                 }]
             })
         );

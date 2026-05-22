@@ -14,8 +14,9 @@ pub use config_rules::hook_states_from_stack;
 pub use declarations::PluginHookDeclaration;
 pub use declarations::plugin_hook_declarations;
 pub use engine::HookListEntry;
+pub use events::common::SubagentHookContext;
 /// Hook event names as they appear in hooks JSON and config files.
-pub const HOOK_EVENT_NAMES: [&str; 9] = [
+pub const HOOK_EVENT_NAMES: [&str; 11] = [
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
@@ -24,6 +25,8 @@ pub const HOOK_EVENT_NAMES: [&str; 9] = [
     "SessionStart",
     "AfterCompaction",
     "UserPromptSubmit",
+    "SubagentStart",
+    "SubagentStop",
     "Stop",
 ];
 
@@ -32,7 +35,7 @@ pub const HOOK_EVENT_NAMES: [&str; 9] = [
 /// Other events can appear in hooks JSON, but Codex ignores their matcher
 /// fields because those events do not dispatch against a tool, compaction
 /// trigger, or session-start source.
-pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 7] = [
+pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 9] = [
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
@@ -40,6 +43,8 @@ pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 7] = [
     "PostCompact",
     "SessionStart",
     "AfterCompaction",
+    "SubagentStart",
+    "SubagentStop",
 ];
 
 pub use events::after_compaction::AfterCompactionOutcome;
@@ -59,6 +64,8 @@ pub use events::pre_tool_use::PreToolUseRequest;
 pub use events::session_start::SessionStartOutcome;
 pub use events::session_start::SessionStartRequest;
 pub use events::session_start::SessionStartSource;
+pub use events::session_start::StartHookTarget;
+pub use events::stop::StopHookTarget;
 pub use events::stop::StopOutcome;
 pub use events::stop::StopRequest;
 pub use events::user_prompt_submit::UserPromptSubmitOutcome;
@@ -89,6 +96,8 @@ pub fn hook_event_key_label(event_name: HookEventName) -> &'static str {
         HookEventName::SessionStart => "session_start",
         HookEventName::AfterCompaction => "after_compaction",
         HookEventName::UserPromptSubmit => "user_prompt_submit",
+        HookEventName::SubagentStart => "subagent_start",
+        HookEventName::SubagentStop => "subagent_stop",
         HookEventName::Stop => "stop",
     }
 }
