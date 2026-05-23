@@ -1224,7 +1224,6 @@ fn config_request_overrides_from_config(
             overrides.insert(key.to_string(), serde_json::Value::String(value));
         }
     };
-    insert("profile", config.active_profile.clone());
     insert(
         "model_reasoning_effort",
         config
@@ -2194,6 +2193,17 @@ mod tests {
             explicit_overrides.get("personality"),
             Some(&serde_json::Value::String("none".to_string()))
         );
+    }
+
+    #[tokio::test]
+    async fn config_request_overrides_do_not_forward_active_profile_as_legacy_profile() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let mut config = build_config(&temp_dir).await;
+        config.active_profile = Some("work".to_string());
+
+        let overrides = config_request_overrides_from_config(&config).expect("config overrides");
+
+        assert!(!overrides.contains_key("profile"));
     }
 
     #[tokio::test]
