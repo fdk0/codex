@@ -11,16 +11,19 @@ use crate::config::Config;
 use crate::config::ConfigOverrides;
 use crate::config::agent_roles::parse_agent_role_file_contents;
 use crate::config::deserialize_config_toml_with_base;
+use crate::config::resolve_profile_v2_config_path;
 use anyhow::anyhow;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigLayerStackOrdering;
+use codex_config::ProfileV2Name;
 use codex_config::config_toml::ConfigToml;
 use codex_config::loader::resolve_relative_paths_in_config_toml;
 use codex_exec_server::LOCAL_FS;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::LazyLock;
 use toml::Value as TomlValue;
@@ -64,20 +67,31 @@ async fn apply_role_to_config_inner(
     let Some(config_file) = role.config_file.as_ref() else {
         return Ok(());
     };
-    let role_layer_toml = load_role_layer_toml(config, config_file, is_built_in, role_name).await?;
-    if role_layer_toml
+    let role_layer = load_role_layer_toml(config, config_file, is_built_in, role_name).await?;
+    if role_layer
+        .config
         .as_table()
         .is_some_and(toml::map::Map::is_empty)
+        && role_layer.profile_v2_layer.is_none()
     {
         return Ok(());
     }
-    let (preserve_current_profile, preserve_current_provider) =
-        preservation_policy(config, &role_layer_toml);
-    let preserve_current_service_tier = role_layer_toml.get("service_tier").is_none();
+    let (preserve_current_profile, preserve_current_provider) = preservation_policy(
+        config,
+        &role_layer.config,
+        role_layer.profile_v2_layer.is_some(),
+    );
+    let role_profile_v2_sets_service_tier = role_layer
+        .profile_v2_layer
+        .as_ref()
+        .is_some_and(|layer| layer.config.get("service_tier").is_some());
+    let preserve_current_service_tier =
+        role_layer.config.get("service_tier").is_none() && !role_profile_v2_sets_service_tier;
 
     *config = reload::build_next_config(
         config,
-        role_layer_toml,
+        role_layer.config,
+        role_layer.profile_v2_layer,
         preserve_current_profile,
         preserve_current_provider,
         preserve_current_service_tier,
@@ -86,38 +100,84 @@ async fn apply_role_to_config_inner(
     Ok(())
 }
 
+struct RoleLayer {
+    config: TomlValue,
+    profile_v2_layer: Option<ConfigLayerEntry>,
+}
+
 async fn load_role_layer_toml(
     config: &Config,
     config_file: &Path,
     is_built_in: bool,
     role_name: &str,
-) -> anyhow::Result<TomlValue> {
-    let (role_config_toml, role_config_base) = if is_built_in {
+) -> anyhow::Result<RoleLayer> {
+    let (mut role_config_toml, role_config_base, profile_v2_layer) = if is_built_in {
         let role_config_contents = built_in::config_file_contents(config_file)
             .map(str::to_owned)
             .ok_or(anyhow!("No corresponding config content"))?;
         let role_config_toml: TomlValue = toml::from_str(&role_config_contents)?;
-        (role_config_toml, config.codex_home.as_path())
+        (role_config_toml, config.codex_home.as_path(), None)
     } else {
         let role_config_contents = tokio::fs::read_to_string(config_file).await?;
         let role_config_base = config_file
             .parent()
             .ok_or(anyhow!("No corresponding config content"))?;
-        let role_config_toml = parse_agent_role_file_contents(
+        let mut role_config_toml = parse_agent_role_file_contents(
             &role_config_contents,
             config_file,
             role_config_base,
             Some(role_name),
         )?
         .config;
-        (role_config_toml, role_config_base)
+        let profile_v2_layer =
+            load_profile_v2_layer_from_role_profile(config, &role_config_toml).await?;
+        if profile_v2_layer.is_some()
+            && let Some(config_table) = role_config_toml.as_table_mut()
+        {
+            config_table.remove("profile");
+        }
+        (role_config_toml, role_config_base, profile_v2_layer)
     };
 
     deserialize_config_toml_with_base(role_config_toml.clone(), role_config_base)?;
-    Ok(resolve_relative_paths_in_config_toml(
-        role_config_toml,
-        role_config_base,
-    )?)
+    role_config_toml = resolve_relative_paths_in_config_toml(role_config_toml, role_config_base)?;
+    Ok(RoleLayer {
+        config: role_config_toml,
+        profile_v2_layer,
+    })
+}
+
+async fn load_profile_v2_layer_from_role_profile(
+    config: &Config,
+    role_config_toml: &TomlValue,
+) -> anyhow::Result<Option<ConfigLayerEntry>> {
+    let Some(profile_name) = role_config_toml.get("profile").and_then(TomlValue::as_str) else {
+        return Ok(None);
+    };
+    let Ok(profile_name) = profile_name.parse::<ProfileV2Name>() else {
+        return Ok(None);
+    };
+    let profile_config_path = resolve_profile_v2_config_path(&config.codex_home, &profile_name);
+    let profile_config_contents =
+        match tokio::fs::read_to_string(profile_config_path.as_path()).await {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+    let profile_config_base = profile_config_path
+        .as_path()
+        .parent()
+        .ok_or(anyhow!("profile config file has no parent directory"))?;
+    let profile_toml: TomlValue = toml::from_str(&profile_config_contents)?;
+    deserialize_config_toml_with_base(profile_toml.clone(), profile_config_base)?;
+    let profile_toml = resolve_relative_paths_in_config_toml(profile_toml, profile_config_base)?;
+    Ok(Some(ConfigLayerEntry::new(
+        ConfigLayerSource::User {
+            file: profile_config_path,
+            profile: Some(profile_name.to_string()),
+        },
+        profile_toml,
+    )))
 }
 
 pub(crate) fn resolve_role_config<'a>(
@@ -130,9 +190,13 @@ pub(crate) fn resolve_role_config<'a>(
         .or_else(|| built_in::configs().get(role_name))
 }
 
-fn preservation_policy(config: &Config, role_layer_toml: &TomlValue) -> (bool, bool) {
+fn preservation_policy(
+    config: &Config,
+    role_layer_toml: &TomlValue,
+    role_selects_profile_v2: bool,
+) -> (bool, bool) {
     let role_selects_provider = role_layer_toml.get("model_provider").is_some();
-    let role_selects_profile = role_layer_toml.get("profile").is_some();
+    let role_selects_profile = role_selects_profile_v2 || role_layer_toml.get("profile").is_some();
     let role_updates_active_profile_provider = config
         .active_profile
         .as_ref()
@@ -157,15 +221,22 @@ mod reload {
     pub(super) async fn build_next_config(
         config: &Config,
         role_layer_toml: TomlValue,
+        role_profile_v2_layer: Option<ConfigLayerEntry>,
         preserve_current_profile: bool,
         preserve_current_provider: bool,
         preserve_current_service_tier: bool,
     ) -> anyhow::Result<Config> {
-        let active_profile_name = preserve_current_profile
+        let active_profile_v2_name = active_profile_v2_name(config);
+        let active_legacy_profile_name = preserve_current_profile
             .then_some(config.active_profile.as_deref())
-            .flatten();
-        let config_layer_stack =
-            build_config_layer_stack(config, &role_layer_toml, active_profile_name)?;
+            .flatten()
+            .filter(|profile_name| Some(*profile_name) != active_profile_v2_name);
+        let config_layer_stack = build_config_layer_stack(
+            config,
+            &role_layer_toml,
+            role_profile_v2_layer,
+            active_legacy_profile_name,
+        )?;
         let mut merged_config = deserialize_effective_config(config, &config_layer_stack)?;
         if preserve_current_profile {
             merged_config.profile = None;
@@ -192,11 +263,15 @@ mod reload {
     fn build_config_layer_stack(
         config: &Config,
         role_layer_toml: &TomlValue,
-        active_profile_name: Option<&str>,
+        role_profile_v2_layer: Option<ConfigLayerEntry>,
+        active_legacy_profile_name: Option<&str>,
     ) -> anyhow::Result<ConfigLayerStack> {
-        let mut layers = existing_layers(config);
+        let mut layers = existing_layers(config, role_profile_v2_layer.is_some());
+        if let Some(role_profile_v2_layer) = role_profile_v2_layer {
+            insert_layer(&mut layers, role_profile_v2_layer);
+        }
         if let Some(resolved_profile_layer) =
-            resolved_profile_layer(config, &layers, role_layer_toml, active_profile_name)?
+            resolved_profile_layer(config, &layers, role_layer_toml, active_legacy_profile_name)?
         {
             insert_layer(&mut layers, resolved_profile_layer);
         }
@@ -246,7 +321,7 @@ mod reload {
         )?)
     }
 
-    fn existing_layers(config: &Config) -> Vec<ConfigLayerEntry> {
+    fn existing_layers(config: &Config, replace_profile_v2_layer: bool) -> Vec<ConfigLayerEntry> {
         config
             .config_layer_stack
             .get_layers(
@@ -254,8 +329,31 @@ mod reload {
                 /*include_disabled*/ true,
             )
             .into_iter()
+            .filter(|layer| {
+                !replace_profile_v2_layer
+                    || !matches!(
+                        &layer.name,
+                        ConfigLayerSource::User {
+                            profile: Some(_),
+                            ..
+                        }
+                    )
+            })
             .cloned()
             .collect()
+    }
+
+    fn active_profile_v2_name(config: &Config) -> Option<&str> {
+        config
+            .config_layer_stack
+            .get_active_user_layer()
+            .and_then(|layer| match &layer.name {
+                ConfigLayerSource::User {
+                    profile: Some(profile),
+                    ..
+                } => Some(profile.as_str()),
+                _ => None,
+            })
     }
 
     fn insert_layer(layers: &mut Vec<ConfigLayerEntry>, layer: ConfigLayerEntry) {

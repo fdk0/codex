@@ -4,6 +4,7 @@ use crate::config::CONFIG_TOML_FILE;
 use crate::config::ConfigBuilder;
 use crate::skills_load_input_from_config;
 use codex_config::ConfigLayerStackOrdering;
+use codex_config::LoaderOverrides;
 use codex_core_plugins::PluginsManager;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::ServiceTier;
@@ -445,6 +446,127 @@ model_provider = "role-provider"
     assert_eq!(config.active_profile.as_deref(), Some("role-profile"));
     assert_eq!(config.model_provider_id, "role-provider");
     assert_eq!(config.model_provider.name, "Role Provider");
+}
+
+#[tokio::test]
+async fn apply_role_uses_profile_v2_config_instead_of_current_profile() {
+    let home = TempDir::new().expect("create temp dir");
+    let base_config = home.path().join(CONFIG_TOML_FILE);
+    let driver_config = home.path().join("driver.config.toml");
+    let role_profile_config = home.path().join("role-profile.config.toml");
+    tokio::fs::write(&base_config, r#"model = "base-model""#)
+        .await
+        .expect("write config.toml");
+    tokio::fs::write(&driver_config, r#"model = "driver-model""#)
+        .await
+        .expect("write driver profile");
+    tokio::fs::write(
+        &role_profile_config,
+        r#"model = "role-model"
+model_reasoning_effort = "medium"
+"#,
+    )
+    .await
+    .expect("write role profile");
+    let mut config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(home.path().to_path_buf())
+        .loader_overrides(LoaderOverrides {
+            user_config_path: Some(driver_config.abs()),
+            user_config_profile: Some("driver".parse().expect("profile-v2 name")),
+            ..LoaderOverrides::without_managed_config_for_tests()
+        })
+        .fallback_cwd(Some(home.path().to_path_buf()))
+        .build()
+        .await
+        .expect("load config");
+    let role_path = write_role_config(
+        &home,
+        "profile-v2-role.toml",
+        r#"developer_instructions = "Stay focused"
+profile = "role-profile"
+model_reasoning_effort = "high"
+"#,
+    )
+    .await;
+    config.agent_roles.insert(
+        "custom".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    apply_role_to_config(&mut config, Some("custom"))
+        .await
+        .expect("custom role should apply");
+
+    assert_eq!(config.active_profile.as_deref(), Some("role-profile"));
+    let role_profile_config = role_profile_config.abs();
+    assert_eq!(
+        config.config_layer_stack.get_user_config_file(),
+        Some(&role_profile_config)
+    );
+    assert_eq!(config.model.as_deref(), Some("role-model"));
+    assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::High));
+}
+
+#[tokio::test]
+async fn apply_role_preserves_current_profile_v2_without_legacy_profile_lookup() {
+    let home = TempDir::new().expect("create temp dir");
+    let base_config = home.path().join(CONFIG_TOML_FILE);
+    let driver_config = home.path().join("driver.config.toml");
+    tokio::fs::write(&base_config, r#"model = "base-model""#)
+        .await
+        .expect("write config.toml");
+    tokio::fs::write(
+        &driver_config,
+        r#"model = "driver-model"
+model_reasoning_effort = "medium"
+"#,
+    )
+    .await
+    .expect("write driver profile");
+    let mut config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(home.path().to_path_buf())
+        .loader_overrides(LoaderOverrides {
+            user_config_path: Some(driver_config.abs()),
+            user_config_profile: Some("driver".parse().expect("profile-v2 name")),
+            ..LoaderOverrides::without_managed_config_for_tests()
+        })
+        .fallback_cwd(Some(home.path().to_path_buf()))
+        .build()
+        .await
+        .expect("load config");
+    let role_path = write_role_config(
+        &home,
+        "preserve-profile-v2-role.toml",
+        r#"developer_instructions = "Stay focused"
+model_reasoning_effort = "high"
+"#,
+    )
+    .await;
+    config.agent_roles.insert(
+        "custom".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    apply_role_to_config(&mut config, Some("custom"))
+        .await
+        .expect("custom role should apply");
+
+    assert_eq!(config.active_profile.as_deref(), Some("driver"));
+    let driver_config = driver_config.abs();
+    assert_eq!(
+        config.config_layer_stack.get_user_config_file(),
+        Some(&driver_config)
+    );
+    assert_eq!(config.model.as_deref(), Some("driver-model"));
+    assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::High));
 }
 
 #[tokio::test]
