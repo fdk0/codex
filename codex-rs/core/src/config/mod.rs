@@ -2583,11 +2583,21 @@ impl Config {
             ));
         }
 
-        let active_profile_name = config_profile_key
+        let active_profile_v2_name =
+            config_layer_stack
+                .get_active_user_layer()
+                .and_then(|layer| match &layer.name {
+                    ConfigLayerSource::User {
+                        profile: Some(profile),
+                        ..
+                    } => Some(profile.clone()),
+                    _ => None,
+                });
+        let active_legacy_profile_name = config_profile_key
             .as_ref()
             .or(cfg.profile.as_ref())
             .cloned();
-        let config_profile = match active_profile_name.as_ref() {
+        let config_profile = match active_legacy_profile_name.as_ref() {
             Some(key) => cfg
                 .profiles
                 .get(key)
@@ -2600,6 +2610,7 @@ impl Config {
                 .clone(),
             None => ConfigProfile::default(),
         };
+        let active_profile_name = active_profile_v2_name.or(active_legacy_profile_name);
         let tool_suggest = resolve_tool_suggest_config(&cfg, &config_layer_stack);
         let feature_overrides = FeatureOverrides {
             web_search_request: override_tools_web_search_request,

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -69,6 +70,7 @@ pub(crate) fn discover_handlers(
     let mut hook_entries = Vec::new();
     let mut warnings = plugin_hook_load_warnings;
     let mut display_order = 0_i64;
+    let mut loaded_hooks_json_paths = HashSet::new();
     let hook_states = hook_states_from_stack(config_layer_stack);
     let policy = HookDiscoveryPolicy {
         allow_managed_hooks_only: config_layer_stack.is_some_and(|config_layer_stack| {
@@ -111,7 +113,14 @@ pub(crate) fn discover_handlers(
             if !policy.allows(&policy_source) {
                 continue;
             }
-            let json_hooks = load_hooks_json(layer.hooks_config_folder().as_deref(), &mut warnings);
+            let mut json_hooks =
+                load_hooks_json(layer.hooks_config_folder().as_deref(), &mut warnings);
+            if let Some((source_path, _)) = json_hooks.as_ref() {
+                let key = source_path.as_path().display().to_string();
+                if !loaded_hooks_json_paths.insert(key) {
+                    json_hooks = None;
+                }
+            }
             let toml_hooks = load_toml_hooks_from_layer(layer, &mut warnings);
 
             if let (Some((json_source_path, json_events)), Some((toml_source_path, toml_events))) =
@@ -616,6 +625,9 @@ fn hook_source_for_requirement_source(source: Option<&RequirementSource>) -> Hoo
 mod tests {
     use codex_config::ConfigLayerEntry;
     use codex_config::ConfigLayerSource;
+    use codex_config::ConfigLayerStack;
+    use codex_config::ConfigRequirements;
+    use codex_config::ConfigRequirementsToml;
     use codex_config::HookEventsToml;
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookSource;
@@ -1012,5 +1024,62 @@ mod tests {
             ),
             (HookSource::LegacyManagedConfigMdm, true),
         );
+    }
+
+    #[test]
+    fn hooks_json_is_loaded_once_for_base_and_profile_v2_layers() -> anyhow::Result<()> {
+        let codex_home = tempfile::tempdir()?;
+        std::fs::write(
+            codex_home.path().join("hooks.json"),
+            r#"{
+              "hooks": {
+                "SessionStart": [{
+                  "hooks": [{
+                    "type": "command",
+                    "command": "echo hello"
+                  }]
+                }]
+              }
+            }"#,
+        )?;
+        let codex_home = AbsolutePathBuf::from_absolute_path(codex_home.path())?;
+        let empty_config: TomlValue = serde_json::from_value(serde_json::json!({}))?;
+        let stack = ConfigLayerStack::new(
+            vec![
+                ConfigLayerEntry::new(
+                    ConfigLayerSource::User {
+                        file: codex_home.join("config.toml"),
+                        profile: None,
+                    },
+                    empty_config.clone(),
+                ),
+                ConfigLayerEntry::new(
+                    ConfigLayerSource::User {
+                        file: codex_home.join("bd-driver.config.toml"),
+                        profile: Some("bd-driver".to_string()),
+                    },
+                    empty_config,
+                ),
+            ],
+            ConfigRequirements::default(),
+            ConfigRequirementsToml::default(),
+        )?;
+
+        let result = super::discover_handlers(
+            Some(&stack),
+            Vec::new(),
+            Vec::new(),
+            /* bypass_hook_trust */ true,
+        );
+
+        assert_eq!(result.warnings, Vec::<String>::new());
+        assert_eq!(result.handlers.len(), 1);
+        assert_eq!(result.hook_entries.len(), 1);
+        assert_eq!(result.handlers[0].event_name, HookEventName::SessionStart);
+        assert_eq!(
+            result.handlers[0].source_path,
+            codex_home.join("hooks.json")
+        );
+        Ok(())
     }
 }

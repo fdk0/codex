@@ -6441,6 +6441,29 @@ fn profile_v2_config_path_resolves_validated_names() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn active_profile_tracks_selected_profile_v2_config() -> anyhow::Result<()> {
+    let codex_home = TempDir::new()?;
+    let base_config = codex_home.path().join(CONFIG_TOML_FILE);
+    let selected_config = codex_home.path().join("work.config.toml");
+    tokio::fs::write(&base_config, r#"model = "gpt-base""#).await?;
+    tokio::fs::write(&selected_config, r#"model = "gpt-work""#).await?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .loader_overrides(LoaderOverrides {
+            user_config_path: Some(selected_config.abs()),
+            user_config_profile: Some("work".parse().expect("profile-v2 name")),
+            ..LoaderOverrides::without_managed_config_for_tests()
+        })
+        .build()
+        .await?;
+
+    assert_eq!(config.model.as_deref(), Some("gpt-work"));
+    assert_eq!(config.active_profile.as_deref(), Some("work"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn set_model_overwrites_existing_model() -> anyhow::Result<()> {
     let codex_home = TempDir::new()?;
     let config_path = codex_home.path().join(CONFIG_TOML_FILE);
