@@ -796,7 +796,10 @@ fn hook_permission_mode(turn_context: &TurnContext) -> String {
 }
 
 fn hook_active_profile(turn_context: &TurnContext) -> Option<String> {
-    turn_context.config.active_profile.clone()
+    turn_context
+        .config
+        .active_profile_name()
+        .map(str::to_string)
 }
 
 fn thread_spawn_subagent_hook_context(

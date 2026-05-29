@@ -130,7 +130,7 @@ impl App {
                 /*agent_nickname*/ None,
                 /*agent_role*/ None,
                 is_primary,
-                self.active_profile.as_deref(),
+                self.config.active_profile_name(),
             )
         } else {
             let thread_id = thread_id.to_string();
@@ -142,7 +142,7 @@ impl App {
                 entry.agent_nickname.as_deref(),
                 entry.agent_role.as_deref(),
                 is_primary,
-                self.active_profile.as_deref(),
+                self.config.active_profile_name(),
             );
             if label == "Agent" {
                 let thread_id = thread_id.to_string();
@@ -185,7 +185,7 @@ impl App {
         let label = self.agent_navigation.active_agent_label(
             self.current_displayed_thread_id(),
             self.primary_thread_id,
-            self.active_profile.as_deref(),
+            self.config.active_profile_name(),
         )?;
         Some(crate::bottom_pane::ActiveAgentStatusSummary {
             label,
@@ -704,7 +704,6 @@ impl App {
             }
             AppCommand::ReloadUserConfig => {
                 app_server.reload_user_config().await?;
-                self.refresh_in_memory_config_from_disk().await?;
                 Ok(true)
             }
             AppCommand::OverrideTurnContext { .. } => {

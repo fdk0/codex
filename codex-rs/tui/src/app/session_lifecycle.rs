@@ -46,7 +46,7 @@ impl App {
                     entry.agent_nickname.as_deref(),
                     entry.agent_role.as_deref(),
                     is_primary,
-                    self.active_profile.as_deref(),
+                    self.config.active_profile_name(),
                 );
                 let uuid = thread_id.to_string();
                 SelectionItem {
@@ -321,6 +321,7 @@ impl App {
         if chat_widget.last_terminal_title.is_none() {
             chat_widget.last_terminal_title = previous_terminal_title;
         }
+        chat_widget.remote_connection = self.chat_widget.remote_connection.clone();
         for (thread_id, entry) in self.agent_navigation.ordered_threads() {
             chat_widget.set_collab_agent_metadata(
                 thread_id,

@@ -313,10 +313,12 @@ impl AgentControl {
                 .await?
             }
             (Some(session_source), None) => {
+                let forked_from_thread_id = thread_spawn_parent_thread_id(&session_source);
                 Box::pin(state.spawn_new_thread_with_source(
                     config.clone(),
                     self.clone(),
                     session_source,
+                    forked_from_thread_id,
                     /*thread_source*/ Some(ThreadSource::Subagent),
                     /*persist_extended_history*/ false,
                     /*metrics_service_name*/ None,
@@ -366,6 +368,7 @@ impl AgentControl {
                     .services
                     .analytics_events_client,
                 client_metadata,
+                new_thread.thread.codex.session.session_id(),
                 new_thread.thread_id,
                 /*parent_thread_id*/ None,
                 thread_config,
@@ -550,6 +553,7 @@ impl AgentControl {
                 self.clone(),
                 session_source,
                 /*thread_source*/ Some(ThreadSource::Subagent),
+                /*forked_from_thread_id*/ Some(parent_thread_id),
                 /*persist_extended_history*/ false,
                 inherited_shell_snapshot,
                 inherited_exec_policy,
@@ -1767,7 +1771,44 @@ impl AgentControl {
     async fn live_thread_spawn_children(
         &self,
     ) -> CodexResult<HashMap<ThreadId, Vec<(ThreadId, AgentMetadata)>>> {
-        Ok(self.state.live_thread_spawn_children_by_parent())
+        let mut children_by_parent = self.state.live_thread_spawn_children_by_parent();
+
+        // The registry has the freshest metadata for live agents (paths, nicknames, roles) and is
+        // the fast path used by the agent picker/status UI. Fall back to the thread manager's live
+        // spawn edges for any loaded child thread that has not been hydrated into the registry yet.
+        if let Ok(state) = self.upgrade() {
+            for (parent_thread_id, child_thread_id) in state.list_live_thread_spawn_edges().await {
+                let children = children_by_parent.entry(parent_thread_id).or_default();
+                if children
+                    .iter()
+                    .any(|(existing_child_id, _)| *existing_child_id == child_thread_id)
+                {
+                    continue;
+                }
+                children.push((
+                    child_thread_id,
+                    self.state
+                        .agent_metadata_for_thread(child_thread_id)
+                        .unwrap_or(AgentMetadata {
+                            agent_id: Some(child_thread_id),
+                            ..Default::default()
+                        }),
+                ));
+            }
+        }
+
+        for children in children_by_parent.values_mut() {
+            children.sort_by(|left, right| {
+                left.1
+                    .agent_path
+                    .as_deref()
+                    .unwrap_or_default()
+                    .cmp(right.1.agent_path.as_deref().unwrap_or_default())
+                    .then_with(|| left.0.to_string().cmp(&right.0.to_string()))
+            });
+        }
+
+        Ok(children_by_parent)
     }
 
     async fn persist_thread_spawn_edge_for_source(

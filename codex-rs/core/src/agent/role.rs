@@ -198,8 +198,7 @@ fn preservation_policy(
     let role_selects_provider = role_layer_toml.get("model_provider").is_some();
     let role_selects_profile = role_selects_profile_v2 || role_layer_toml.get("profile").is_some();
     let role_updates_active_profile_provider = config
-        .active_profile
-        .as_ref()
+        .active_profile_name()
         .and_then(|active_profile| {
             role_layer_toml
                 .get("profiles")
@@ -226,23 +225,14 @@ mod reload {
         preserve_current_provider: bool,
         preserve_current_service_tier: bool,
     ) -> anyhow::Result<Config> {
-        let active_profile_v2_name = active_profile_v2_name(config);
-        let active_legacy_profile_name = preserve_current_profile
-            .then_some(config.active_profile.as_deref())
-            .flatten()
-            .filter(|profile_name| Some(*profile_name) != active_profile_v2_name);
-        let config_layer_stack = build_config_layer_stack(
-            config,
-            &role_layer_toml,
-            role_profile_v2_layer,
-            active_legacy_profile_name,
-        )?;
+        let config_layer_stack =
+            build_config_layer_stack(config, &role_layer_toml, role_profile_v2_layer)?;
         let mut merged_config = deserialize_effective_config(config, &config_layer_stack)?;
         if preserve_current_profile {
             merged_config.profile = None;
         }
 
-        let mut next_config = Config::load_config_with_layer_stack(
+        let next_config = Config::load_config_with_layer_stack(
             LOCAL_FS.as_ref(),
             merged_config,
             reload_overrides(
@@ -254,9 +244,6 @@ mod reload {
             config_layer_stack,
         )
         .await?;
-        if preserve_current_profile {
-            next_config.active_profile = config.active_profile.clone();
-        }
         Ok(next_config)
     }
 
@@ -264,16 +251,10 @@ mod reload {
         config: &Config,
         role_layer_toml: &TomlValue,
         role_profile_v2_layer: Option<ConfigLayerEntry>,
-        active_legacy_profile_name: Option<&str>,
     ) -> anyhow::Result<ConfigLayerStack> {
         let mut layers = existing_layers(config, role_profile_v2_layer.is_some());
         if let Some(role_profile_v2_layer) = role_profile_v2_layer {
             insert_layer(&mut layers, role_profile_v2_layer);
-        }
-        if let Some(resolved_profile_layer) =
-            resolved_profile_layer(config, &layers, role_layer_toml, active_legacy_profile_name)?
-        {
-            insert_layer(&mut layers, resolved_profile_layer);
         }
         insert_layer(&mut layers, role_layer(role_layer_toml.clone()));
         Ok(ConfigLayerStack::new(
@@ -281,34 +262,6 @@ mod reload {
             config.config_layer_stack.requirements().clone(),
             config.config_layer_stack.requirements_toml().clone(),
         )?)
-    }
-
-    fn resolved_profile_layer(
-        config: &Config,
-        existing_layers: &[ConfigLayerEntry],
-        role_layer_toml: &TomlValue,
-        active_profile_name: Option<&str>,
-    ) -> anyhow::Result<Option<ConfigLayerEntry>> {
-        let Some(active_profile_name) = active_profile_name else {
-            return Ok(None);
-        };
-
-        let mut layers = existing_layers.to_vec();
-        insert_layer(&mut layers, role_layer(role_layer_toml.clone()));
-        let merged_config = deserialize_effective_config(
-            config,
-            &ConfigLayerStack::new(
-                layers,
-                config.config_layer_stack.requirements().clone(),
-                config.config_layer_stack.requirements_toml().clone(),
-            )?,
-        )?;
-        let resolved_profile =
-            merged_config.get_config_profile(Some(active_profile_name.to_string()))?;
-        Ok(Some(ConfigLayerEntry::new(
-            ConfigLayerSource::SessionFlags,
-            TomlValue::try_from(resolved_profile)?,
-        )))
     }
 
     fn deserialize_effective_config(
@@ -341,19 +294,6 @@ mod reload {
             })
             .cloned()
             .collect()
-    }
-
-    fn active_profile_v2_name(config: &Config) -> Option<&str> {
-        config
-            .config_layer_stack
-            .get_active_user_layer()
-            .and_then(|layer| match &layer.name {
-                ConfigLayerSource::User {
-                    profile: Some(profile),
-                    ..
-                } => Some(profile.as_str()),
-                _ => None,
-            })
     }
 
     fn insert_layer(layers: &mut Vec<ConfigLayerEntry>, layer: ConfigLayerEntry) {
