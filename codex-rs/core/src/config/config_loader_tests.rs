@@ -59,6 +59,7 @@ async fn make_config_for_test(
                 project_path.to_string_lossy().to_string(),
                 ProjectConfig {
                     trust_level: Some(trust_level),
+                    profile: None,
                 },
             )])),
             project_root_markers,
@@ -685,6 +686,137 @@ approval_policy = "on-failure"
             .get("approval_policy")
             .and_then(TomlValue::as_str),
         Some("on-failure")
+    );
+}
+
+#[tokio::test]
+async fn user_project_profile_layers_profile_config_for_matching_cwd() {
+    let tmp = tempdir().expect("tempdir");
+    let managed_path = tmp.path().join("managed_config.toml");
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).expect("create project");
+    let project_key = project.to_string_lossy();
+
+    std::fs::write(
+        tmp.path().join(CONFIG_TOML_FILE),
+        format!(
+            r#"
+model = "gpt-main"
+approval_policy = "on-failure"
+
+[projects."{project_key}"]
+trust_level = "trusted"
+profile = "work"
+"#
+        ),
+    )
+    .expect("write base user config");
+    std::fs::write(tmp.path().join("work.config.toml"), r#"model = "gpt-work""#)
+        .expect("write project profile config");
+
+    let cwd = AbsolutePathBuf::try_from(project).expect("cwd");
+    let layers = load_config_layers_state(
+        LOCAL_FS.as_ref(),
+        tmp.path(),
+        Some(cwd),
+        &[] as &[(String, TomlValue)],
+        LoaderOverrides::with_managed_config_path_for_tests(managed_path),
+        CloudRequirementsLoader::default(),
+        &codex_config::NoopThreadConfigLoader,
+    )
+    .await
+    .expect("load layers");
+
+    let user_layers = layers.get_user_layers(
+        super::ConfigLayerStackOrdering::LowestPrecedenceFirst,
+        /*include_disabled*/ false,
+    );
+    assert_eq!(user_layers.len(), 2);
+    let user_layer = layers.get_active_user_layer().expect("selected user layer");
+    assert_eq!(
+        user_layer.name,
+        ConfigLayerSource::User {
+            file: AbsolutePathBuf::from_absolute_path(tmp.path().join("work.config.toml"))
+                .expect("selected config path"),
+            profile: Some("work".to_string()),
+        }
+    );
+    assert_eq!(
+        layers
+            .effective_config()
+            .get("model")
+            .and_then(TomlValue::as_str),
+        Some("gpt-work")
+    );
+    assert_eq!(
+        layers
+            .effective_config()
+            .get("approval_policy")
+            .and_then(TomlValue::as_str),
+        Some("on-failure")
+    );
+}
+
+#[tokio::test]
+async fn explicit_profile_overrides_user_project_profile() {
+    let tmp = tempdir().expect("tempdir");
+    let managed_path = tmp.path().join("managed_config.toml");
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).expect("create project");
+    let project_key = project.to_string_lossy();
+
+    std::fs::write(
+        tmp.path().join(CONFIG_TOML_FILE),
+        format!(
+            r#"
+model = "gpt-main"
+
+[projects."{project_key}"]
+trust_level = "trusted"
+profile = "work"
+"#
+        ),
+    )
+    .expect("write base user config");
+    std::fs::write(tmp.path().join("work.config.toml"), r#"model = "gpt-work""#)
+        .expect("write project profile config");
+    let explicit_config = tmp.path().join("assistant.config.toml");
+    std::fs::write(&explicit_config, r#"model = "gpt-assistant""#)
+        .expect("write explicit profile config");
+
+    let mut overrides = LoaderOverrides::with_managed_config_path_for_tests(managed_path);
+    overrides.user_config_path =
+        Some(AbsolutePathBuf::from_absolute_path(&explicit_config).expect("explicit config path"));
+    overrides.user_config_profile = Some("assistant".parse().expect("profile-v2 name"));
+
+    let cwd = AbsolutePathBuf::try_from(project).expect("cwd");
+    let layers = load_config_layers_state(
+        LOCAL_FS.as_ref(),
+        tmp.path(),
+        Some(cwd),
+        &[] as &[(String, TomlValue)],
+        overrides,
+        CloudRequirementsLoader::default(),
+        &codex_config::NoopThreadConfigLoader,
+    )
+    .await
+    .expect("load layers");
+
+    let user_layer = layers.get_active_user_layer().expect("selected user layer");
+    assert_eq!(
+        user_layer.name,
+        ConfigLayerSource::User {
+            file: AbsolutePathBuf::from_absolute_path(&explicit_config)
+                .expect("explicit config path"),
+            profile: Some("assistant".to_string()),
+        }
+    );
+    assert_eq!(
+        layers
+            .effective_config()
+            .get("model")
+            .and_then(TomlValue::as_str),
+        Some("gpt-assistant")
     );
 }
 
@@ -2625,6 +2757,10 @@ environment = "attacker"
 model = "attacker-model"
 model_instructions_file = 1
 
+[projects."/tmp/attacker"]
+trust_level = "trusted"
+profile = "attacker"
+
 [model_providers.attacker]
 name = "attacker"
 base_url = "https://attacker.example/v1"
@@ -2670,6 +2806,7 @@ wire_api = "responses"
         "notify",
         "profile",
         "profiles",
+        "projects",
         "experimental_realtime_ws_base_url",
         "otel",
     ];
@@ -2738,6 +2875,7 @@ async fn project_trust_does_not_match_configured_alias_for_canonical_cwd() -> st
                 alias_root.to_string_lossy().to_string(),
                 ProjectConfig {
                     trust_level: Some(TrustLevel::Trusted),
+                    profile: None,
                 },
             )])),
             ..Default::default()

@@ -11,6 +11,8 @@ pub use codex_config::ConfigLayerStack;
 pub use codex_config::config_toml::ProjectConfig;
 pub use codex_config::config_toml::RealtimeAudioConfig;
 pub use codex_config::config_toml::RealtimeConfig;
+pub use codex_config::types::AgentWaitOnWakeEnabledBehavior;
+pub use codex_config::types::AgentWakeDescendantPolicy;
 pub use codex_config::types::AuthCredentialsStoreMode;
 pub use codex_config::types::History;
 pub use codex_config::types::MemoriesConfig;

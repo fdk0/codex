@@ -2402,6 +2402,7 @@ async fn empty_config_defaults_to_builtin_profile_for_trusted_project() -> std::
                 project_key,
                 ProjectConfig {
                     trust_level: Some(TrustLevel::Trusted),
+                    profile: None,
                 },
             )])),
             ..Default::default()
@@ -2460,6 +2461,7 @@ async fn implicit_builtin_workspace_profile_preserves_sandbox_workspace_write_se
                 project_key,
                 ProjectConfig {
                     trust_level: Some(TrustLevel::Trusted),
+                    profile: None,
                 },
             )])),
             sandbox_workspace_write: Some(SandboxWorkspaceWrite {
@@ -2531,6 +2533,7 @@ async fn implicit_builtin_workspace_profile_preserves_add_dir_metadata_carveouts
                 project_key,
                 ProjectConfig {
                     trust_level: Some(TrustLevel::Trusted),
+                    profile: None,
                 },
             )])),
             windows: Some(WindowsToml {
@@ -8420,6 +8423,7 @@ async fn active_project_does_not_match_configured_alias_for_canonical_cwd() -> a
             alias_root.to_string_lossy().to_string(),
             ProjectConfig {
                 trust_level: Some(TrustLevel::Trusted),
+                profile: None,
             },
         )])),
         ..Default::default()
@@ -8524,6 +8528,7 @@ trust_level = "untrusted"
         .expect("TOML deserialization should succeed");
     let active_project = ProjectConfig {
         trust_level: Some(TrustLevel::Untrusted),
+        profile: None,
     };
 
     let resolution = derive_legacy_sandbox_policy_for_test(
@@ -8563,12 +8568,14 @@ async fn derive_sandbox_policy_falls_back_to_read_only_for_implicit_defaults() -
             project_key,
             ProjectConfig {
                 trust_level: Some(TrustLevel::Trusted),
+                profile: None,
             },
         )])),
         ..Default::default()
     };
     let active_project = ProjectConfig {
         trust_level: Some(TrustLevel::Trusted),
+        profile: None,
     };
     let constrained = Constrained::new(PermissionProfile::read_only(), |candidate| {
         if candidate == &PermissionProfile::read_only() {
@@ -8608,12 +8615,14 @@ async fn derive_sandbox_policy_preserves_windows_downgrade_for_unsupported_fallb
             project_key,
             ProjectConfig {
                 trust_level: Some(TrustLevel::Trusted),
+                profile: None,
             },
         )])),
         ..Default::default()
     };
     let active_project = ProjectConfig {
         trust_level: Some(TrustLevel::Trusted),
+        profile: None,
     };
     let constrained = Constrained::new(PermissionProfile::workspace_write(), |candidate| {
         if matches!(
@@ -9030,6 +9039,7 @@ async fn test_untrusted_project_gets_unless_trusted_approval_policy() -> anyhow:
                 test_path.to_string_lossy().to_string(),
                 ProjectConfig {
                     trust_level: Some(TrustLevel::Untrusted),
+                    profile: None,
                 },
             )])),
             ..Default::default()

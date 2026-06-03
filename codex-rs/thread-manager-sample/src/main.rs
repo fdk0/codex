@@ -9,6 +9,8 @@ use anyhow::Context;
 use anyhow::bail;
 use clap::Parser;
 use codex_core_api::AbsolutePathBuf;
+use codex_core_api::AgentWaitOnWakeEnabledBehavior;
+use codex_core_api::AgentWakeDescendantPolicy;
 use codex_core_api::AltScreenMode;
 use codex_core_api::ApprovalsReviewer;
 use codex_core_api::Arg0DispatchPaths;
@@ -227,6 +229,9 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         agent_job_max_runtime_seconds: None,
         agent_interrupt_message_enabled: false,
         agent_max_depth: 1,
+        agent_wake_parent_on_completion_default: true,
+        agent_wait_on_wake_enabled_behavior: AgentWaitOnWakeEnabledBehavior::default(),
+        agent_wake_descendant_policy: AgentWakeDescendantPolicy::default(),
         agent_roles: BTreeMap::new(),
         memories: MemoriesConfig::default(),
         sqlite_home: codex_home.to_path_buf(),
@@ -271,7 +276,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         multi_agent_v2: MultiAgentV2Config::default(),
         features: Default::default(),
         suppress_unstable_features_warning: false,
-        active_project: ProjectConfig { trust_level: None },
+        active_project: ProjectConfig::default(),
         notices: Notice::default(),
         check_for_update_on_startup: false,
         disable_paste_burst: false,

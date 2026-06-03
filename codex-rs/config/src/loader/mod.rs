@@ -67,9 +67,12 @@ const PROJECT_LOCAL_CONFIG_DENYLIST: &[&str] = &[
     "notify",
     "profile",
     "profiles",
+    "projects",
     "experimental_realtime_ws_base_url",
     "otel",
 ];
+
+const CONFIG_PROFILE_V2_SUFFIX: &str = ".config.toml";
 
 async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> Option<ConfigError> {
     typed_first_layer_config_error_from_entries::<ConfigToml>(layers, CONFIG_TOML_FILE).await
@@ -93,7 +96,8 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 /// - system    `/etc/codex/config.toml` (Unix) or
 ///   `%ProgramData%\OpenAI\Codex\config.toml` (Windows)
 /// - user      `${CODEX_HOME}/config.toml`
-/// - profile   `${CODEX_HOME}/<name>.config.toml`, when selected
+/// - profile   `${CODEX_HOME}/<name>.config.toml`, when selected explicitly or
+///   through a user-owned `[projects]` entry
 /// - cwd       `${PWD}/config.toml` (loaded but disabled when the directory is untrusted)
 /// - tree      parent directories up to root looking for `./.codex/config.toml` (loaded but disabled when untrusted)
 /// - repo      `$(git rev-parse --show-toplevel)/.codex/config.toml` (loaded but disabled when untrusted)
@@ -121,7 +125,8 @@ pub async fn load_config_layers_state(
         loader_overrides: overrides,
         strict_config,
     } = options.into();
-    let active_user_profile = overrides.user_config_profile.clone();
+    let explicit_user_config_path = overrides.user_config_path.clone();
+    let mut active_user_profile = overrides.user_config_profile.clone();
     let ignore_managed_requirements = overrides.ignore_managed_requirements;
     let ignore_user_config = overrides.ignore_user_config;
     let ignore_user_and_project_exec_policy_rules =
@@ -211,11 +216,17 @@ pub async fn load_config_layers_state(
     .await?;
     layers.push(system_layer);
 
-    // Add the base user config layer. When profile-v2 is selected, add the
-    // profile config as a second user layer on top so the profile only needs to
-    // contain overrides.
-    let active_user_file = overrides.user_config_path(codex_home)?;
+    // Add the base user config layer. When profile-v2 is selected explicitly,
+    // or selected from a user-owned project entry, add the profile config as a
+    // second user layer on top so the profile only needs to contain overrides.
     let base_user_file = AbsolutePathBuf::resolve_path_against_base(CONFIG_TOML_FILE, codex_home);
+    let mut active_user_file =
+        explicit_user_config_path
+            .clone()
+            .unwrap_or_else(|| match active_user_profile.as_ref() {
+                Some(profile) => resolve_profile_v2_config_path(codex_home, profile),
+                None => base_user_file.clone(),
+            });
     let base_user_layer = load_user_config_layer(
         fs,
         &base_user_file,
@@ -224,6 +235,15 @@ pub async fn load_config_layers_state(
         strict_config,
     )
     .await?;
+    if explicit_user_config_path.is_none()
+        && active_user_profile.is_none()
+        && let Some(cwd) = cwd.as_ref()
+        && let Some(project_profile) =
+            project_profile_from_user_config(fs, &base_user_layer.config, cwd, codex_home).await?
+    {
+        active_user_file = resolve_profile_v2_config_path(codex_home, &project_profile);
+        active_user_profile = Some(project_profile);
+    }
     if let Some(active_user_profile) = active_user_profile.as_ref()
         && let Some(base_user_config) = base_user_layer.config.as_table()
     {
@@ -385,6 +405,47 @@ pub async fn load_config_layers_state(
     Ok(match startup_warnings {
         Some(startup_warnings) => config_layer_stack.with_startup_warnings(startup_warnings),
         None => config_layer_stack,
+    })
+}
+
+fn resolve_profile_v2_config_path(
+    codex_home: &Path,
+    profile_name: &ProfileV2Name,
+) -> AbsolutePathBuf {
+    AbsolutePathBuf::resolve_path_against_base(
+        format!("{profile_name}{CONFIG_PROFILE_V2_SUFFIX}"),
+        codex_home,
+    )
+}
+
+async fn project_profile_from_user_config(
+    fs: &dyn ExecutorFileSystem,
+    user_config: &TomlValue,
+    cwd: &AbsolutePathBuf,
+    codex_home: &Path,
+) -> io::Result<Option<ProfileV2Name>> {
+    let _guard = AbsolutePathBufGuard::new(codex_home);
+    let cfg: ConfigToml = user_config
+        .clone()
+        .try_into()
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    drop(_guard);
+
+    let repo_root = resolve_root_git_project_for_trust(fs, cwd).await;
+    let Some(profile) = cfg
+        .get_active_project(
+            cwd.as_path(),
+            repo_root.as_ref().map(AbsolutePathBuf::as_path),
+        )
+        .and_then(|project| project.profile)
+    else {
+        return Ok(None);
+    };
+    profile.parse::<ProfileV2Name>().map(Some).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid project profile `{profile}`: {err}"),
+        )
     })
 }
 

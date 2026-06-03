@@ -540,10 +540,15 @@ pub struct AutoReviewToml {
     pub policy: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ProjectConfig {
     pub trust_level: Option<TrustLevel>,
+    /// User-owned default profile to apply when starting a session in this
+    /// project. This is only honored from user-level config; project-local
+    /// `.codex/config.toml` files are sanitized before they can select a
+    /// profile.
+    pub profile: Option<String>,
 }
 
 impl ProjectConfig {

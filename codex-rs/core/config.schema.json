@@ -675,6 +675,9 @@
           },
           "type": "object"
         },
+        "include_apply_patch_tool": {
+          "type": "boolean"
+        },
         "include_apps_instructions": {
           "type": "boolean"
         },
@@ -2344,6 +2347,10 @@
     "ProjectConfig": {
       "additionalProperties": false,
       "properties": {
+        "profile": {
+          "description": "User-owned default profile to apply when starting a session in this project. This is only honored from user-level config; project-local `.codex/config.toml` files are sanitized before they can select a profile.",
+          "type": "string"
+        },
         "trust_level": {
           "$ref": "#/definitions/TrustLevel"
         }
