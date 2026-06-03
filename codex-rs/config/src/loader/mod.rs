@@ -97,7 +97,9 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 ///   `%ProgramData%\OpenAI\Codex\config.toml` (Windows)
 /// - user      `${CODEX_HOME}/config.toml`
 /// - profile   `${CODEX_HOME}/<name>.config.toml`, when selected explicitly or
-///   through a user-owned `[projects]` entry
+///   through a user-owned `[projects]` entry. If `${CODEX_HOME}/config.toml`
+///   is a symlink, a sibling profile file next to the symlink target is used
+///   when present.
 /// - cwd       `${PWD}/config.toml` (loaded but disabled when the directory is untrusted)
 /// - tree      parent directories up to root looking for `./.codex/config.toml` (loaded but disabled when untrusted)
 /// - repo      `$(git rev-parse --show-toplevel)/.codex/config.toml` (loaded but disabled when untrusted)
@@ -412,10 +414,23 @@ fn resolve_profile_v2_config_path(
     codex_home: &Path,
     profile_name: &ProfileV2Name,
 ) -> AbsolutePathBuf {
-    AbsolutePathBuf::resolve_path_against_base(
-        format!("{profile_name}{CONFIG_PROFILE_V2_SUFFIX}"),
-        codex_home,
-    )
+    let profile_file_name = format!("{profile_name}{CONFIG_PROFILE_V2_SUFFIX}");
+    let default_path = AbsolutePathBuf::resolve_path_against_base(&profile_file_name, codex_home);
+
+    let base_user_file = codex_home.join(CONFIG_TOML_FILE);
+    if let Ok(resolved_base_user_file) = normalize_path(&base_user_file)
+        && resolved_base_user_file != base_user_file
+        && let Some(profile_dir) = resolved_base_user_file.parent()
+    {
+        let profile_path = profile_dir.join(&profile_file_name);
+        if profile_path.is_file()
+            && let Ok(profile_path) = AbsolutePathBuf::from_absolute_path(&profile_path)
+        {
+            return profile_path;
+        }
+    }
+
+    default_path
 }
 
 async fn project_profile_from_user_config(

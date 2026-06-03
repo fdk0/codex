@@ -6340,6 +6340,29 @@ fn profile_v2_config_path_resolves_validated_names() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn profile_v2_config_path_resolves_next_to_symlinked_base_config() -> anyhow::Result<()> {
+    let tmp = TempDir::new()?;
+    let codex_home = tmp.path().join(".codex");
+    let dotfiles = tmp.path().join("dotfiles");
+    std::fs::create_dir_all(&codex_home)?;
+    std::fs::create_dir_all(&dotfiles)?;
+    std::fs::write(dotfiles.join(CONFIG_TOML_FILE), r#"model = "gpt-base""#)?;
+    std::fs::write(dotfiles.join("work.config.toml"), r#"model = "gpt-work""#)?;
+    std::os::unix::fs::symlink(
+        dotfiles.join(CONFIG_TOML_FILE),
+        codex_home.join(CONFIG_TOML_FILE),
+    )?;
+
+    let profile_name: ProfileV2Name = "work".parse()?;
+    assert_eq!(
+        resolve_profile_v2_config_path(&codex_home, &profile_name),
+        dotfiles.join("work.config.toml").abs()
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn active_profile_tracks_selected_profile_v2_config() -> anyhow::Result<()> {
     let codex_home = TempDir::new()?;

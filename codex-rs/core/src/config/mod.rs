@@ -104,6 +104,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
+use dunce::canonicalize as normalize_path;
 use rmcp::model::ElicitationCapability;
 use rmcp::model::FormElicitationCapability;
 use rmcp::model::UrlElicitationCapability;
@@ -1509,10 +1510,23 @@ pub fn resolve_profile_v2_config_path(
     codex_home: &Path,
     profile_name: &ProfileV2Name,
 ) -> AbsolutePathBuf {
-    AbsolutePathBuf::resolve_path_against_base(
-        format!("{profile_name}{CONFIG_PROFILE_V2_SUFFIX}"),
-        codex_home,
-    )
+    let profile_file_name = format!("{profile_name}{CONFIG_PROFILE_V2_SUFFIX}");
+    let default_path = AbsolutePathBuf::resolve_path_against_base(&profile_file_name, codex_home);
+
+    let base_user_file = codex_home.join(CONFIG_TOML_FILE);
+    if let Ok(resolved_base_user_file) = normalize_path(&base_user_file)
+        && resolved_base_user_file != base_user_file
+        && let Some(profile_dir) = resolved_base_user_file.parent()
+    {
+        let profile_path = profile_dir.join(&profile_file_name);
+        if profile_path.is_file()
+            && let Ok(profile_path) = AbsolutePathBuf::from_absolute_path(&profile_path)
+        {
+            return profile_path;
+        }
+    }
+
+    default_path
 }
 
 /// DEPRECATED: Use [Config::load_with_cli_overrides()] instead because working

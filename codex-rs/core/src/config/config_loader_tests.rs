@@ -757,6 +757,71 @@ profile = "work"
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn user_project_profile_layers_profile_next_to_symlinked_base_config() {
+    let tmp = tempdir().expect("tempdir");
+    let managed_path = tmp.path().join("managed_config.toml");
+    let codex_home = tmp.path().join(".codex");
+    let dotfiles = tmp.path().join("dotfiles");
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&codex_home).expect("create codex home");
+    std::fs::create_dir_all(&dotfiles).expect("create dotfiles");
+    std::fs::create_dir_all(&project).expect("create project");
+    let project_key = project.to_string_lossy();
+
+    std::fs::write(
+        dotfiles.join(CONFIG_TOML_FILE),
+        format!(
+            r#"
+model = "gpt-main"
+
+[projects."{project_key}"]
+trust_level = "trusted"
+profile = "work"
+"#
+        ),
+    )
+    .expect("write base user config");
+    std::fs::write(dotfiles.join("work.config.toml"), r#"model = "gpt-work""#)
+        .expect("write project profile config");
+    std::os::unix::fs::symlink(
+        dotfiles.join(CONFIG_TOML_FILE),
+        codex_home.join(CONFIG_TOML_FILE),
+    )
+    .expect("symlink base user config");
+
+    let cwd = AbsolutePathBuf::try_from(project).expect("cwd");
+    let layers = load_config_layers_state(
+        LOCAL_FS.as_ref(),
+        &codex_home,
+        Some(cwd),
+        &[] as &[(String, TomlValue)],
+        LoaderOverrides::with_managed_config_path_for_tests(managed_path),
+        CloudRequirementsLoader::default(),
+        &codex_config::NoopThreadConfigLoader,
+    )
+    .await
+    .expect("load layers");
+
+    let user_layer = layers.get_active_user_layer().expect("selected user layer");
+    assert_eq!(
+        user_layer.name,
+        ConfigLayerSource::User {
+            file: AbsolutePathBuf::from_absolute_path(dotfiles.join("work.config.toml"))
+                .expect("selected config path"),
+            profile: Some("work".to_string()),
+        }
+    );
+    assert_eq!(
+        layers
+            .effective_config()
+            .get("model")
+            .and_then(TomlValue::as_str),
+        Some("gpt-work")
+    );
+}
+
 #[tokio::test]
 async fn explicit_profile_overrides_user_project_profile() {
     let tmp = tempdir().expect("tempdir");
