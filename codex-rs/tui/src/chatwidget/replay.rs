@@ -87,6 +87,10 @@ impl ChatWidget {
                 phase,
                 memory_citation,
             } => {
+                if let Some(cell) = history_cell::new_subagent_notification_event(&text) {
+                    self.add_to_history(cell);
+                    return;
+                }
                 self.on_agent_message_item_completed(
                     AgentMessageItem {
                         id,

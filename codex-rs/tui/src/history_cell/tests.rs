@@ -286,6 +286,46 @@ fn subagent_notification_event_formats_completion_detail() {
 }
 
 #[test]
+fn subagent_notification_event_accepts_wrapped_legacy_agent_message() {
+    let cell = new_subagent_notification_event(
+        r#"Agent message: <subagent_notification>
+{"agent_id":"child-1","status":{"completed":"done"}}
+</subagent_notification> from child-1"#,
+    )
+    .expect("wrapped subagent notification should parse");
+
+    assert_eq!(
+        render_transcript(&cell),
+        vec![
+            "• Subagent completed: child-1".to_string(),
+            "  └ done".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn subagent_notification_event_accepts_inter_agent_envelope() {
+    let message = serde_json::json!({
+        "author": "/root/dispatcher",
+        "recipient": "/root",
+        "content": "<subagent_notification>{\"agent_path\":\"/root/dispatcher\",\"status\":{\"completed\":\"reconciled\"}}</subagent_notification>",
+        "trigger_turn": true,
+    })
+    .to_string();
+
+    let cell = new_subagent_notification_event(&message)
+        .expect("inter-agent subagent notification should parse");
+
+    assert_eq!(
+        render_transcript(&cell),
+        vec![
+            "• Subagent completed: /root/dispatcher".to_string(),
+            "  └ reconciled".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn proposed_plan_cell_renders_markdown_table() {
     let plan = new_proposed_plan(
         "## Plan\n\n| Step | Owner |\n| --- | --- |\n| Verify | Codex |\n".to_string(),

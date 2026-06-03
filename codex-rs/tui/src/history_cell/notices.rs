@@ -2,6 +2,7 @@
 
 use super::*;
 use codex_protocol::protocol::AgentStatus;
+use codex_protocol::protocol::InterAgentCommunication;
 
 #[cfg_attr(debug_assertions, allow(dead_code))]
 #[derive(Debug)]
@@ -189,16 +190,91 @@ struct SubagentNotificationPayload {
     status: AgentStatus,
 }
 
-fn parse_subagent_notification_message(message: &str) -> Option<SubagentNotificationPayload> {
-    let trimmed = message.trim();
-    let body = trimmed
-        .strip_prefix(SUBAGENT_NOTIFICATION_OPEN_TAG)?
-        .strip_suffix(SUBAGENT_NOTIFICATION_CLOSE_TAG)?
-        .trim();
-    serde_json::from_str(body).ok()
+fn find_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .to_ascii_lowercase()
+        .find(&needle.to_ascii_lowercase())
 }
 
-pub(crate) fn new_subagent_notification_event(message: &str) -> Option<PlainHistoryCell> {
+fn extract_subagent_notification(message: &str) -> Option<String> {
+    let trimmed = message.trim();
+
+    if let Ok(communication) = serde_json::from_str::<InterAgentCommunication>(trimmed) {
+        return extract_subagent_notification(&communication.content);
+    }
+
+    let start = find_case_insensitive(trimmed, SUBAGENT_NOTIFICATION_OPEN_TAG)?;
+    let body_start = start + SUBAGENT_NOTIFICATION_OPEN_TAG.len();
+    let close_offset =
+        find_case_insensitive(&trimmed[body_start..], SUBAGENT_NOTIFICATION_CLOSE_TAG)?;
+    let body_end = body_start + close_offset;
+    Some(trimmed[body_start..body_end].trim().to_string())
+}
+
+fn parse_subagent_notification_message(message: &str) -> Option<SubagentNotificationPayload> {
+    let body = extract_subagent_notification(message)?;
+    serde_json::from_str(&body).ok()
+}
+
+#[derive(Debug)]
+pub(crate) struct SubagentNotificationHistoryCell {
+    title: &'static str,
+    agent_reference: String,
+    detail: Option<String>,
+}
+
+impl SubagentNotificationHistoryCell {
+    fn header_line(&self) -> Line<'static> {
+        vec![
+            "• ".dim(),
+            Span::from(self.title).bold(),
+            Span::from(": ").dim(),
+            self.agent_reference.clone().into(),
+        ]
+        .into()
+    }
+
+    fn detail_display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let Some(detail) = self.detail.as_deref() else {
+            return Vec::new();
+        };
+
+        let mut body = Vec::new();
+        let wrap_width = width.saturating_sub(4).max(1) as usize;
+        append_markdown_agent_with_cwd(detail.trim(), Some(wrap_width), None, &mut body);
+        if body.is_empty() {
+            body.extend(raw_lines_from_source(detail.trim_end()));
+        }
+        prefix_lines(body, "  └ ".dim(), "    ".into())
+    }
+
+    fn detail_raw_lines(&self) -> Vec<Line<'static>> {
+        let Some(detail) = self.detail.as_deref() else {
+            return Vec::new();
+        };
+
+        let body = raw_lines_from_source(detail.trim_end());
+        prefix_lines(body, "  └ ".dim(), "    ".into())
+    }
+}
+
+impl HistoryCell for SubagentNotificationHistoryCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let mut lines = vec![self.header_line()];
+        lines.extend(self.detail_display_lines(width));
+        lines
+    }
+
+    fn raw_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = plain_lines(vec![self.header_line()]);
+        lines.extend(self.detail_raw_lines());
+        lines
+    }
+}
+
+pub(crate) fn new_subagent_notification_event(
+    message: &str,
+) -> Option<SubagentNotificationHistoryCell> {
     let notification = parse_subagent_notification_message(message)?;
     let title = match &notification.status {
         AgentStatus::PendingInit => "Subagent pending init",
@@ -219,26 +295,11 @@ pub(crate) fn new_subagent_notification_event(message: &str) -> Option<PlainHist
         AgentStatus::Errored(message) => Some(message),
     };
 
-    let mut lines: Vec<Line<'static>> = vec![
-        vec![
-            "• ".dim(),
-            Span::from(title).bold(),
-            Span::from(": ").dim(),
-            notification.agent_reference.into(),
-        ]
-        .into(),
-    ];
-    if let Some(detail) = detail {
-        let detail_lines = detail
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| Line::from(line.to_string()))
-            .collect::<Vec<_>>();
-        if !detail_lines.is_empty() {
-            lines.extend(prefix_lines(detail_lines, "  └ ".dim(), "    ".into()));
-        }
-    }
-    Some(PlainHistoryCell::new(lines))
+    Some(SubagentNotificationHistoryCell {
+        title,
+        agent_reference: notification.agent_reference,
+        detail,
+    })
 }
 
 pub(crate) fn new_error_event(message: String) -> PlainHistoryCell {
