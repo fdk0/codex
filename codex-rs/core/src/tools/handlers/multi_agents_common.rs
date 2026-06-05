@@ -211,12 +211,8 @@ pub(crate) fn build_agent_spawn_config(
     Ok(config)
 }
 
-pub(crate) fn build_agent_resume_config(
-    turn: &TurnContext,
-    child_depth: i32,
-) -> Result<Config, FunctionCallError> {
+pub(crate) fn build_agent_resume_config(turn: &TurnContext) -> Result<Config, FunctionCallError> {
     let mut config = build_agent_shared_config(turn)?;
-    apply_spawn_agent_overrides(&mut config, child_depth);
     // For resume, keep base instructions sourced from rollout/session metadata.
     config.base_instructions = None;
     Ok(config)
@@ -229,7 +225,8 @@ fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, FunctionCallE
     config.model_provider = turn.provider.info().clone();
     config.model_reasoning_effort = turn
         .reasoning_effort
-        .or(turn.model_info.default_reasoning_level);
+        .clone()
+        .or_else(|| turn.model_info.default_reasoning_level.clone());
     config.model_reasoning_summary = Some(turn.reasoning_summary);
     config.developer_instructions = turn.developer_instructions.clone();
     config.compact_prompt = turn.compact_prompt.clone();
@@ -329,7 +326,7 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
             validate_spawn_agent_reasoning_effort(
                 &selected_model_name,
                 &selected_model_info.supported_reasoning_levels,
-                reasoning_effort,
+                &reasoning_effort,
             )?;
             config.model_reasoning_effort = Some(reasoning_effort);
         } else {
@@ -343,7 +340,7 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
         validate_spawn_agent_reasoning_effort(
             &turn.model_info.slug,
             &turn.model_info.supported_reasoning_levels,
-            reasoning_effort,
+            &reasoning_effort,
         )?;
         config.model_reasoning_effort = Some(reasoning_effort);
     }
@@ -429,11 +426,11 @@ fn find_spawn_agent_model_name(
 fn validate_spawn_agent_reasoning_effort(
     model: &str,
     supported_reasoning_levels: &[ReasoningEffortPreset],
-    requested_reasoning_effort: ReasoningEffort,
+    requested_reasoning_effort: &ReasoningEffort,
 ) -> Result<(), FunctionCallError> {
     if supported_reasoning_levels
         .iter()
-        .any(|preset| preset.effort == requested_reasoning_effort)
+        .any(|preset| &preset.effort == requested_reasoning_effort)
     {
         return Ok(());
     }

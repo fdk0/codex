@@ -38,6 +38,13 @@ impl ToolExecutor<ToolInvocation> for Handler {
         create_wait_agent_tool_v1(self.options)
     }
 
+    fn search_info(&self) -> Option<ToolSearchInfo> {
+        multi_agent_tool_search_info(
+            "wait_agent wait agent subagent status final result complete timeout targets",
+            self.spec(),
+        )
+    }
+
     async fn handle(
         &self,
         invocation: ToolInvocation,
@@ -77,7 +84,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
         let mut wake_enabled_children = session
             .services
             .agent_control
-            .wake_enabled_children_for_parent(session.conversation_id, &receiver_thread_ids)
+            .wake_enabled_children_for_parent(session.thread_id, &receiver_thread_ids)
             .await;
         let mut active_wake_enabled_children = Vec::with_capacity(wake_enabled_children.len());
         for child_thread_id in wake_enabled_children.drain(..) {
@@ -103,7 +110,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
                 .join(", ");
             return Err(FunctionCallError::RespondToModel(format!(
                 "wait is disabled for wake-enabled child agents by current configuration. These child threads already have wake_parent_on_completion enabled for parent {}: {ids}. End the current turn and rely on the automatic wake path instead, or set agents.wait_on_wake_enabled = \"allow\" / spawn the child with wake_parent_on_completion=false when you explicitly want polling.",
-                session.conversation_id
+                session.thread_id
             )));
         }
 
@@ -122,7 +129,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
                 &turn,
                 CollabWaitingBeginEvent {
                     started_at_ms: now_unix_timestamp_ms(),
-                    sender_thread_id: session.conversation_id,
+                    sender_thread_id: session.thread_id,
                     receiver_thread_ids: receiver_thread_ids.clone(),
                     receiver_agents: receiver_agents.clone(),
                     call_id: call_id.clone(),
@@ -152,7 +159,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
                         .send_event(
                             &turn,
                             CollabWaitingEndEvent {
-                                sender_thread_id: session.conversation_id,
+                                sender_thread_id: session.thread_id,
                                 call_id: call_id.clone(),
                                 completed_at_ms: now_unix_timestamp_ms(),
                                 agent_statuses: build_wait_agent_statuses(
@@ -221,7 +228,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
             .send_event(
                 &turn,
                 CollabWaitingEndEvent {
-                    sender_thread_id: session.conversation_id,
+                    sender_thread_id: session.thread_id,
                     call_id,
                     completed_at_ms: now_unix_timestamp_ms(),
                     agent_statuses,
@@ -236,13 +243,6 @@ impl ToolExecutor<ToolInvocation> for Handler {
 }
 
 impl CoreToolRuntime for Handler {
-    fn search_info(&self) -> Option<ToolSearchInfo> {
-        multi_agent_tool_search_info(
-            "wait_agent wait agent subagent status final result complete timeout targets",
-            self.spec(),
-        )
-    }
-
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }

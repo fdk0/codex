@@ -33,6 +33,13 @@ impl ToolExecutor<ToolInvocation> for Handler {
         create_spawn_agent_tool_v1(self.options.clone())
     }
 
+    fn search_info(&self) -> Option<ToolSearchInfo> {
+        multi_agent_tool_search_info(
+            "spawn_agent spawn agent subagent sub-agent delegate delegation parallel work worker explorer no-apps fork model reasoning",
+            self.spec(),
+        )
+    }
+
     async fn handle(
         &self,
         invocation: ToolInvocation,
@@ -74,10 +81,10 @@ async fn handle_spawn_agent(
             CollabAgentSpawnBeginEvent {
                 call_id: call_id.clone(),
                 started_at_ms: now_unix_timestamp_ms(),
-                sender_thread_id: session.conversation_id,
+                sender_thread_id: session.thread_id,
                 prompt: prompt.clone(),
                 model: args.model.clone().unwrap_or_default(),
-                reasoning_effort: args.reasoning_effort.unwrap_or_default(),
+                reasoning_effort: args.reasoning_effort.clone().unwrap_or_default(),
             }
             .into(),
         )
@@ -88,14 +95,18 @@ async fn handle_spawn_agent(
         config.service_tier = Some(service_tier.clone());
     }
     if args.fork_context {
-        reject_full_fork_spawn_overrides(role_name, args.model.as_deref(), args.reasoning_effort)?;
+        reject_full_fork_spawn_overrides(
+            role_name,
+            args.model.as_deref(),
+            args.reasoning_effort.clone(),
+        )?;
     } else {
         apply_requested_spawn_agent_model_overrides(
             &session,
             turn.as_ref(),
             &mut config,
             args.model.as_deref(),
-            args.reasoning_effort,
+            args.reasoning_effort.clone(),
         )
         .await?;
         apply_role_to_config(&mut config, role_name)
@@ -117,7 +128,7 @@ async fn handle_spawn_agent(
         config,
         input_items,
         Some(thread_spawn_source(
-            session.conversation_id,
+            session.thread_id,
             &turn.session_source,
             child_depth,
             role_name,
@@ -127,6 +138,7 @@ async fn handle_spawn_agent(
             fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
             fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
             wake_parent_on_completion: args.wake_parent_on_completion,
+            parent_thread_id: Some(session.thread_id),
             environments: Some(turn.environments.to_selections()),
         },
     ))
@@ -170,7 +182,7 @@ async fn handle_spawn_agent(
         .unwrap_or_else(|| args.model.clone().unwrap_or_default());
     let effective_reasoning_effort = agent_snapshot
         .as_ref()
-        .and_then(|snapshot| snapshot.reasoning_effort)
+        .and_then(|snapshot| snapshot.reasoning_effort.clone())
         .unwrap_or(args.reasoning_effort.unwrap_or_default());
     let nickname = new_agent_nickname.clone();
     session
@@ -179,7 +191,7 @@ async fn handle_spawn_agent(
             CollabAgentSpawnEndEvent {
                 call_id,
                 completed_at_ms: now_unix_timestamp_ms(),
-                sender_thread_id: session.conversation_id,
+                sender_thread_id: session.thread_id,
                 new_thread_id,
                 new_agent_nickname,
                 new_agent_role,
@@ -206,13 +218,6 @@ async fn handle_spawn_agent(
 }
 
 impl CoreToolRuntime for Handler {
-    fn search_info(&self) -> Option<ToolSearchInfo> {
-        multi_agent_tool_search_info(
-            "spawn_agent spawn agent subagent sub-agent delegate delegation parallel work worker explorer no-apps fork model reasoning",
-            self.spec(),
-        )
-    }
-
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }

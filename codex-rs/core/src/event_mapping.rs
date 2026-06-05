@@ -133,6 +133,7 @@ fn parse_subagent_notification_message(
 
     Some(UserMessageItem {
         id: id.cloned().unwrap_or_else(|| Uuid::new_v4().to_string()),
+        client_id: None,
         content: vec![UserInput::Text {
             text,
             text_elements: Vec::new(),

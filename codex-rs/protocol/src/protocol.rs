@@ -33,6 +33,7 @@ use crate::mcp::CallToolResult;
 use crate::mcp::RequestId;
 use crate::memory_citation::MemoryCitation;
 use crate::models::ActivePermissionProfile;
+use crate::models::AgentMessageInputContent;
 use crate::models::BaseInstructions;
 use crate::models::ContentItem;
 use crate::models::ImageDetail;
@@ -129,6 +130,9 @@ pub struct Submission {
     pub id: String,
     /// Payload
     pub op: Op,
+    /// Client-provided id for the user message represented by `Op::UserInput`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_user_message_id: Option<String>,
     /// Optional W3C trace carrier propagated across async submission handoffs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace: Option<W3cTraceContext>,
@@ -687,6 +691,9 @@ pub struct InterAgentCommunication {
     #[serde(default)]
     pub other_recipients: Vec<AgentPath>,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub encrypted_content: Option<String>,
     pub trigger_turn: bool,
 }
 
@@ -703,6 +710,24 @@ impl InterAgentCommunication {
             recipient,
             other_recipients,
             content,
+            encrypted_content: None,
+            trigger_turn,
+        }
+    }
+
+    pub fn new_encrypted(
+        author: AgentPath,
+        recipient: AgentPath,
+        other_recipients: Vec<AgentPath>,
+        encrypted_content: String,
+        trigger_turn: bool,
+    ) -> Self {
+        Self {
+            author,
+            recipient,
+            other_recipients,
+            content: String::new(),
+            encrypted_content: Some(encrypted_content),
             trigger_turn,
         }
     }
@@ -714,6 +739,19 @@ impl InterAgentCommunication {
                 text: serde_json::to_string(self).unwrap_or_default(),
             }],
             phase: Some(MessagePhase::Commentary),
+        }
+    }
+
+    pub fn to_model_input_item(&self) -> ResponseItem {
+        match &self.encrypted_content {
+            Some(encrypted_content) => ResponseItem::AgentMessage {
+                author: self.author.to_string(),
+                recipient: self.recipient.to_string(),
+                content: vec![AgentMessageInputContent::EncryptedContent {
+                    encrypted_content: encrypted_content.clone(),
+                }],
+            },
+            None => self.to_response_input_item().into(),
         }
     }
 
@@ -1183,6 +1221,9 @@ pub enum EventMsg {
     /// Backend recommends additional account verification for this turn.
     ModelVerification(ModelVerificationEvent),
 
+    /// Backend moderation metadata intended for first-party turn presentation.
+    TurnModerationMetadata(TurnModerationMetadataEvent),
+
     /// Conversation history was compacted (either automatically or manually).
     ContextCompacted(ContextCompactedEvent),
 
@@ -1395,6 +1436,7 @@ pub enum HookSource {
     SessionFlags,
     Plugin,
     CloudRequirements,
+    CloudManagedConfig,
     LegacyManagedConfigFile,
     LegacyManagedConfigMdm,
     #[default]
@@ -1847,6 +1889,11 @@ pub struct ModelVerificationEvent {
     pub verifications: Vec<ModelVerification>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+pub struct TurnModerationMetadataEvent {
+    pub metadata: Value,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ContextCompactedEvent;
 
@@ -2006,6 +2053,7 @@ pub struct RateLimitSnapshot {
     pub primary: Option<RateLimitWindow>,
     pub secondary: Option<RateLimitWindow>,
     pub credits: Option<CreditsSnapshot>,
+    pub individual_limit: Option<SpendControlLimitSnapshot>,
     pub plan_type: Option<crate::account::PlanType>,
     pub rate_limit_reached_type: Option<RateLimitReachedType>,
 }
@@ -2053,6 +2101,14 @@ pub struct CreditsSnapshot {
     pub has_credits: bool,
     pub unlimited: bool,
     pub balance: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
+pub struct SpendControlLimitSnapshot {
+    pub limit: String,
+    pub used: String,
+    pub remaining_percent: i32,
+    pub resets_at: i64,
 }
 
 // Includes prompts, tools and space to call compact.
@@ -2165,6 +2221,8 @@ pub struct AgentMessageEvent {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, TS)]
 pub struct UserMessageEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
     pub message: String,
     /// Image URLs sourced from `UserInput::Image`. These are safe
     /// to replay in legacy UI history events and correspond to images sent to
@@ -2176,8 +2234,9 @@ pub struct UserMessageEvent {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_details: Vec<Option<ImageDetail>>,
     /// Local file paths sourced from `UserInput::LocalImage`. These are kept so
-    /// the UI can reattach images when editing history, and should not be sent
-    /// to the model or treated as API-ready URLs.
+    /// the UI can reattach images when editing history. Local image prompts may
+    /// include a display form of the path, but these should not be treated as
+    /// API-ready URLs.
     #[serde(default)]
     pub local_images: Vec<std::path::PathBuf>,
     /// Detail hints for `local_images`, indexed in parallel. Missing entries
@@ -2436,12 +2495,39 @@ impl InitialHistory {
         }
     }
 
+    pub fn get_multi_agent_version(&self) -> Option<MultiAgentVersion> {
+        match self {
+            InitialHistory::New | InitialHistory::Cleared => None,
+            InitialHistory::Resumed(resumed) => {
+                multi_agent_version_from_items(&resumed.history, Some(resumed.conversation_id))
+            }
+            InitialHistory::Forked(items) => {
+                multi_agent_version_from_items(items, /*thread_id*/ None)
+            }
+        }
+    }
+
+    pub fn get_resumed_session_sources(&self) -> Option<(SessionSource, Option<ThreadSource>)> {
+        let meta = self.get_resumed_session_meta()?;
+        Some((meta.source.clone(), meta.thread_source))
+    }
+
     pub fn get_resumed_thread_source(&self) -> Option<ThreadSource> {
+        self.get_resumed_session_meta()
+            .and_then(|meta| meta.thread_source)
+    }
+
+    pub fn get_resumed_parent_thread_id(&self) -> Option<ThreadId> {
+        self.get_resumed_session_meta()
+            .and_then(|meta| meta.parent_thread_id)
+    }
+
+    fn get_resumed_session_meta(&self) -> Option<&SessionMeta> {
         match self {
             InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => None,
             InitialHistory::Resumed(resumed) => {
                 resumed.history.iter().find_map(|item| match item {
-                    RolloutItem::SessionMeta(meta_line) => meta_line.meta.thread_source,
+                    RolloutItem::SessionMeta(meta_line) => Some(&meta_line.meta),
                     _ => None,
                 })
             }
@@ -2626,6 +2712,19 @@ impl SessionSource {
                 .restriction_product()
                 .is_some_and(|product| product.matches_product_restriction(products))
     }
+
+    pub fn parent_thread_id(&self) -> Option<ThreadId> {
+        match self {
+            SessionSource::SubAgent(subagent_source) => subagent_source.parent_thread_id(),
+            SessionSource::Cli
+            | SessionSource::VSCode
+            | SessionSource::Exec
+            | SessionSource::Mcp
+            | SessionSource::Custom(_)
+            | SessionSource::Internal(_)
+            | SessionSource::Unknown => None,
+        }
+    }
 }
 
 impl fmt::Display for SubAgentSource {
@@ -2646,12 +2745,69 @@ impl fmt::Display for SubAgentSource {
     }
 }
 
+impl SubAgentSource {
+    pub fn kind(&self) -> &str {
+        match self {
+            SubAgentSource::Review => "review",
+            SubAgentSource::Compact => "compact",
+            SubAgentSource::ThreadSpawn { .. } => "thread_spawn",
+            SubAgentSource::MemoryConsolidation => "memory_consolidation",
+            SubAgentSource::Other(other) => other,
+        }
+    }
+
+    pub fn parent_thread_id(&self) -> Option<ThreadId> {
+        match self {
+            SubAgentSource::ThreadSpawn {
+                parent_thread_id, ..
+            } => Some(*parent_thread_id),
+            SubAgentSource::Review
+            | SubAgentSource::Compact
+            | SubAgentSource::MemoryConsolidation
+            | SubAgentSource::Other(_) => None,
+        }
+    }
+}
+
 impl fmt::Display for InternalSessionSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             InternalSessionSource::MemoryConsolidation => f.write_str("memory_consolidation"),
         }
     }
+}
+
+fn multi_agent_version_from_items(
+    items: &[RolloutItem],
+    thread_id: Option<ThreadId>,
+) -> Option<MultiAgentVersion> {
+    let session_meta_version = items.iter().rev().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta_line)
+            if thread_id.is_none_or(|thread_id| meta_line.meta.id == thread_id) =>
+        {
+            meta_line.meta.multi_agent_version
+        }
+        _ => None,
+    });
+
+    session_meta_version.or_else(|| {
+        items.iter().rev().find_map(|item| match item {
+            RolloutItem::TurnContext(turn_context) => turn_context.multi_agent_version,
+            RolloutItem::SessionMeta(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::Compacted(_)
+            | RolloutItem::EventMsg(_) => None,
+        })
+    })
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum MultiAgentVersion {
+    Disabled,
+    V1,
+    V2,
 }
 
 /// SessionMeta contains session-level data that doesn't correspond to a specific turn.
@@ -2664,6 +2820,8 @@ pub struct SessionMeta {
     pub id: ThreadId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forked_from_id: Option<ThreadId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_thread_id: Option<ThreadId>,
     pub timestamp: String,
     pub cwd: PathBuf,
     pub originator: String,
@@ -2691,6 +2849,8 @@ pub struct SessionMeta {
     pub dynamic_tools: Option<Vec<DynamicToolSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multi_agent_version: Option<MultiAgentVersion>,
 }
 
 impl Default for SessionMeta {
@@ -2698,6 +2858,7 @@ impl Default for SessionMeta {
         SessionMeta {
             id: ThreadId::default(),
             forked_from_id: None,
+            parent_thread_id: None,
             timestamp: String::new(),
             cwd: PathBuf::new(),
             originator: String::new(),
@@ -2711,6 +2872,7 @@ impl Default for SessionMeta {
             base_instructions: None,
             dynamic_tools: None,
             memory_mode: None,
+            multi_agent_version: None,
         }
     }
 }
@@ -2768,6 +2930,10 @@ pub struct TurnContextItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     pub cwd: PathBuf,
+    /// Effective workspace roots used to materialize symbolic
+    /// `:workspace_roots` filesystem permissions in `permission_profile`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_roots: Option<Vec<AbsolutePathBuf>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_date: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2785,6 +2951,8 @@ pub struct TurnContextItem {
     pub personality: Option<Personality>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collaboration_mode: Option<CollaborationMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_agent_version: Option<MultiAgentVersion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realtime_active: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3365,6 +3533,8 @@ pub struct SessionConfiguredEvent {
     pub thread_id: ThreadId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forked_from_id: Option<ThreadId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_thread_id: Option<ThreadId>,
     /// Optional analytics source classification for this thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_source: Option<ThreadSource>,
@@ -3434,6 +3604,7 @@ impl<'de> Deserialize<'de> for SessionConfiguredEvent {
             #[serde(default)]
             thread_id: Option<ThreadId>,
             forked_from_id: Option<ThreadId>,
+            parent_thread_id: Option<ThreadId>,
             #[serde(default)]
             thread_source: Option<ThreadSource>,
             #[serde(default)]
@@ -3474,6 +3645,7 @@ impl<'de> Deserialize<'de> for SessionConfiguredEvent {
             session_id: wire.session_id,
             thread_id: wire.thread_id.unwrap_or_else(|| wire.session_id.into()),
             forked_from_id: wire.forked_from_id,
+            parent_thread_id: wire.parent_thread_id,
             thread_source: wire.thread_source,
             thread_name: wire.thread_name,
             model: wire.model,
@@ -3935,6 +4107,7 @@ mod tests {
             recipient: AgentPath::root().join("reviewer").expect("recipient path"),
             other_recipients: vec![AgentPath::root().join("worker").expect("recipient path")],
             content: "review the diff".to_string(),
+            encrypted_content: None,
             trigger_turn: true,
         };
 
@@ -5089,6 +5262,7 @@ mod tests {
     #[test]
     fn user_message_event_serializes_empty_metadata_vectors() -> Result<()> {
         let event = UserMessageEvent {
+            client_id: None,
             message: "hello".to_string(),
             images: None,
             local_images: Vec::new(),
@@ -5134,7 +5308,7 @@ mod tests {
     #[test]
     fn user_message_item_legacy_event_preserves_image_details() {
         let local_path = PathBuf::from("/tmp/local.png");
-        let item = UserMessageItem::new(&[
+        let mut item = UserMessageItem::new(&[
             crate::user_input::UserInput::Image {
                 image_url: "https://example.com/first.png".to_string(),
                 detail: Some(ImageDetail::Original),
@@ -5148,6 +5322,7 @@ mod tests {
                 detail: Some(ImageDetail::Original),
             },
         ]);
+        item.client_id = Some("client-message-1".to_string());
 
         let EventMsg::UserMessage(event) = item.as_legacy_event() else {
             panic!("expected user message event");
@@ -5160,6 +5335,7 @@ mod tests {
                 "https://example.com/second.png".to_string(),
             ])
         );
+        assert_eq!(event.client_id, Some("client-message-1".to_string()));
         assert_eq!(event.image_details, vec![Some(ImageDetail::Original)]);
         assert_eq!(event.local_images, vec![local_path]);
         assert_eq!(event.local_image_details, vec![Some(ImageDetail::Original)]);
@@ -5201,10 +5377,44 @@ mod tests {
     }
 
     #[test]
+    fn multi_agent_version_uses_newest_present_session_meta_value() -> Result<()> {
+        let thread_id = ThreadId::from_string("67e55044-10b1-426f-9247-bb680e5fe0c8")?;
+        let older_meta = SessionMetaLine {
+            meta: SessionMeta {
+                id: thread_id,
+                multi_agent_version: Some(MultiAgentVersion::V2),
+                ..Default::default()
+            },
+            git: None,
+        };
+        let newer_meta_without_version = SessionMetaLine {
+            meta: SessionMeta {
+                id: thread_id,
+                multi_agent_version: None,
+                ..Default::default()
+            },
+            git: None,
+        };
+
+        assert_eq!(
+            multi_agent_version_from_items(
+                &[
+                    RolloutItem::SessionMeta(older_meta),
+                    RolloutItem::SessionMeta(newer_meta_without_version),
+                ],
+                Some(thread_id),
+            ),
+            Some(MultiAgentVersion::V2)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn turn_context_item_serializes_network_when_present() -> Result<()> {
         let item = TurnContextItem {
             turn_id: None,
             cwd: test_path_buf("/tmp"),
+            workspace_roots: None,
             current_date: None,
             timezone: None,
             approval_policy: AskForApproval::Never,
@@ -5225,6 +5435,7 @@ mod tests {
             model: "gpt-5".to_string(),
             personality: None,
             collaboration_mode: None,
+            multi_agent_version: None,
             realtime_active: None,
             effort: None,
             summary: ReasoningSummaryConfig::Auto,
@@ -5269,6 +5480,7 @@ mod tests {
                 session_id,
                 thread_id,
                 forked_from_id: None,
+                parent_thread_id: None,
                 thread_source: None,
                 thread_name: None,
                 model: "codex-mini-latest".to_string(),

@@ -766,6 +766,50 @@ mod tests {
     }
 
     #[test]
+    fn completed_hook_multiline_context_preserves_display_and_raw_lines() {
+        let cell = completed_hook_cell(
+            HookEventName::SessionStart,
+            HookRunStatus::Completed,
+            vec![HookOutputEntry {
+                kind: HookOutputEntryKind::Context,
+                text: "## Working Memory Recall\n\nSource: Codex compaction\nScope: Durable workspace memory"
+                    .to_string(),
+            }],
+        );
+        let expected = vec![
+            "• SessionStart hook (completed)".to_string(),
+            "  hook context: ## Working Memory Recall".to_string(),
+            "                ".to_string(),
+            "                Source: Codex compaction".to_string(),
+            "                Scope: Durable workspace memory".to_string(),
+        ];
+
+        assert_eq!(line_texts(&cell.display_lines(/*width*/ 80)), expected);
+        assert_eq!(line_texts(&cell.raw_lines()), expected);
+    }
+
+    #[test]
+    fn completed_hook_multiline_warning_prefixes_first_line_only() {
+        let cell = completed_hook_cell(
+            HookEventName::PostToolUse,
+            HookRunStatus::Completed,
+            vec![HookOutputEntry {
+                kind: HookOutputEntryKind::Warning,
+                text: "Heads up\nReview generated files".to_string(),
+            }],
+        );
+
+        assert_eq!(
+            line_texts(&cell.display_lines(/*width*/ 80)),
+            vec![
+                "• PostToolUse hook (completed)".to_string(),
+                "  warning: Heads up".to_string(),
+                "           Review generated files".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn pending_hook_does_not_animate_transcript() {
         let cell =
             HookCell::new_active(hook_run_summary("hook-1"), /*animations_enabled*/ true);
@@ -807,12 +851,7 @@ mod tests {
         let rendered: Vec<String> = cell
             .display_lines(/*width*/ 80)
             .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
+            .map(line_text)
             .collect();
 
         assert_eq!(
@@ -855,6 +894,32 @@ mod tests {
                 "                CorrectedRoute: spec_repair".to_string(),
             ]
         );
+    }
+
+    fn completed_hook_cell(
+        event_name: HookEventName,
+        status: HookRunStatus,
+        entries: Vec<HookOutputEntry>,
+    ) -> HookCell {
+        let mut run = hook_run_summary("hook-1");
+        run.event_name = event_name;
+        run.status = status;
+        run.status_message = None;
+        run.completed_at = Some(2);
+        run.duration_ms = Some(1);
+        run.entries = entries;
+        HookCell::new_completed(run, /*animations_enabled*/ false)
+    }
+
+    fn line_texts(lines: &[Line<'_>]) -> Vec<String> {
+        lines.iter().map(line_text).collect()
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
     }
 
     fn hook_run_summary(id: &str) -> HookRunSummary {

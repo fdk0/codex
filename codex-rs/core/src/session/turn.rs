@@ -69,6 +69,9 @@ use codex_analytics::InvocationType;
 use codex_analytics::TurnResolvedConfigFact;
 use codex_analytics::build_track_events_context;
 use codex_async_utils::OrCancelExt;
+use codex_core_skills::injection::InjectedHostSkillPrompts;
+use codex_extension_api::TurnInputContext;
+use codex_extension_api::TurnInputEnvironment;
 use codex_features::Feature;
 use codex_git_utils::get_git_repo_root;
 use codex_git_utils::get_git_repo_root_with_fs;
@@ -145,7 +148,10 @@ pub(crate) async fn run_turn(
     // diffs/full reinjection + user input) and trigger compaction preemptively
     // when they would push the thread over the compaction threshold.
     if let Err(err) = run_pre_sampling_compact(&sess, &turn_context, &mut client_session).await {
-        if err.to_codex_protocol_error() == CodexErrorInfo::UsageLimitExceeded
+        let error = err.to_codex_protocol_error();
+        sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
+            .await;
+        if error == CodexErrorInfo::UsageLimitExceeded
             && let Err(err) = sess
                 .goal_runtime_apply(GoalRuntimeEvent::UsageLimitReached {
                     turn_context: turn_context.as_ref(),
@@ -295,7 +301,10 @@ pub(crate) async fn run_turn(
                     )
                     .await
                     {
-                        if err.to_codex_protocol_error() == CodexErrorInfo::UsageLimitExceeded
+                        let error = err.to_codex_protocol_error();
+                        sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
+                            .await;
+                        if error == CodexErrorInfo::UsageLimitExceeded
                             && let Err(err) = sess
                                 .goal_runtime_apply(GoalRuntimeEvent::UsageLimitReached {
                                     turn_context: turn_context.as_ref(),
@@ -363,7 +372,7 @@ pub(crate) async fn run_turn(
                 // Aborted turn is reported via a different event.
                 break;
             }
-            Err(CodexErr::InvalidImageRequest()) => {
+            Err(codex_error @ CodexErr::InvalidImageRequest()) => {
                 {
                     let mut state = sess.state.lock().await;
                     error_or_panic(
@@ -374,17 +383,24 @@ pub(crate) async fn run_turn(
                     }
                 }
 
+                sess.track_turn_codex_error(turn_context.as_ref(), &codex_error);
+                let error = CodexErrorInfo::BadRequest;
+                sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
+                    .await;
                 let event = EventMsg::Error(ErrorEvent {
                     message: "Invalid image in your last message. Please remove it and try again."
                         .to_string(),
-                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                    codex_error_info: Some(error),
                 });
                 sess.send_event(&turn_context, event).await;
                 break;
             }
             Err(e) => {
                 info!("Turn error: {e:#}");
-                if e.to_codex_protocol_error() == CodexErrorInfo::UsageLimitExceeded
+                let error = e.to_codex_protocol_error();
+                sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
+                    .await;
+                if error == CodexErrorInfo::UsageLimitExceeded
                     && let Err(err) = sess
                         .goal_runtime_apply(GoalRuntimeEvent::UsageLimitReached {
                             turn_context: turn_context.as_ref(),
@@ -393,6 +409,7 @@ pub(crate) async fn run_turn(
                 {
                     warn!("failed to usage-limit active goal after usage-limit error: {err}");
                 }
+                sess.track_turn_codex_error(turn_context.as_ref(), &e);
                 let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
                 sess.send_event(&turn_context, event).await;
                 // let the user continue the conversation
@@ -417,7 +434,7 @@ async fn run_hooks_and_record_inputs(
             blocked_input = true;
             record_additional_contexts(sess, turn_context, hook_outcome.additional_contexts).await;
         } else {
-            if matches!(input_item, TurnInput::UserInput(items) if !items.is_empty()) {
+            if matches!(input_item, TurnInput::UserInput { content, .. } if !content.is_empty()) {
                 accepted_user_input = true;
             }
             record_pending_input(
@@ -445,15 +462,15 @@ async fn build_skills_and_plugins(
     let user_input = input
         .iter()
         .filter_map(|item| match item {
-            TurnInput::UserInput(content) => Some(content.as_slice()),
-            TurnInput::ResponseInputItem(_) => None,
+            TurnInput::UserInput { content, .. } => Some(content.as_slice()),
+            TurnInput::ResponseItem(_) => None,
         })
         .flatten()
         .cloned()
         .collect::<Vec<_>>();
     let tracking = build_track_events_context(
         turn_context.model_info.slug.clone(),
-        sess.conversation_id.to_string(),
+        sess.thread_id.to_string(),
         turn_context.sub_id.clone(),
     );
     let loaded_plugins = sess
@@ -499,6 +516,9 @@ async fn build_skills_and_plugins(
     };
     let skills_outcome = turn_context.turn_skills.outcome.as_ref();
     let connector_slug_counts = build_connector_slug_counts(&available_connectors);
+    let extension_injection_items =
+        build_extension_turn_input_items(sess, turn_context, &user_input, cancellation_token)
+            .await?;
     let skill_name_counts_lower =
         build_skill_name_counts(&skills_outcome.skills, &skills_outcome.disabled_paths).1;
     let mentioned_skills = collect_explicit_skill_mentions(
@@ -516,6 +536,9 @@ async fn build_skills_and_plugins(
     )
     .await;
 
+    let injected_host_skill_prompts = turn_context
+        .extension_data
+        .get::<InjectedHostSkillPrompts>();
     let SkillInjections {
         items: skill_injections,
         warnings: skill_warnings,
@@ -572,9 +595,70 @@ async fn build_skills_and_plugins(
             .track_plugin_used(tracking.clone(), plugin);
     }
 
-    let mut injection_items = skill_items;
+    let mut injection_items: Vec<ResponseItem> = match injected_host_skill_prompts {
+        Some(injected_host_skill_prompts) => skill_injections
+            .iter()
+            .filter(|skill| !injected_host_skill_prompts.contains_path(&skill.path))
+            .map(|skill| {
+                ContextualUserFragment::into(crate::context::SkillInstructions::from(skill))
+            })
+            .collect(),
+        None => skill_items,
+    };
     injection_items.extend(plugin_items);
+    injection_items.extend(extension_injection_items);
     Some((injection_items, explicitly_enabled_connectors))
+}
+
+async fn build_extension_turn_input_items(
+    sess: &Arc<Session>,
+    turn_context: &TurnContext,
+    user_input: &[UserInput],
+    cancellation_token: &CancellationToken,
+) -> Option<Vec<ResponseItem>> {
+    let contributors = sess.services.extensions.turn_input_contributors().to_vec();
+    if contributors.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let environments = turn_context
+        .environments
+        .turn_environments
+        .iter()
+        .enumerate()
+        .map(|(index, environment)| TurnInputEnvironment {
+            environment_id: environment.environment_id.clone(),
+            cwd: environment.cwd.as_path().to_path_buf(),
+            is_primary: index == 0,
+        })
+        .collect::<Vec<_>>();
+
+    let input = TurnInputContext {
+        turn_id: turn_context.sub_id.to_string(),
+        user_input: user_input.to_vec(),
+        environments,
+    };
+
+    let mut items = Vec::new();
+    for contributor in contributors {
+        let contributed_fragments = contributor
+            .contribute(
+                input.clone(),
+                &sess.services.session_extension_data,
+                &sess.services.thread_extension_data,
+                turn_context.extension_data.as_ref(),
+            )
+            .or_cancel(cancellation_token)
+            .await
+            .ok()?;
+        items.extend(
+            contributed_fragments
+                .into_iter()
+                .map(ContextualUserFragment::into_boxed_response_item),
+        );
+    }
+
+    Some(items)
 }
 
 async fn track_turn_resolved_config_analytics(
@@ -594,12 +678,12 @@ async fn track_turn_resolved_config_analytics(
         .analytics_events_client
         .track_turn_resolved_config(TurnResolvedConfigFact {
             turn_id: turn_context.sub_id.clone(),
-            thread_id: sess.conversation_id.to_string(),
+            thread_id: sess.thread_id.to_string(),
             num_input_images: input
                 .iter()
                 .filter_map(|item| match item {
-                    TurnInput::UserInput(content) => Some(content.as_slice()),
-                    TurnInput::ResponseInputItem(_) => None,
+                    TurnInput::UserInput { content, .. } => Some(content.as_slice()),
+                    TurnInput::ResponseItem(_) => None,
                 })
                 .flatten()
                 .filter(|item| {
@@ -614,7 +698,7 @@ async fn track_turn_resolved_config_analytics(
             permission_profile: turn_context.permission_profile(),
             #[allow(deprecated)]
             permission_profile_cwd: turn_context.cwd.to_path_buf(),
-            reasoning_effort: turn_context.reasoning_effort,
+            reasoning_effort: turn_context.reasoning_effort.clone(),
             reasoning_summary: Some(turn_context.reasoning_summary),
             service_tier: turn_context
                 .config
@@ -626,6 +710,7 @@ async fn track_turn_resolved_config_analytics(
             sandbox_network_access: turn_context.network_sandbox_policy().is_enabled(),
             collaboration_mode: turn_context.collaboration_mode.mode,
             personality: turn_context.personality,
+            workspace_kind: turn_context.turn_metadata_state.workspace_kind(),
             is_first_turn,
         });
 }
@@ -931,16 +1016,12 @@ async fn run_sampling_request(
         Arc::clone(&turn_context),
         Arc::clone(&turn_diff_tracker),
     );
-    let _code_mode_worker = sess
-        .services
-        .code_mode_service
-        .start_turn_worker(
-            &sess,
-            &turn_context,
-            Arc::clone(&router),
-            Arc::clone(&turn_diff_tracker),
-        )
-        .await;
+    let _code_mode_worker = sess.services.code_mode_service.start_turn_worker(
+        &sess,
+        &turn_context,
+        Arc::clone(&router),
+        Arc::clone(&turn_diff_tracker),
+    );
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
     let mut initial_input = Some(input);
@@ -1063,12 +1144,19 @@ pub(crate) async fn built_tools(
         None
     };
     let auth = sess.services.auth_manager.auth().await;
+    let loaded_plugin_app_connector_ids = loaded_plugins
+        .effective_apps()
+        .into_iter()
+        .map(|connector_id| connector_id.0)
+        .collect::<Vec<_>>();
     let discoverable_tools = if apps_enabled && tool_suggest_enabled(turn_context) {
         if let Some(accessible_connectors) = accessible_connectors_with_enabled_state.as_ref() {
             match connectors::list_tool_suggest_discoverable_tools_with_auth(
                 &turn_context.config,
+                sess.services.plugins_manager.as_ref(),
                 auth.as_ref(),
                 accessible_connectors.as_slice(),
+                &loaded_plugin_app_connector_ids,
             )
             .await
             .map(|discoverable_tools| {
@@ -1231,7 +1319,7 @@ impl ProposedPlanItemState {
             return;
         }
         let event = PlanDeltaEvent {
-            thread_id: sess.conversation_id.to_string(),
+            thread_id: sess.thread_id.to_string(),
             turn_id: turn_context.sub_id.clone(),
             item_id: self.item_id.clone(),
             delta: delta.to_string(),
@@ -1304,6 +1392,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<String> {
         | EventMsg::RealtimeConversationClosed(_)
         | EventMsg::ModelReroute(_)
         | EventMsg::ModelVerification(_)
+        | EventMsg::TurnModerationMetadata(_)
         | EventMsg::ContextCompacted(_)
         | EventMsg::ThreadRolledBack(_)
         | EventMsg::TurnStarted(_)
@@ -1407,7 +1496,7 @@ async fn handle_plan_segments(
                 maybe_emit_pending_agent_message_start(sess, turn_context, state, item_id).await;
 
                 let event = AgentMessageContentDeltaEvent {
-                    thread_id: sess.conversation_id.to_string(),
+                    thread_id: sess.thread_id.to_string(),
                     turn_id: turn_context.sub_id.clone(),
                     item_id: item_id.to_string(),
                     delta,
@@ -1461,7 +1550,7 @@ async fn emit_streamed_assistant_text_delta(
         return;
     }
     let event = AgentMessageContentDeltaEvent {
-        thread_id: sess.conversation_id.to_string(),
+        thread_id: sess.thread_id.to_string(),
         turn_id: turn_context.sub_id.clone(),
         item_id: item_id.to_string(),
         delta: parsed.visible_text,
@@ -1711,7 +1800,7 @@ async fn try_run_sampling_request(
             prompt,
             &turn_context.model_info,
             &turn_context.session_telemetry,
-            turn_context.reasoning_effort,
+            turn_context.reasoning_effort.clone(),
             turn_context.reasoning_summary,
             turn_context.config.service_tier.clone(),
             turn_metadata_header,
@@ -1739,7 +1828,6 @@ async fn try_run_sampling_request(
         !sess.services.extensions.turn_item_contributors().is_empty();
     let mut active_item_is_streaming_to_client = false;
     let receiving_span = trace_span!("receiving_stream");
-    let mut completed_response_id: Option<String> = None;
     let outcome: CodexResult<SamplingRequestResult> = loop {
         let handle_responses = trace_span!(
             parent: &receiving_span,
@@ -1837,6 +1925,7 @@ async fn try_run_sampling_request(
                         role == "assistant" && matches!(phase, Some(MessagePhase::Commentary))
                     }
                     ResponseItem::Reasoning { .. } => true,
+                    ResponseItem::AgentMessage { .. } => false,
                     ResponseItem::LocalShellCall { .. }
                     | ResponseItem::FunctionCall { .. }
                     | ResponseItem::ToolSearchCall { .. }
@@ -1969,6 +2058,10 @@ async fn try_run_sampling_request(
                         .await;
                 }
             }
+            ResponseEvent::TurnModerationMetadata(metadata) => {
+                sess.emit_turn_moderation_metadata(&turn_context, metadata)
+                    .await;
+            }
             ResponseEvent::ServerReasoningIncluded(included) => {
                 sess.set_server_reasoning_included(included).await;
             }
@@ -1983,9 +2076,9 @@ async fn try_run_sampling_request(
                 sess.services.models_manager.refresh_if_new_etag(etag).await;
             }
             ResponseEvent::Completed {
-                response_id,
                 token_usage,
                 end_turn,
+                ..
             } => {
                 flush_assistant_text_segments_all(
                     &sess,
@@ -2001,7 +2094,6 @@ async fn try_run_sampling_request(
                 if let Some(false) = end_turn {
                     needs_follow_up = true;
                 }
-                completed_response_id = Some(response_id);
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
@@ -2027,7 +2119,7 @@ async fn try_run_sampling_request(
                         .await;
                     } else {
                         let event = AgentMessageContentDeltaEvent {
-                            thread_id: sess.conversation_id.to_string(),
+                            thread_id: sess.thread_id.to_string(),
                             turn_id: turn_context.sub_id.clone(),
                             item_id,
                             delta,
@@ -2066,7 +2158,7 @@ async fn try_run_sampling_request(
                         continue;
                     }
                     let event = ReasoningContentDeltaEvent {
-                        thread_id: sess.conversation_id.to_string(),
+                        thread_id: sess.thread_id.to_string(),
                         turn_id: turn_context.sub_id.clone(),
                         item_id: active.id(),
                         delta,
@@ -2102,7 +2194,7 @@ async fn try_run_sampling_request(
                         continue;
                     }
                     let event = ReasoningRawContentDeltaEvent {
-                        thread_id: sess.conversation_id.to_string(),
+                        thread_id: sess.thread_id.to_string(),
                         turn_id: turn_context.sub_id.clone(),
                         item_id: active.id(),
                         delta,
@@ -2124,15 +2216,6 @@ async fn try_run_sampling_request(
         &mut assistant_message_stream_parsers,
     )
     .await;
-
-    if sess
-        .features
-        .enabled(Feature::ResponsesWebsocketResponseProcessed)
-        && outcome.is_ok()
-        && let Some(response_id) = completed_response_id.as_deref()
-    {
-        client_session.send_response_processed(response_id).await;
-    }
 
     drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
 

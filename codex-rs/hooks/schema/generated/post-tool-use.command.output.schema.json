@@ -8,22 +8,6 @@
       ],
       "type": "string"
     },
-    "HookEventNameWire": {
-      "enum": [
-        "PreToolUse",
-        "PermissionRequest",
-        "PostToolUse",
-        "PreCompact",
-        "PostCompact",
-        "SessionStart",
-        "AfterCompaction",
-        "UserPromptSubmit",
-        "SubagentStart",
-        "SubagentStop",
-        "Stop"
-      ],
-      "type": "string"
-    },
     "PostToolUseHookSpecificOutputWire": {
       "additionalProperties": false,
       "properties": {
@@ -32,7 +16,8 @@
           "type": "string"
         },
         "hookEventName": {
-          "$ref": "#/definitions/HookEventNameWire"
+          "const": "PostToolUse",
+          "type": "string"
         },
         "updatedMCPToolOutput": {
           "default": null

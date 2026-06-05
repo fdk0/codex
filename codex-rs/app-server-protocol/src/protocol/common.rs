@@ -610,6 +610,11 @@ client_request_definitions! {
         serialization: global_shared_read("config"),
         response: v2::SkillsListResponse,
     },
+    SkillsExtraRootsSet => "skills/extraRoots/set" {
+        params: v2::SkillsExtraRootsSetParams,
+        serialization: global("config"),
+        response: v2::SkillsExtraRootsSetResponse,
+    },
     HooksList => "hooks/list" {
         params: v2::HooksListParams,
         serialization: global("config"),
@@ -838,6 +843,24 @@ client_request_definitions! {
         serialization: global_shared_read("remote-control"),
         response: v2::RemoteControlStatusReadResponse,
     },
+    #[experimental("remoteControl/pairing/start")]
+    RemoteControlPairingStart => "remoteControl/pairing/start" {
+        params: v2::RemoteControlPairingStartParams,
+        serialization: global("remote-control-pairing"),
+        response: v2::RemoteControlPairingStartResponse,
+    },
+    #[experimental("remoteControl/client/list")]
+    RemoteControlClientsList => "remoteControl/client/list" {
+        params: v2::RemoteControlClientsListParams,
+        serialization: global_shared_read("remote-control-clients"),
+        response: v2::RemoteControlClientsListResponse,
+    },
+    #[experimental("remoteControl/client/revoke")]
+    RemoteControlClientsRevoke => "remoteControl/client/revoke" {
+        params: v2::RemoteControlClientsRevokeParams,
+        serialization: global("remote-control-clients"),
+        response: v2::RemoteControlClientsRevokeResponse,
+    },
     #[experimental("collaborationMode/list")]
     /// Lists collaboration mode presets.
     CollaborationModeList => "collaborationMode/list" {
@@ -924,6 +947,12 @@ client_request_definitions! {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         serialization: None,
         response: v2::GetAccountRateLimitsResponse,
+    },
+
+    GetAccountTokenUsage => "account/usage/read" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: None,
+        response: v2::GetAccountTokenUsageResponse,
     },
 
     SendAddCreditsNudgeEmail => "account/sendAddCreditsNudgeEmail" {
@@ -1526,6 +1555,8 @@ server_notification_definitions! {
     ContextCompacted => "thread/compacted" (v2::ContextCompactedNotification),
     ModelRerouted => "model/rerouted" (v2::ModelReroutedNotification),
     ModelVerification => "model/verification" (v2::ModelVerificationNotification),
+    #[experimental("turn/moderationMetadata")]
+    TurnModerationMetadata => "turn/moderationMetadata" (v2::TurnModerationMetadataNotification),
     Warning => "warning" (v2::WarningNotification),
     GuardianWarning => "guardianWarning" (v2::GuardianWarningNotification),
     DeprecationNotice => "deprecationNotice" (v2::DeprecationNoticeNotification),
@@ -1719,6 +1750,17 @@ mod tests {
         assert_eq!(
             skills_list.serialization_scope(),
             Some(ClientRequestSerializationScope::GlobalSharedRead("config"))
+        );
+
+        let skills_extra_roots_set = ClientRequest::SkillsExtraRootsSet {
+            request_id: request_id(),
+            params: v2::SkillsExtraRootsSetParams {
+                extra_roots: vec![absolute_path("/tmp/skills")],
+            },
+        };
+        assert_eq!(
+            skills_extra_roots_set.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global("config"))
         );
 
         let plugin_list = ClientRequest::PluginList {
@@ -1961,6 +2003,40 @@ mod tests {
             },
         };
         assert_eq!(mcp_resource_read.serialization_scope(), None);
+
+        let remote_control_pairing_start = ClientRequest::RemoteControlPairingStart {
+            request_id: request_id(),
+            params: v2::RemoteControlPairingStartParams::default(),
+        };
+        assert_eq!(
+            remote_control_pairing_start.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global(
+                "remote-control-pairing"
+            ))
+        );
+        let remote_control_clients_list = ClientRequest::RemoteControlClientsList {
+            request_id: request_id(),
+            params: v2::RemoteControlClientsListParams::default(),
+        };
+        assert_eq!(
+            remote_control_clients_list.serialization_scope(),
+            Some(ClientRequestSerializationScope::GlobalSharedRead(
+                "remote-control-clients"
+            ))
+        );
+        let remote_control_clients_revoke = ClientRequest::RemoteControlClientsRevoke {
+            request_id: request_id(),
+            params: v2::RemoteControlClientsRevokeParams {
+                environment_id: "environment-id".to_string(),
+                client_id: "client-id".to_string(),
+            },
+        };
+        assert_eq!(
+            remote_control_clients_revoke.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global(
+                "remote-control-clients"
+            ))
+        );
     }
 
     #[test]
@@ -2303,6 +2379,24 @@ mod tests {
     }
 
     #[test]
+    fn serialize_get_account_token_usage() -> Result<()> {
+        let request = ClientRequest::GetAccountTokenUsage {
+            request_id: RequestId::Integer(1),
+            params: None,
+        };
+        assert_eq!(request.id(), &RequestId::Integer(1));
+        assert_eq!(request.method(), "account/usage/read");
+        assert_eq!(
+            json!({
+                "method": "account/usage/read",
+                "id": 1,
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn serialize_client_response() -> Result<()> {
         let cwd = absolute_path("/tmp");
         let response = ClientResponse::ThreadStart {
@@ -2313,6 +2407,7 @@ mod tests {
                     session_id: "67e55044-10b1-426f-9247-bb680e5fe0c7".to_string(),
                     parent_thread_id: None,
                     forked_from_id: None,
+                    parent_thread_id: None,
                     preview: "first prompt".to_string(),
                     ephemeral: true,
                     model_provider: "openai".to_string(),
@@ -2356,6 +2451,7 @@ mod tests {
                         "sessionId": "67e55044-10b1-426f-9247-bb680e5fe0c7",
                         "parentThreadId": null,
                         "forkedFromId": null,
+                        "parentThreadId": null,
                         "preview": "first prompt",
                         "ephemeral": true,
                         "modelProvider": "openai",
@@ -3151,6 +3247,21 @@ mod tests {
         assert_eq!(
             crate::experimental_api::ExperimentalApi::experimental_reason(&notification),
             Some("thread/settings/updated")
+        );
+    }
+
+    #[test]
+    fn turn_moderation_metadata_notification_is_marked_experimental() {
+        let notification =
+            ServerNotification::TurnModerationMetadata(v2::TurnModerationMetadataNotification {
+                thread_id: "thr_123".to_string(),
+                turn_id: "turn_123".to_string(),
+                metadata: json!({"presentation": "inline"}),
+            });
+
+        assert_eq!(
+            crate::experimental_api::ExperimentalApi::experimental_reason(&notification),
+            Some("turn/moderationMetadata")
         );
     }
 

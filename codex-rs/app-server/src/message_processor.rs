@@ -354,6 +354,8 @@ impl MessageProcessor {
             app_list_shutdown_token,
         );
         let catalog_processor = CatalogRequestProcessor::new(
+            outgoing.clone(),
+            Arc::clone(&skills_watcher),
             auth_manager.clone(),
             Arc::clone(&thread_manager),
             Arc::clone(&config),
@@ -453,14 +455,13 @@ impl MessageProcessor {
                 .plugins_manager()
                 .maybe_start_plugin_startup_tasks_for_config(
                     &config.plugins_config_input(),
-                    auth_manager.clone(),
+                    auth_manager,
                     Some(on_effective_plugins_changed),
                 );
         }
         let config_processor = ConfigRequestProcessor::new(
             outgoing.clone(),
             config_manager.clone(),
-            auth_manager,
             thread_manager.clone(),
             analytics_events_client,
         );
@@ -915,6 +916,21 @@ impl MessageProcessor {
                 .remote_control_processor
                 .status_read()
                 .map(|response| Some(response.into())),
+            ClientRequest::RemoteControlPairingStart { params, .. } => self
+                .remote_control_processor
+                .pairing_start(params, app_server_client_name.as_deref())
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::RemoteControlClientsList { params, .. } => self
+                .remote_control_processor
+                .clients_list(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::RemoteControlClientsRevoke { params, .. } => self
+                .remote_control_processor
+                .clients_revoke(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::ConfigRequirementsRead { params: _, .. } => self
                 .config_processor
                 .config_requirements_read()
@@ -1108,6 +1124,9 @@ impl MessageProcessor {
             ClientRequest::SkillsList { params, .. } => {
                 self.catalog_processor.skills_list(params).await
             }
+            ClientRequest::SkillsExtraRootsSet { params, .. } => {
+                self.catalog_processor.skills_extra_roots_set(params).await
+            }
             ClientRequest::HooksList { params, .. } => {
                 self.catalog_processor.hooks_list(params).await
             }
@@ -1274,6 +1293,9 @@ impl MessageProcessor {
             }
             ClientRequest::GetAccountRateLimits { .. } => {
                 self.account_processor.get_account_rate_limits().await
+            }
+            ClientRequest::GetAccountTokenUsage { .. } => {
+                self.account_processor.get_account_token_usage().await
             }
             ClientRequest::SendAddCreditsNudgeEmail { params, .. } => {
                 self.account_processor

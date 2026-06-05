@@ -1,4 +1,4 @@
-//! Shared argument parsing and dispatch for the v2 text-only agent messaging tools.
+//! Shared argument parsing and dispatch for the v2 agent messaging tools.
 //!
 //! `send_message` and `followup_task` share the same submission path and differ only in whether the
 //! resulting `InterAgentCommunication` should wake the target immediately.
@@ -57,7 +57,7 @@ fn message_content(message: String) -> Result<String, FunctionCallError> {
     Ok(message)
 }
 
-/// Handles the shared MultiAgentV2 plain-text message flow for both `send_message` and `followup_task`.
+/// Handles the shared MultiAgentV2 message flow for both `send_message` and `followup_task`.
 pub(crate) async fn handle_message_string_tool(
     invocation: ToolInvocation,
     mode: MessageDeliveryMode,
@@ -65,13 +65,14 @@ pub(crate) async fn handle_message_string_tool(
     message: String,
     interrupt: bool,
 ) -> Result<FunctionToolOutput, FunctionCallError> {
-    let prompt = message_content(message)?;
+    let message = message_content(message)?;
     let ToolInvocation {
         session,
         turn,
         call_id,
         ..
     } = invocation;
+    let prompt = String::new();
     let receiver_thread_id = resolve_agent_target(&session, &turn, &target).await?;
     let receiver_agent = session
         .services
@@ -85,7 +86,7 @@ pub(crate) async fn handle_message_string_tool(
             .is_some_and(AgentPath::is_root)
     {
         return Err(FunctionCallError::RespondToModel(
-            "Tasks can't be assigned to the root agent".to_string(),
+            "Follow-up tasks can't target the root agent".to_string(),
         ));
     }
     if interrupt {
@@ -102,7 +103,7 @@ pub(crate) async fn handle_message_string_tool(
             CollabAgentInteractionBeginEvent {
                 call_id: call_id.clone(),
                 started_at_ms: now_unix_timestamp_ms(),
-                sender_thread_id: session.conversation_id,
+                sender_thread_id: session.thread_id,
                 receiver_thread_id,
                 prompt: prompt.clone(),
             }
@@ -112,15 +113,11 @@ pub(crate) async fn handle_message_string_tool(
     let receiver_agent_path = receiver_agent.agent_path.clone().ok_or_else(|| {
         FunctionCallError::RespondToModel("target agent is missing an agent_path".to_string())
     })?;
-    let communication = InterAgentCommunication::new(
-        turn.session_source
-            .get_agent_path()
-            .unwrap_or_else(AgentPath::root),
-        receiver_agent_path,
-        Vec::new(),
-        prompt.clone(),
-        /*trigger_turn*/ true,
-    );
+    let author = turn
+        .session_source
+        .get_agent_path()
+        .unwrap_or_else(AgentPath::root);
+    let communication = communication_from_tool_message(author, receiver_agent_path, message);
     let result = session
         .services
         .agent_control
@@ -138,7 +135,7 @@ pub(crate) async fn handle_message_string_tool(
             CollabAgentInteractionEndEvent {
                 call_id,
                 completed_at_ms: now_unix_timestamp_ms(),
-                sender_thread_id: session.conversation_id,
+                sender_thread_id: session.thread_id,
                 receiver_thread_id,
                 receiver_agent_nickname: receiver_agent.agent_nickname,
                 receiver_agent_role: receiver_agent.agent_role,
