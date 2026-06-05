@@ -255,9 +255,13 @@ impl SubagentNotificationHistoryCell {
             return Vec::new();
         };
 
-        let mut body = Vec::new();
         let wrap_width = width.saturating_sub(4).max(1) as usize;
-        append_markdown_agent_with_cwd(detail.trim(), Some(wrap_width), None, &mut body);
+        let rendered = crate::markdown::render_markdown_agent_with_links_and_cwd(
+            detail.trim(),
+            Some(wrap_width),
+            /*cwd*/ None,
+        );
+        let mut body = visible_lines(rendered);
         if body.is_empty() {
             body.extend(raw_lines_from_source(detail.trim_end()));
         }
