@@ -2597,6 +2597,7 @@ async fn empty_config_defaults_to_builtin_profile_for_untrusted_project() -> std
                 project_key,
                 ProjectConfig {
                     trust_level: Some(TrustLevel::Untrusted),
+                    profile: None,
                 },
             )])),
             ..Default::default()

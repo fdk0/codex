@@ -731,8 +731,10 @@ profile = "work"
         tmp.path(),
         Some(cwd),
         &[] as &[(String, TomlValue)],
-        LoaderOverrides::with_managed_config_path_for_tests(managed_path),
-        CloudRequirementsLoader::default(),
+        ConfigLoadOptions {
+            loader_overrides: LoaderOverrides::with_managed_config_path_for_tests(managed_path),
+            ..Default::default()
+        },
         &codex_config::NoopThreadConfigLoader,
     )
     .await
@@ -808,8 +810,10 @@ profile = "work"
         &codex_home,
         Some(cwd),
         &[] as &[(String, TomlValue)],
-        LoaderOverrides::with_managed_config_path_for_tests(managed_path),
-        CloudRequirementsLoader::default(),
+        ConfigLoadOptions {
+            loader_overrides: LoaderOverrides::with_managed_config_path_for_tests(managed_path),
+            ..Default::default()
+        },
         &codex_config::NoopThreadConfigLoader,
     )
     .await
@@ -871,8 +875,10 @@ profile = "work"
         tmp.path(),
         Some(cwd),
         &[] as &[(String, TomlValue)],
-        overrides,
-        CloudRequirementsLoader::default(),
+        ConfigLoadOptions {
+            loader_overrides: overrides,
+            ..Default::default()
+        },
         &codex_config::NoopThreadConfigLoader,
     )
     .await
