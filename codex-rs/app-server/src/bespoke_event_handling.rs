@@ -1473,6 +1473,7 @@ async fn maybe_emit_subagent_notification_item_completed(
         completed_at_ms: now_unix_timestamp_ms(),
         item: ThreadItem::UserMessage {
             id: Uuid::now_v7().to_string(),
+            client_id: None,
             content: vec![V2UserInput::Text {
                 text: event.message.clone(),
                 text_elements: event

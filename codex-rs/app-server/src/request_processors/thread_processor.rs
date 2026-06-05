@@ -3991,13 +3991,15 @@ pub(crate) fn thread_from_stored_thread(
     );
     let history = thread.history;
     let thread_id = thread.thread_id.to_string();
-    let parent_thread_id = thread_parent_id(&source);
+    let parent_thread_id = thread
+        .parent_thread_id
+        .map(|id| id.to_string())
+        .or_else(|| thread_parent_id(&source));
     let thread = Thread {
         id: thread_id.clone(),
         session_id: thread_id,
         parent_thread_id,
         forked_from_id: thread.forked_from_id.map(|id| id.to_string()),
-        parent_thread_id: thread.parent_thread_id.map(|id| id.to_string()),
         preview: thread.preview,
         ephemeral: false,
         model_provider: if thread.model_provider.is_empty() {
@@ -4202,12 +4204,15 @@ fn build_thread_from_snapshot(
     path: Option<PathBuf>,
 ) -> Thread {
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let parent_thread_id = config_snapshot
+        .parent_thread_id
+        .map(|id| id.to_string())
+        .or_else(|| thread_parent_id(&config_snapshot.session_source));
     Thread {
         id: thread_id.to_string(),
         session_id,
-        parent_thread_id: thread_parent_id(&config_snapshot.session_source),
+        parent_thread_id,
         forked_from_id: None,
-        parent_thread_id: config_snapshot.parent_thread_id.map(|id| id.to_string()),
         preview: String::new(),
         ephemeral: config_snapshot.ephemeral,
         model_provider: config_snapshot.model_provider_id.clone(),
