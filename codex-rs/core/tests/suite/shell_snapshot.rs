@@ -1,5 +1,4 @@
 use anyhow::Result;
-use codex_core::shell::ShellType;
 #[cfg(target_os = "linux")]
 use codex_core::shell::get_shell;
 use codex_features::Feature;

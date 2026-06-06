@@ -1072,9 +1072,36 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_message_schemas_are_encrypted() {
+async fn multi_agent_v2_message_schemas_default_to_plaintext() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+    })
+    .await;
+    for tool_name in ["spawn_agent", "send_message", "followup_task"] {
+        let ToolSpec::Function(tool) = plan.visible_spec(tool_name) else {
+            panic!("expected {tool_name} function spec");
+        };
+        let properties = tool
+            .parameters
+            .properties
+            .as_ref()
+            .expect("tool should use object params");
+        assert_eq!(
+            properties
+                .get("message")
+                .and_then(|schema| schema.encrypted),
+            None
+        );
+    }
+}
+
+#[tokio::test]
+async fn multi_agent_v2_message_schemas_can_be_encrypted() {
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        update_config(turn, |config| {
+            config.multi_agent_v2.encrypted_messages = true;
+        });
     })
     .await;
     for tool_name in ["spawn_agent", "send_message", "followup_task"] {

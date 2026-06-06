@@ -60,6 +60,12 @@ const SUBAGENT_STOP_CONTINUATION: &str = "continue only the child";
 const INTERNAL_SUBAGENT_PROMPT: &str = "internal subagent: review";
 
 fn body_contains(req: &wiremock::Request, text: &str) -> bool {
+    decoded_request_body(req)
+        .and_then(|body| String::from_utf8(body).ok())
+        .is_some_and(|body| body.contains(text))
+}
+
+fn decoded_request_body(req: &wiremock::Request) -> Option<Vec<u8>> {
     let is_zstd = req
         .headers
         .get("content-encoding")
@@ -69,14 +75,11 @@ fn body_contains(req: &wiremock::Request, text: &str) -> bool {
                 .split(',')
                 .any(|entry| entry.trim().eq_ignore_ascii_case("zstd"))
         });
-    let bytes = if is_zstd {
+    if is_zstd {
         zstd::stream::decode_all(std::io::Cursor::new(&req.body)).ok()
     } else {
         Some(req.body.clone())
-    };
-    bytes
-        .and_then(|body| String::from_utf8(body).ok())
-        .is_some_and(|body| body.contains(text))
+    }
 }
 
 fn has_subagent_notification(req: &ResponsesRequest) -> bool {
@@ -1155,7 +1158,9 @@ async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
     .await;
     let child_request_log = mount_sse_once_match(
         &server,
-        |req: &wiremock::Request| body_contains(req, "\"type\":\"agent_message\""),
+        |req: &wiremock::Request| {
+            !body_contains(req, TURN_1_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
+        },
         sse(vec![
             ev_response_created("resp-child-1"),
             ev_completed("resp-child-1"),
@@ -1184,6 +1189,7 @@ async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
             .features
             .enable(Feature::MultiAgentV2)
             .expect("test config should allow feature update");
+        config.multi_agent_v2.encrypted_messages = true;
     });
     let test = builder.build(&server).await?;
 

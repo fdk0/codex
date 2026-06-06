@@ -10130,6 +10130,7 @@ subagent_usage_hint_text = "Subagent guidance."
 tool_namespace = "agents"
 hide_spawn_agent_metadata = true
 non_code_mode_only = true
+encrypted_messages = true
 "#,
     )?;
 
@@ -10170,6 +10171,7 @@ non_code_mode_only = true
     );
     assert!(config.multi_agent_v2.hide_spawn_agent_metadata);
     assert!(config.multi_agent_v2.non_code_mode_only);
+    assert!(config.multi_agent_v2.encrypted_messages);
 
     Ok(())
 }
@@ -10227,6 +10229,7 @@ enabled = true
     );
     assert!(config.multi_agent_v2.hide_spawn_agent_metadata);
     assert!(config.multi_agent_v2.non_code_mode_only);
+    assert!(!config.multi_agent_v2.encrypted_messages);
 
     Ok(())
 }

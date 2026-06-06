@@ -5,7 +5,16 @@ use super::*;
 use crate::tools::handlers::multi_agents_spec::create_send_message_tool;
 use codex_tools::ToolSpec;
 
-pub(crate) struct Handler;
+#[derive(Default)]
+pub(crate) struct Handler {
+    encrypted_messages: bool,
+}
+
+impl Handler {
+    pub(crate) fn new(encrypted_messages: bool) -> Self {
+        Self { encrypted_messages }
+    }
+}
 
 #[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for Handler {
@@ -14,7 +23,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
     }
 
     fn spec(&self) -> ToolSpec {
-        create_send_message_tool()
+        create_send_message_tool(self.encrypted_messages)
     }
 
     async fn handle(

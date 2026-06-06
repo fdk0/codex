@@ -218,7 +218,7 @@ async fn write_shell_snapshot(
     cwd: &AbsolutePathBuf,
     env_overrides: &[(&str, &str)],
 ) -> Result<()> {
-    let shell_type = shell.shell_type.clone();
+    let shell_type = shell.shell_type;
     if shell_type == ShellType::PowerShell || shell_type == ShellType::Cmd {
         bail!("Shell snapshot not supported yet for {shell_type:?}");
     }
@@ -245,7 +245,7 @@ async fn capture_snapshot(
     cwd: &AbsolutePathBuf,
     env_overrides: &[(&str, &str)],
 ) -> Result<String> {
-    let shell_type = shell.shell_type.clone();
+    let shell_type = shell.shell_type;
     match shell_type {
         ShellType::Zsh => run_shell_script(shell, &zsh_snapshot_script(), cwd, env_overrides).await,
         ShellType::Bash => {

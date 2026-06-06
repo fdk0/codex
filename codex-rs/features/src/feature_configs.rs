@@ -56,6 +56,8 @@ pub struct MultiAgentV2ConfigToml {
     pub hide_spawn_agent_metadata: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub non_code_mode_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted_messages: Option<bool>,
 }
 
 impl FeatureConfig for MultiAgentV2ConfigToml {

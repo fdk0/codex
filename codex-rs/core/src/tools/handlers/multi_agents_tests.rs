@@ -1151,7 +1151,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
             turn.clone(),
             "spawn_agent",
             function_payload(json!({
-                "message": "encrypted-spawn-message",
+                "message": "spawn-message",
                 "task_name": "test_process"
             })),
         ))
@@ -1187,20 +1187,20 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
                     if communication.author == AgentPath::root()
                         && communication.recipient.as_str() == "/root/test_process"
                         && communication.other_recipients.is_empty()
-                        && communication.content.is_empty()
-                        && communication.encrypted_content.as_deref() == Some("encrypted-spawn-message")
+                        && communication.content == "spawn-message"
+                        && communication.encrypted_content.is_none()
                         && communication.trigger_turn
             )
     }));
 
-    SendMessageHandlerV2
+    SendMessageHandlerV2::default()
         .handle(invocation(
             session.clone(),
             turn.clone(),
             "send_message",
             function_payload(json!({
                 "target": "test_process",
-                "message": "encrypted-send-message"
+                "message": "send-message"
             })),
         ))
         .await
@@ -1214,8 +1214,8 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
                     if communication.author == AgentPath::root()
                         && communication.recipient.as_str() == "/root/test_process"
                         && communication.other_recipients.is_empty()
-                        && communication.content.is_empty()
-                        && communication.encrypted_content.as_deref() == Some("encrypted-send-message")
+                        && communication.content == "send-message"
+                        && communication.encrypted_content.is_none()
                         && !communication.trigger_turn
             )
     }));
@@ -1390,14 +1390,14 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
         agent_role: None,
     });
 
-    SendMessageHandlerV2
+    SendMessageHandlerV2::default()
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
             "send_message",
             function_payload(json!({
                 "target": "/root",
-                "message": "encrypted-done"
+                "message": "done"
             })),
         ))
         .await
@@ -1411,8 +1411,8 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
                     if communication.author == child_path
                         && communication.recipient == AgentPath::root()
                         && communication.other_recipients.is_empty()
-                        && communication.content.is_empty()
-                        && communication.encrypted_content.as_deref() == Some("encrypted-done")
+                        && communication.content == "done"
+                        && communication.encrypted_content.is_none()
                         && !communication.trigger_turn
             )
     }));
@@ -1467,7 +1467,7 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
         agent_role: None,
     });
 
-    let Err(err) = FollowupTaskHandlerV2
+    let Err(err) = FollowupTaskHandlerV2::default()
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -1791,7 +1791,7 @@ async fn multi_agent_v2_send_message_rejects_legacy_items_field() {
         })),
     );
 
-    let Err(err) = SendMessageHandlerV2.handle(invocation).await else {
+    let Err(err) = SendMessageHandlerV2::default().handle(invocation).await else {
         panic!("legacy items field should be rejected in v2");
     };
     let FunctionCallError::RespondToModel(message) = err else {
@@ -1847,7 +1847,7 @@ async fn multi_agent_v2_send_message_rejects_interrupt_parameter() {
         })),
     );
 
-    let Err(err) = SendMessageHandlerV2.handle(invocation).await else {
+    let Err(err) = SendMessageHandlerV2::default().handle(invocation).await else {
         panic!("send_message interrupt parameter should be rejected");
     };
     let FunctionCallError::RespondToModel(message) = err else {
@@ -1935,7 +1935,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         )
         .await;
 
-    FollowupTaskHandlerV2
+    FollowupTaskHandlerV2::default()
         .handle(invocation(
             session,
             turn,
@@ -2063,7 +2063,7 @@ async fn multi_agent_v2_followup_task_rejects_legacy_items_field() {
         })),
     );
 
-    let Err(err) = FollowupTaskHandlerV2.handle(invocation).await else {
+    let Err(err) = FollowupTaskHandlerV2::default().handle(invocation).await else {
         panic!("legacy items field should be rejected in v2");
     };
     let FunctionCallError::RespondToModel(message) = err else {

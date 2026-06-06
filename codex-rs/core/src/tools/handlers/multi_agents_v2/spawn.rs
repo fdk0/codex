@@ -135,7 +135,12 @@ async fn handle_spawn_agent(
                         .session_source
                         .get_agent_path()
                         .unwrap_or_else(AgentPath::root);
-                    let communication = communication_from_tool_message(author, recipient, message);
+                    let communication = communication_from_tool_message(
+                        author,
+                        recipient,
+                        message,
+                        turn.config.multi_agent_v2.encrypted_messages,
+                    );
                     Op::InterAgentCommunication { communication }
                 }
                 (_, initial_operation) => initial_operation,
