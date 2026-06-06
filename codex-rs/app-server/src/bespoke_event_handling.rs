@@ -2273,6 +2273,7 @@ mod tests {
     fn subagent_notification_item_events_are_suppressed() {
         let item = TurnItem::UserMessage(codex_protocol::items::UserMessageItem {
             id: "subagent-notification".to_string(),
+            client_id: None,
             content: vec![CoreUserInput::Text {
                 text: "<subagent_notification>{}</subagent_notification>".to_string(),
                 text_elements: Vec::new(),
@@ -2301,6 +2302,7 @@ mod tests {
     fn regular_user_message_item_events_are_not_suppressed() {
         let item = TurnItem::UserMessage(codex_protocol::items::UserMessageItem {
             id: "regular-user-message".to_string(),
+            client_id: None,
             content: vec![CoreUserInput::Text {
                 text: "hello".to_string(),
                 text_elements: Vec::new(),

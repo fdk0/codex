@@ -901,7 +901,6 @@ mod tests {
             path: None,
             cwd: test_path_buf("/tmp").abs(),
             cli_version: "test".to_string(),
-            parent_thread_id: None,
             agent_nickname: None,
             agent_role: None,
             source,

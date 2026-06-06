@@ -311,7 +311,6 @@ pub(crate) fn summary_to_thread(
         session_id: thread_id,
         parent_thread_id,
         forked_from_id: None,
-        parent_thread_id: None,
         preview,
         ephemeral: false,
         model_provider,
