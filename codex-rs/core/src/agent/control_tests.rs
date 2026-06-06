@@ -2159,6 +2159,130 @@ async fn completion_watcher_notifies_parent_when_child_is_missing() {
 }
 
 #[tokio::test]
+async fn wake_enabled_child_keeps_parent_lifecycle_pending_until_notified() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let (child_thread_id, child_thread) = harness.start_thread().await;
+    let parent_control = parent_thread.codex.session.services.agent_control.clone();
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: Some("explorer".to_string()),
+    });
+    parent_control
+        .register_parent_wake_subscription(
+            child_thread_id,
+            Some(&session_source),
+            /*wake_parent_on_completion*/ true,
+            AgentWakeDescendantPolicy::Immediate,
+        )
+        .await;
+    parent_control
+        .maybe_start_completion_watcher(
+            child_thread_id,
+            Some(session_source),
+            child_thread_id.to_string(),
+            /*child_agent_path*/ None,
+            CompletionWatcherMode::CurrentOrNextTerminal,
+        )
+        .await;
+
+    assert!(parent_thread.has_pending_wake_enabled_children().await);
+
+    let child_turn = child_thread.codex.session.new_default_turn().await;
+    child_thread
+        .codex
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: child_turn.sub_id.clone(),
+                last_agent_message: Some("done".to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    child_thread.codex.session.active_turn.lock().await.take();
+
+    assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);
+    timeout(Duration::from_secs(5), async {
+        while parent_thread.has_pending_wake_enabled_children().await {
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("parent lifecycle should stop being pending after wake delivery");
+}
+
+#[tokio::test]
+async fn completion_watcher_keeps_notification_pending_when_parent_missing() {
+    let harness = AgentControlHarness::new().await;
+    let missing_parent_thread_id = ThreadId::new();
+    let (child_thread_id, child_thread) = harness.start_thread().await;
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: missing_parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: Some("explorer".to_string()),
+    });
+    harness
+        .control
+        .register_parent_wake_subscription(
+            child_thread_id,
+            Some(&session_source),
+            /*wake_parent_on_completion*/ true,
+            AgentWakeDescendantPolicy::Immediate,
+        )
+        .await;
+    harness
+        .control
+        .maybe_start_completion_watcher(
+            child_thread_id,
+            Some(session_source),
+            child_thread_id.to_string(),
+            /*child_agent_path*/ None,
+            CompletionWatcherMode::CurrentOrNextTerminal,
+        )
+        .await;
+
+    let child_turn = child_thread.codex.session.new_default_turn().await;
+    child_thread
+        .codex
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: child_turn.sub_id.clone(),
+                last_agent_message: Some("done".to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    child_thread.codex.session.active_turn.lock().await.take();
+    sleep(Duration::from_millis(500)).await;
+
+    let subscriptions = harness.control.parent_wake_subscriptions.lock().await;
+    let subscription = subscriptions
+        .get(&child_thread_id)
+        .expect("child wake subscription should remain registered");
+    assert_eq!(subscription.last_notified_generation, None);
+    drop(subscriptions);
+    assert!(
+        harness
+            .control
+            .has_pending_wake_enabled_children_for_parent(missing_parent_thread_id)
+            .await
+    );
+}
+
+#[tokio::test]
 async fn spawn_thread_subagent_gets_random_nickname_in_session_source() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, _parent_thread) = harness.start_thread().await;

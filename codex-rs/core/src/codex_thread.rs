@@ -428,6 +428,15 @@ impl CodexThread {
         self.codex.agent_status().await
     }
 
+    pub async fn has_pending_wake_enabled_children(&self) -> bool {
+        self.codex
+            .session
+            .services
+            .agent_control
+            .has_pending_wake_enabled_children_for_parent(self.codex.session.thread_id())
+            .await
+    }
+
     pub(crate) fn subscribe_status(&self) -> watch::Receiver<AgentStatus> {
         self.codex.agent_status.clone()
     }

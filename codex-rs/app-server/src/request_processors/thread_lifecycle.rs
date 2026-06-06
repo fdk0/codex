@@ -351,6 +351,10 @@ pub(super) async fn ensure_listener_task_running(
                         unloading_state.note_thread_activity_observed();
                         continue;
                     }
+                    if conversation.has_pending_wake_enabled_children().await {
+                        unloading_state.note_thread_activity_observed();
+                        continue;
+                    }
                     {
                         let mut pending_thread_unloads = pending_thread_unloads.lock().await;
                         if pending_thread_unloads.contains(&conversation_id) {
