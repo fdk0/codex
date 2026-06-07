@@ -95,10 +95,10 @@ impl AgentControl {
 
         let mut status_rx = self.subscribe_status(child_thread_id).await.ok()?;
         let current_status = status_rx.borrow().clone();
-        if !is_final(&current_status) {
-            return None;
+        let current_status_is_final = is_final(&current_status);
+        if current_status_is_final {
+            let _ = status_rx.borrow_and_update();
         }
-        let _ = status_rx.borrow_and_update();
 
         let wake_descendant_policy = self.read_wake_descendant_policy(child_thread_id).await;
         let mut subscriptions = self.parent_wake_subscriptions.lock().await;
@@ -106,7 +106,12 @@ impl AgentControl {
         if let Some(wake_descendant_policy) = wake_descendant_policy {
             subscription.wake_descendant_policy = wake_descendant_policy;
         }
-        let current_generation = subscription.completion_watcher_generation;
+        let previous_generation = subscription.completion_watcher_generation;
+        if !current_status_is_final
+            && subscription.last_notified_generation != Some(previous_generation)
+        {
+            return None;
+        }
         let child_agent_path = subscription.child_agent_path.clone();
         let child_reference = subscription.child_reference.clone();
         subscription.completion_watcher_generation =
@@ -115,7 +120,8 @@ impl AgentControl {
         let parent_thread_id = subscription.parent_thread_id;
         drop(subscriptions);
 
-        if !suppress_immediate_parent_notification
+        if current_status_is_final
+            && !suppress_immediate_parent_notification
             && !self.leaf_only_wake_blocked(child_thread_id).await
         {
             self.notify_completion_to_parent(
@@ -123,7 +129,7 @@ impl AgentControl {
                 parent_thread_id,
                 child_reference.clone(),
                 child_agent_path.clone(),
-                current_generation,
+                previous_generation,
                 current_status,
             )
             .await;

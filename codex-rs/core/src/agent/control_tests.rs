@@ -2283,6 +2283,128 @@ async fn completion_watcher_keeps_notification_pending_when_parent_missing() {
 }
 
 #[tokio::test]
+async fn trigger_turn_rearms_wake_subscription_even_when_child_is_running() {
+    let harness = AgentControlHarness::new().await;
+    let mut config = harness.config.clone();
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let root = harness
+        .manager
+        .start_thread(config.clone())
+        .await
+        .expect("root thread should start");
+    let child = harness
+        .manager
+        .start_thread(config)
+        .await
+        .expect("child thread should start");
+    let child_path = AgentPath::root().join("dispatcher").expect("child path");
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: root.thread_id,
+        depth: 1,
+        agent_path: Some(child_path.clone()),
+        agent_nickname: None,
+        agent_role: Some("dispatcher".to_string()),
+    });
+    harness
+        .control
+        .register_parent_wake_subscription(
+            child.thread_id,
+            Some(&session_source),
+            /*wake_parent_on_completion*/ true,
+            AgentWakeDescendantPolicy::LeafOnly,
+        )
+        .await;
+    {
+        let mut subscriptions = harness.control.parent_wake_subscriptions.lock().await;
+        let subscription = subscriptions
+            .get_mut(&child.thread_id)
+            .expect("child wake subscription should be registered");
+        subscription.last_notified_generation = Some(subscription.completion_watcher_generation);
+    }
+
+    let child_turn = child.thread.codex.session.new_default_turn().await;
+    child
+        .thread
+        .codex
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: child_turn.sub_id.clone(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: ModeKind::Default,
+            }),
+        )
+        .await;
+
+    harness
+        .control
+        .send_inter_agent_communication(
+            child.thread_id,
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                child_path.clone(),
+                Vec::new(),
+                "continue".to_string(),
+                /*trigger_turn*/ true,
+            ),
+        )
+        .await
+        .expect("follow-up communication should submit");
+
+    child
+        .thread
+        .codex
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: child_turn.sub_id.clone(),
+                last_agent_message: Some("second done".to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    child.thread.codex.session.active_turn.lock().await.take();
+
+    let expected_message = crate::session_prefix::format_subagent_notification_message(
+        child_path.as_str(),
+        &AgentStatus::Completed(Some("second done".to_string())),
+    );
+    let expected = (
+        root.thread_id,
+        Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                child_path,
+                AgentPath::root(),
+                Vec::new(),
+                expected_message,
+                /*trigger_turn*/ true,
+            ),
+        },
+    );
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let captured = harness
+                .manager
+                .captured_ops()
+                .into_iter()
+                .find(|entry| *entry == expected);
+            if captured == Some(expected.clone()) {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("triggered running child should re-arm and wake parent on completion");
+}
+
+#[tokio::test]
 async fn spawn_thread_subagent_gets_random_nickname_in_session_source() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, _parent_thread) = harness.start_thread().await;

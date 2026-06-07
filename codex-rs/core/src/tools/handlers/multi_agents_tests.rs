@@ -1918,6 +1918,10 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         .await
         .expect("worker thread should exist");
     let worker_path = AgentPath::try_from("/root/worker").expect("worker path");
+    let first_notification = format_subagent_notification_message(
+        worker_path.as_str(),
+        &AgentStatus::Completed(Some("first done".to_string())),
+    );
 
     let first_turn = thread.codex.session.new_default_turn().await;
     thread
@@ -1934,6 +1938,43 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
             }),
         )
         .await;
+    thread.codex.session.active_turn.lock().await.take();
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let first_count = manager
+                .captured_ops()
+                .into_iter()
+                .filter_map(|(id, op)| {
+                    (id == root.thread_id)
+                        .then_some(op)
+                        .and_then(|op| match op {
+                            Op::InterAgentCommunication { communication }
+                                if communication.author == worker_path
+                                    && communication.recipient == AgentPath::root()
+                                    && communication.other_recipients.is_empty()
+                                    && !communication.trigger_turn =>
+                            {
+                                Some(communication.content)
+                            }
+                            _ => None,
+                        })
+                })
+                .filter(|message| *message == first_notification)
+                .count();
+            if first_count == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|err| {
+        panic!(
+            "parent should receive the first completion notification before reuse: {err:?}; ops={:#?}",
+            manager.captured_ops()
+        )
+    });
 
     FollowupTaskHandlerV2::default()
         .handle(invocation(
@@ -1963,11 +2004,8 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
             }),
         )
         .await;
+    thread.codex.session.active_turn.lock().await.take();
 
-    let first_notification = format_subagent_notification_message(
-        worker_path.as_str(),
-        &AgentStatus::Completed(Some("first done".to_string())),
-    );
     let second_notification = format_subagent_notification_message(
         worker_path.as_str(),
         &AgentStatus::Completed(Some("second done".to_string())),
