@@ -366,6 +366,26 @@ impl UnifiedExecProcessManager {
         }
     }
 
+    pub(crate) async fn pending_process_ids_for_session(
+        &self,
+        session: &Arc<crate::session::session::Session>,
+    ) -> Vec<i32> {
+        let store = self.process_store.lock().await;
+        let mut process_ids = store
+            .processes
+            .values()
+            .filter(|entry| {
+                entry
+                    .session
+                    .upgrade()
+                    .is_some_and(|entry_session| Arc::ptr_eq(&entry_session, session))
+            })
+            .map(|entry| entry.process_id)
+            .collect::<Vec<_>>();
+        process_ids.sort_unstable();
+        process_ids
+    }
+
     pub(crate) async fn exec_command(
         &self,
         request: ExecCommandRequest,

@@ -274,6 +274,51 @@ async fn unified_exec_persists_across_requests() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_process_ids_are_scoped_to_session() -> anyhow::Result<()> {
+    skip_if_sandbox!(Ok(()));
+
+    let (session, turn) = test_session_and_turn().await;
+    let (other_session, _) = test_session_and_turn().await;
+
+    let open_shell = exec_command(
+        &session, &turn, "bash -i", /*yield_time_ms*/ 2_500, /*workdir*/ None,
+    )
+    .await?;
+    let process_id = open_shell.process_id.expect("expected process_id");
+
+    assert_eq!(
+        session
+            .services
+            .unified_exec_manager
+            .pending_process_ids_for_session(&session)
+            .await,
+        vec![process_id]
+    );
+    assert_eq!(
+        session
+            .services
+            .unified_exec_manager
+            .pending_process_ids_for_session(&other_session)
+            .await,
+        Vec::<i32>::new()
+    );
+
+    write_stdin(&session, process_id, "exit\n", /*yield_time_ms*/ 2_500).await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(
+        session
+            .services
+            .unified_exec_manager
+            .pending_process_ids_for_session(&session)
+            .await,
+        Vec::<i32>::new()
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multi_unified_exec_sessions() -> anyhow::Result<()> {
     skip_if_sandbox!(Ok(()));
 

@@ -1997,6 +1997,112 @@ async fn write_stdin_returns_exit_metadata_and_clears_session() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn silent_completed_response_with_pending_exec_session_forces_follow_up() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    skip_if_windows!(Ok(()));
+
+    let server = start_mock_server().await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::UnifiedExec)
+            .expect("test config should allow feature update");
+    });
+    let test = builder.build_with_remote_env(&server).await?;
+
+    let start_call_id = "uexec-silent-start";
+    let exit_call_id = "uexec-silent-exit";
+    let start_args = serde_json::json!({
+        "cmd": "/bin/cat",
+        "yield_time_ms": 500,
+        "tty": true,
+    });
+    let exit_args = serde_json::json!({
+        "chars": "\u{0004}",
+        "session_id": 1000,
+        "yield_time_ms": 500,
+    });
+
+    let responses = vec![
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_function_call(
+                start_call_id,
+                "exec_command",
+                &serde_json::to_string(&start_args)?,
+            ),
+            ev_completed("resp-1"),
+        ]),
+        sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),
+        sse(vec![
+            ev_response_created("resp-3"),
+            ev_function_call(
+                exit_call_id,
+                "write_stdin",
+                &serde_json::to_string(&exit_args)?,
+            ),
+            ev_completed("resp-3"),
+        ]),
+        sse(vec![
+            ev_assistant_message("msg-1", "command completed"),
+            ev_completed("resp-4"),
+        ]),
+    ];
+    let request_log = mount_sse_sequence(&server, responses).await;
+
+    submit_unified_exec_turn(
+        &test,
+        "test silent completion with pending unified exec",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = request_log.requests();
+    assert_eq!(
+        4,
+        requests.len(),
+        "pending unified exec should force an additional follow-up request"
+    );
+    let request_bodies = requests
+        .iter()
+        .map(core_test_support::responses::ResponsesRequest::body_json)
+        .collect::<Vec<_>>();
+    let follow_up_input = serde_json::to_string(&request_bodies[2]["input"])?;
+    assert!(
+        follow_up_input.contains("command session is still pending"),
+        "follow-up request should include pending exec reminder: {follow_up_input}"
+    );
+    assert!(
+        follow_up_input.contains("session ID(s) 1000"),
+        "follow-up reminder should include the pending process id: {follow_up_input}"
+    );
+
+    let outputs = collect_tool_outputs(&request_bodies)?;
+    let start_output = outputs
+        .get(start_call_id)
+        .expect("missing start output for exec_command");
+    assert_eq!(Some("1000"), start_output.process_id.as_deref());
+
+    let exit_output = outputs
+        .get(exit_call_id)
+        .expect("missing exit output for write_stdin");
+    assert_eq!(Some(0), exit_output.exit_code);
+    assert!(
+        exit_output.process_id.is_none(),
+        "write_stdin should omit process_id after the process exits"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_emits_end_event_when_session_dies_via_stdin() -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));

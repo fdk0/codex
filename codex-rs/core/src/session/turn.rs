@@ -17,6 +17,8 @@ use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
 use crate::context::ContextualUserFragment;
+use crate::context::InternalContextSource;
+use crate::context::InternalModelContextFragment;
 use crate::feedback_tags;
 use crate::goals::GoalRuntimeEvent;
 use crate::hook_runtime::inspect_pending_input;
@@ -194,6 +196,7 @@ pub(crate) async fn run_turn(
 
     let mut last_agent_message: Option<String> = None;
     let mut stop_hook_active = false;
+    let mut pending_unified_exec_reminder_count = 0usize;
     // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
     // many turns, from the perspective of the user, it is a single turn.
     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(
@@ -313,6 +316,38 @@ pub(crate) async fn run_turn(
 
                 if !needs_follow_up {
                     last_agent_message = sampling_request_last_agent_message;
+                    if last_agent_message.is_none() {
+                        let pending_process_ids = sess
+                            .services
+                            .unified_exec_manager
+                            .pending_process_ids_for_session(&sess)
+                            .await;
+                        if !pending_process_ids.is_empty()
+                            && pending_unified_exec_reminder_count < 2
+                        {
+                            pending_unified_exec_reminder_count += 1;
+                            let process_ids = pending_process_ids
+                                .iter()
+                                .map(i32::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let reminder = ContextualUserFragment::into(
+                                InternalModelContextFragment::new(
+                                    InternalContextSource::from_static("unified_exec"),
+                                    format!(
+                                        "A command session is still pending and has not returned terminal output to the model: session ID(s) {process_ids}.\n\
+                                         Do not end the turn silently. Continue by calling write_stdin with empty chars for each pending session until it returns exit metadata, or provide a final assistant message that explicitly states the session is intentionally left running and why."
+                                    ),
+                                ),
+                            );
+                            sess.record_conversation_items(
+                                &turn_context,
+                                std::slice::from_ref(&reminder),
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
                     let stop_outcome = run_turn_stop_hooks(
                         &sess,
                         &turn_context,
