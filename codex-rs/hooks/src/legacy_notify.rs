@@ -1,13 +1,17 @@
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
+use tokio::process::Child;
 
 use crate::Hook;
 use crate::HookEvent;
 use crate::HookPayload;
 use crate::HookResult;
 use crate::command_from_argv;
+
+const LEGACY_NOTIFY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Legacy notify payload appended as the final argv argument for backward compatibility.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -59,13 +63,49 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null());
+                command.kill_on_drop(true);
 
                 match command.spawn() {
-                    Ok(_) => HookResult::Success,
+                    Ok(child) => {
+                        tokio::spawn(wait_for_legacy_notify_child(child, LEGACY_NOTIFY_TIMEOUT));
+                        HookResult::Success
+                    }
                     Err(err) => HookResult::FailedContinue(err.into()),
                 }
             })
         }),
+    }
+}
+
+async fn wait_for_legacy_notify_child(mut child: Child, timeout: Duration) {
+    let child_id = child.id();
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => {
+            if !status.success() {
+                tracing::warn!(
+                    ?child_id,
+                    %status,
+                    "legacy notify command exited unsuccessfully"
+                );
+            }
+        }
+        Ok(Err(err)) => {
+            tracing::warn!(?child_id, "failed to wait for legacy notify command: {err}");
+        }
+        Err(_) => {
+            tracing::warn!(
+                ?child_id,
+                timeout_ms = timeout.as_millis(),
+                "legacy notify command timed out; terminating"
+            );
+            if let Err(err) = child.start_kill() {
+                tracing::warn!(?child_id, "failed to kill legacy notify command: {err}");
+                return;
+            }
+            if let Err(err) = child.wait().await {
+                tracing::warn!(?child_id, "failed to reap legacy notify command: {err}");
+            }
+        }
     }
 }
 
@@ -78,6 +118,10 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::Value;
     use serde_json::json;
+    #[cfg(unix)]
+    use std::time::Instant;
+    #[cfg(unix)]
+    use tokio::process::Command;
 
     use super::*;
     use crate::HookEventAfterAgent;
@@ -141,6 +185,28 @@ mod tests {
         let actual: Value = serde_json::from_str(&serialized)?;
         assert_eq!(actual, expected_notification_json());
 
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_notify_child_timeout_reaps_hung_process() -> Result<()> {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let child = command.spawn()?;
+        let started = Instant::now();
+
+        wait_for_legacy_notify_child(child, Duration::from_millis(50)).await;
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "hung legacy notify child should be killed promptly"
+        );
         Ok(())
     }
 }

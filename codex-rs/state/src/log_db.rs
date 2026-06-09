@@ -28,6 +28,8 @@ use std::time::UNIX_EPOCH;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::Event;
+use tracing::Level;
+use tracing::Metadata;
 use tracing::field::Field;
 use tracing::field::Visit;
 use tracing::span::Attributes;
@@ -47,6 +49,17 @@ use crate::StateRuntime;
 const LOG_QUEUE_CAPACITY: usize = 512;
 const LOG_BATCH_SIZE: usize = 128;
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
+const LOW_LEVEL_TARGETS_OMITTED_FROM_PERSISTENT_LOGS: &[&str] = &[
+    "codex_api::endpoint::responses_websocket",
+    "codex_api::sse::responses",
+    "codex_app_server::outgoing_message",
+    "h2",
+    "hyper_util",
+    "log",
+    "opentelemetry_sdk",
+    "tokio_tungstenite",
+    "tungstenite",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LogSinkQueueConfig {
@@ -189,14 +202,7 @@ where
 
     fn on_event(&self, event: &Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
         let metadata = event.metadata();
-        // The SDK emits DEBUG timer meta-events every second per process; these
-        // were over 30% of retained logs in measured high-fanout Codex environments.
-        if metadata.target() == "opentelemetry_sdk"
-            && matches!(
-                *metadata.level(),
-                tracing::Level::TRACE | tracing::Level::DEBUG
-            )
-        {
+        if !should_persist_event(metadata) {
             return;
         }
 
@@ -227,6 +233,24 @@ where
 
         self.try_send(entry);
     }
+}
+
+fn should_persist_event(metadata: &Metadata<'_>) -> bool {
+    if !matches!(*metadata.level(), Level::TRACE | Level::DEBUG) {
+        return true;
+    }
+
+    let target = metadata.target();
+    !LOW_LEVEL_TARGETS_OMITTED_FROM_PERSISTENT_LOGS
+        .iter()
+        .any(|prefix| matches_target_or_child(target, prefix))
+}
+
+fn matches_target_or_child(target: &str, prefix: &str) -> bool {
+    target == prefix
+        || target
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with("::"))
 }
 
 impl<S> LogWriter<S> for LogDbLayer

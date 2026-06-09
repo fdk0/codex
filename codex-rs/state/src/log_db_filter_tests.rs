@@ -7,7 +7,7 @@ use uuid::Uuid;
 use super::*;
 
 #[tokio::test]
-async fn sqlite_sink_drops_low_level_opentelemetry_sdk_logs() {
+async fn sqlite_sink_drops_noisy_low_level_logs() {
     let codex_home =
         std::env::temp_dir().join(format!("codex-state-log-db-filter-{}", Uuid::new_v4()));
     let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
@@ -25,7 +25,15 @@ async fn sqlite_sink_drops_low_level_opentelemetry_sdk_logs() {
 
     tracing::trace!(target: "opentelemetry_sdk", "dropped-trace");
     tracing::debug!(target: "opentelemetry_sdk", "dropped-debug");
+    tracing::trace!(target: "log", "dropped-log-bridge-trace");
+    tracing::debug!(target: "hyper_util::client::legacy::pool", "dropped-hyper-debug");
+    tracing::trace!(
+        target: "codex_api::endpoint::responses_websocket",
+        "dropped-websocket-frame"
+    );
+    tracing::trace!(target: "codex_api::sse::responses", "dropped-sse-frame");
     tracing::info!(target: "opentelemetry_sdk", "retained-info");
+    tracing::warn!(target: "log", "retained-warn");
     tracing::trace!(target: "codex_state", "retained-trace");
 
     layer.flush().await;
@@ -45,6 +53,7 @@ async fn sqlite_sink_drops_low_level_opentelemetry_sdk_logs() {
             .collect::<Vec<_>>(),
         vec![
             ("INFO", "opentelemetry_sdk", Some("retained-info")),
+            ("WARN", "log", Some("retained-warn")),
             ("TRACE", "codex_state", Some("retained-trace")),
         ]
     );
