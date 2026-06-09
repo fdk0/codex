@@ -19,6 +19,7 @@ use codex_app_server_protocol::JSONRPCRequest;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
@@ -30,6 +31,7 @@ use codex_core::config::ConfigBuilder;
 use codex_exec_server::EnvironmentManager;
 use codex_feedback::CodexFeedback;
 use codex_login::AuthManager;
+use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
 use opentelemetry::global;
@@ -456,7 +458,7 @@ async fn read_response<T: serde::de::DeserializeOwned>(
 
 async fn read_thread_started_notification(
     outgoing_rx: &mut mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
-) {
+) -> ThreadStartedNotification {
     loop {
         let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), outgoing_rx.recv())
             .await
@@ -476,11 +478,10 @@ async fn read_thread_started_notification(
                 else {
                     continue;
                 };
-                if matches!(
-                    notification,
-                    codex_app_server_protocol::ServerNotification::ThreadStarted(_)
-                ) {
-                    return;
+                if let codex_app_server_protocol::ServerNotification::ThreadStarted(notification) =
+                    notification
+                {
+                    return notification;
                 }
             }
             crate::outgoing_message::OutgoingEnvelope::Broadcast { message } => {
@@ -489,11 +490,10 @@ async fn read_thread_started_notification(
                 else {
                     continue;
                 };
-                if matches!(
-                    notification,
-                    codex_app_server_protocol::ServerNotification::ThreadStarted(_)
-                ) {
-                    return;
+                if let codex_app_server_protocol::ServerNotification::ThreadStarted(notification) =
+                    notification
+                {
+                    return notification;
                 }
             }
         }
@@ -538,6 +538,28 @@ where
     })
     .await;
     spans.into_iter().skip(baseline_len).collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auto_attach_emits_thread_started_for_discovered_thread() -> Result<()> {
+    let mut harness = TracingHarness::new().await?;
+    let thread_start_response = harness.start_thread(/*request_id*/ 2, /*trace*/ None).await;
+    let thread_id = ThreadId::from_string(&thread_start_response.thread.id)?;
+
+    harness
+        .processor
+        .thread_processor
+        .try_attach_thread_listener(thread_id, vec![TEST_CONNECTION_ID])
+        .await;
+
+    let notification = read_thread_started_notification(&mut harness.outgoing_rx).await;
+    assert_eq!(notification.thread.id, thread_start_response.thread.id);
+    assert_eq!(
+        notification.thread.parent_thread_id,
+        thread_start_response.thread.parent_thread_id
+    );
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test]

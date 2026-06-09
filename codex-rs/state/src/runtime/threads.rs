@@ -115,6 +115,39 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
         Ok(())
     }
 
+    /// Close older open siblings that use the same canonical agent path.
+    ///
+    /// Agent paths are the live addressing key for thread-spawn agents. If a replacement thread is
+    /// created for the same path, the previous open edge must not remain resumable/listable under
+    /// the same parent.
+    pub async fn close_open_thread_spawn_siblings_by_path(
+        &self,
+        parent_thread_id: ThreadId,
+        child_thread_id: ThreadId,
+        agent_path: &str,
+    ) -> anyhow::Result<u64> {
+        let result = sqlx::query(
+            r#"
+UPDATE thread_spawn_edges
+SET status = ?
+WHERE parent_thread_id = ?
+  AND child_thread_id != ?
+  AND status = ?
+  AND child_thread_id IN (
+      SELECT id FROM threads WHERE agent_path = ?
+  )
+            "#,
+        )
+        .bind(crate::DirectionalThreadSpawnEdgeStatus::Closed.as_ref())
+        .bind(parent_thread_id.to_string())
+        .bind(child_thread_id.to_string())
+        .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
+        .bind(agent_path)
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// List direct spawned children of `parent_thread_id` whose edge matches `status`.
     pub async fn list_thread_spawn_children_with_status(
         &self,
@@ -157,7 +190,7 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
             .await
     }
 
-    /// Find a direct spawned child of `parent_thread_id` by canonical agent path.
+    /// Find an open direct spawned child of `parent_thread_id` by canonical agent path.
     pub async fn find_thread_spawn_child_by_path(
         &self,
         parent_thread_id: ThreadId,
@@ -169,19 +202,21 @@ SELECT threads.id
 FROM thread_spawn_edges
 JOIN threads ON threads.id = thread_spawn_edges.child_thread_id
 WHERE thread_spawn_edges.parent_thread_id = ?
+  AND thread_spawn_edges.status = ?
   AND threads.agent_path = ?
-ORDER BY threads.id
+ORDER BY threads.created_at_ms DESC, threads.id DESC
 LIMIT 2
             "#,
         )
         .bind(parent_thread_id.to_string())
+        .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
         .bind(agent_path)
         .fetch_all(self.pool.as_ref())
         .await?;
         one_thread_id_from_rows(rows, agent_path)
     }
 
-    /// Find a spawned descendant of `root_thread_id` by canonical agent path.
+    /// Find an open spawned descendant of `root_thread_id` by canonical agent path.
     pub async fn find_thread_spawn_descendant_by_path(
         &self,
         root_thread_id: ThreadId,
@@ -193,20 +228,24 @@ WITH RECURSIVE subtree(child_thread_id) AS (
     SELECT child_thread_id
     FROM thread_spawn_edges
     WHERE parent_thread_id = ?
+      AND status = ?
     UNION ALL
     SELECT edge.child_thread_id
     FROM thread_spawn_edges AS edge
     JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id
+    WHERE edge.status = ?
 )
 SELECT threads.id
 FROM subtree
 JOIN threads ON threads.id = subtree.child_thread_id
 WHERE threads.agent_path = ?
-ORDER BY threads.id
+ORDER BY threads.created_at_ms DESC, threads.id DESC
 LIMIT 2
             "#,
         )
         .bind(root_thread_id.to_string())
+        .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
+        .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
         .bind(agent_path)
         .fetch_all(self.pool.as_ref())
         .await?;
@@ -995,7 +1034,9 @@ pub(super) fn push_thread_filters<'a>(
     } else {
         builder.push(" AND threads.archived = 0");
     }
-    builder.push(" AND threads.preview <> ''");
+    builder.push(
+        " AND (threads.preview <> '' OR threads.thread_source = 'subagent' OR threads.agent_path IS NOT NULL)",
+    );
     if !allowed_sources.is_empty() {
         builder.push(" AND threads.source IN (");
         let mut separated = builder.separated(", ");
@@ -1097,6 +1138,7 @@ mod tests {
     use codex_protocol::protocol::SessionMeta;
     use codex_protocol::protocol::SessionMetaLine;
     use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::ThreadSource;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
 
@@ -1291,6 +1333,56 @@ mod tests {
             .expect("list with empty cwd filters should succeed");
 
         assert_eq!(page.items, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn list_threads_includes_empty_preview_subagents() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("state db should initialize");
+        let user_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000201").expect("valid thread id");
+        let thread_source_subagent_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000202").expect("valid thread id");
+        let agent_path_subagent_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000203").expect("valid thread id");
+
+        for thread_id in [user_id, thread_source_subagent_id, agent_path_subagent_id] {
+            let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+            metadata.first_user_message = None;
+            metadata.preview = None;
+            if thread_id == thread_source_subagent_id {
+                metadata.thread_source = Some(ThreadSource::Subagent);
+            }
+            if thread_id == agent_path_subagent_id {
+                metadata.agent_path = Some("/root/dispatcher".to_string());
+            }
+            runtime
+                .upsert_thread(&metadata)
+                .await
+                .expect("thread insert should succeed");
+        }
+
+        let page = runtime
+            .list_threads(
+                /*page_size*/ 10,
+                ThreadFilterOptions {
+                    archived_only: false,
+                    allowed_sources: &[],
+                    model_providers: None,
+                    cwd_filters: None,
+                    anchor: None,
+                    sort_key: SortKey::UpdatedAt,
+                    sort_direction: SortDirection::Desc,
+                    search_term: None,
+                },
+            )
+            .await
+            .expect("list should succeed");
+
+        let ids = page.items.iter().map(|item| item.id).collect::<Vec<_>>();
+        assert_eq!(ids, vec![agent_path_subagent_id, thread_source_subagent_id]);
     }
 
     #[tokio::test]
@@ -1972,6 +2064,88 @@ mod tests {
             .await
             .expect("all descendants should load");
         assert_eq!(all_descendants, vec![child_thread_id, grandchild_thread_id]);
+    }
+
+    #[tokio::test]
+    async fn closing_open_thread_spawn_siblings_by_path_keeps_replacement_open() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("state db should initialize");
+        let parent_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000920").expect("valid thread id");
+        let old_child_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000921").expect("valid thread id");
+        let replacement_child_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000922").expect("valid thread id");
+        let sibling_child_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000923").expect("valid thread id");
+
+        for (thread_id, agent_path) in [
+            (old_child_thread_id, "/root/dispatcher"),
+            (replacement_child_thread_id, "/root/dispatcher"),
+            (sibling_child_thread_id, "/root/review_1"),
+        ] {
+            let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+            metadata.agent_path = Some(agent_path.to_string());
+            runtime
+                .upsert_thread(&metadata)
+                .await
+                .expect("thread metadata should persist");
+            runtime
+                .upsert_thread_spawn_edge(
+                    parent_thread_id,
+                    thread_id,
+                    DirectionalThreadSpawnEdgeStatus::Open,
+                )
+                .await
+                .expect("thread-spawn edge should persist");
+        }
+
+        let closed = runtime
+            .close_open_thread_spawn_siblings_by_path(
+                parent_thread_id,
+                replacement_child_thread_id,
+                "/root/dispatcher",
+            )
+            .await
+            .expect("duplicate path siblings should close");
+        assert_eq!(closed, 1);
+
+        let open_children = runtime
+            .list_thread_spawn_children_with_status(
+                parent_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            )
+            .await
+            .expect("open child list should load");
+        assert_eq!(
+            open_children,
+            vec![replacement_child_thread_id, sibling_child_thread_id]
+        );
+
+        let closed_children = runtime
+            .list_thread_spawn_children_with_status(
+                parent_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Closed,
+            )
+            .await
+            .expect("closed child list should load");
+        assert_eq!(closed_children, vec![old_child_thread_id]);
+        assert_eq!(
+            runtime
+                .find_thread_spawn_child_by_path(parent_thread_id, "/root/dispatcher")
+                .await
+                .expect("path lookup should load"),
+            Some(replacement_child_thread_id)
+        );
+        assert_eq!(
+            runtime
+                .find_thread_spawn_descendant_by_path(parent_thread_id, "/root/dispatcher")
+                .await
+                .expect("descendant path lookup should load"),
+            Some(replacement_child_thread_id)
+        );
     }
 
     #[tokio::test]

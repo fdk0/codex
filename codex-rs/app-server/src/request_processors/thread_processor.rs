@@ -2352,6 +2352,7 @@ impl ThreadRequestProcessor {
         connection_ids: Vec<ConnectionId>,
     ) {
         let mut raw_events_enabled = false;
+        let mut thread_started = None;
         if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
             let config_snapshot = thread.config_snapshot().await;
             let loaded_thread = build_thread_from_snapshot(
@@ -2360,6 +2361,7 @@ impl ThreadRequestProcessor {
                 &config_snapshot,
                 thread.rollout_path(),
             );
+            thread_started = Some(thread_started_notification(loaded_thread.clone()));
             self.thread_watch_manager.upsert_thread(loaded_thread).await;
             if let Some(parent_thread_id) = config_snapshot.parent_thread_id {
                 raw_events_enabled = self
@@ -2370,6 +2372,17 @@ impl ThreadRequestProcessor {
                     .await
                     .experimental_raw_events;
             }
+        }
+
+        if let Some(notification) = thread_started
+            && !connection_ids.is_empty()
+        {
+            self.outgoing
+                .send_server_notification_to_connections(
+                    connection_ids.as_slice(),
+                    ServerNotification::ThreadStarted(notification),
+                )
+                .await;
         }
 
         for connection_id in connection_ids {

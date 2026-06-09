@@ -3,6 +3,7 @@ use codex_protocol::AgentPath;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use pretty_assertions::assert_eq;
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 fn agent_path(path: &str) -> AgentPath {
@@ -23,6 +24,21 @@ fn thread_spawn_source(parent_thread_id: ThreadId, agent_path: Option<AgentPath>
         agent_path,
         agent_nickname: None,
         agent_role: None,
+    })
+}
+
+fn named_thread_spawn_source(
+    parent_thread_id: ThreadId,
+    agent_path: Option<AgentPath>,
+    agent_nickname: Option<&str>,
+    agent_role: Option<&str>,
+) -> SessionSource {
+    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path,
+        agent_nickname: agent_nickname.map(str::to_string),
+        agent_role: agent_role.map(str::to_string),
     })
 }
 
@@ -180,7 +196,12 @@ fn upsert_thread_spawn_source_metadata_records_parent_and_path() {
 
     registry.upsert_thread_spawn_source_metadata(
         thread_id,
-        &thread_spawn_source(parent_thread_id, Some(agent_path.clone())),
+        &named_thread_spawn_source(
+            parent_thread_id,
+            Some(agent_path.clone()),
+            Some("Galileo"),
+            Some("dispatcher"),
+        ),
     );
 
     assert_eq!(
@@ -189,10 +210,49 @@ fn upsert_thread_spawn_source_metadata_records_parent_and_path() {
             agent_id: Some(thread_id),
             parent_thread_id: Some(parent_thread_id),
             agent_path: Some(agent_path),
-            agent_nickname: None,
-            agent_role: None,
+            agent_nickname: Some("Galileo".to_string()),
+            agent_role: Some("dispatcher".to_string()),
             last_task_message: None,
         })
+    );
+}
+
+#[test]
+fn upsert_thread_spawn_source_metadata_replaces_duplicate_path() {
+    let registry = Arc::new(AgentRegistry::default());
+    let parent_thread_id = ThreadId::new();
+    let old_thread_id = ThreadId::new();
+    let replacement_thread_id = ThreadId::new();
+    let agent_path = agent_path("/root/dispatcher");
+
+    registry.upsert_thread_spawn_source_metadata(
+        old_thread_id,
+        &thread_spawn_source(parent_thread_id, Some(agent_path.clone())),
+    );
+    registry.upsert_thread_spawn_source_metadata(
+        replacement_thread_id,
+        &thread_spawn_source(parent_thread_id, Some(agent_path.clone())),
+    );
+
+    assert_eq!(
+        registry.agent_id_for_path(&agent_path),
+        Some(replacement_thread_id)
+    );
+    assert_eq!(registry.agent_metadata_for_thread(old_thread_id), None);
+    assert_eq!(
+        registry.live_thread_spawn_children_by_parent(),
+        HashMap::from([(
+            parent_thread_id,
+            vec![(
+                replacement_thread_id,
+                AgentMetadata {
+                    agent_id: Some(replacement_thread_id),
+                    parent_thread_id: Some(parent_thread_id),
+                    agent_path: Some(agent_path),
+                    ..Default::default()
+                }
+            )]
+        )])
     );
 }
 

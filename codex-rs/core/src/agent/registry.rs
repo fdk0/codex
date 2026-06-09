@@ -170,6 +170,12 @@ impl AgentRegistry {
         if metadata.agent_path.is_none() {
             metadata.agent_path = agent_path.clone();
         }
+        if metadata.agent_nickname.is_none() {
+            metadata.agent_nickname = session_source.get_nickname();
+        }
+        if metadata.agent_role.is_none() {
+            metadata.agent_role = session_source.get_agent_role();
+        }
     }
 
     pub(crate) fn agent_id_for_path(&self, agent_path: &AgentPath) -> Option<ThreadId> {

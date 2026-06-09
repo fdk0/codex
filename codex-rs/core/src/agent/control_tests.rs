@@ -2493,7 +2493,7 @@ async fn spawn_thread_subagent_uses_role_specific_nickname_candidates() {
 }
 
 #[tokio::test]
-async fn resume_thread_subagent_restores_stored_nickname_and_role() {
+async fn resume_thread_subagent_restores_stored_path_nickname_and_role() {
     let (home, mut config) = test_config().await;
     config
         .features
@@ -2596,7 +2596,7 @@ async fn resume_thread_subagent_restores_stored_nickname_and_role() {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
                 depth: 1,
-                agent_path: Some(agent_path.clone()),
+                agent_path: None,
                 agent_nickname: None,
                 agent_role: None,
             }),
@@ -2634,6 +2634,183 @@ async fn resume_thread_subagent_restores_stored_nickname_and_role() {
         .shutdown_live_agent(resumed_thread_id)
         .await
         .expect("resumed child shutdown should submit");
+}
+
+#[tokio::test]
+async fn spawn_replacement_path_closes_prior_open_edge() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+    let agent_path = AgentPath::try_from("/root/dispatcher").expect("agent path should be valid");
+
+    let old_child_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello old dispatcher"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(agent_path.clone()),
+                agent_nickname: None,
+                agent_role: Some("dispatcher".to_string()),
+            })),
+        )
+        .await
+        .expect("old dispatcher spawn should succeed");
+    let old_child_thread = harness
+        .manager
+        .get_thread(old_child_thread_id)
+        .await
+        .expect("old dispatcher thread should exist");
+    persist_thread_for_tree_resume(&old_child_thread, "old dispatcher persisted").await;
+    let state_db = old_child_thread
+        .state_db()
+        .expect("sqlite state db should be available");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(Some(metadata)) = state_db.get_thread(old_child_thread_id).await
+                && metadata.agent_path.as_deref() == Some(agent_path.as_str())
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("old dispatcher path should be persisted before replacement");
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(old_child_thread_id)
+        .await
+        .expect("old dispatcher shutdown should submit");
+    let replacement_child_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello replacement dispatcher"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(agent_path),
+                agent_nickname: None,
+                agent_role: Some("dispatcher".to_string()),
+            })),
+        )
+        .await
+        .expect("replacement dispatcher spawn should succeed");
+
+    let open_children = state_db
+        .list_thread_spawn_children_with_status(
+            parent_thread_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        )
+        .await
+        .expect("open children should load");
+    assert_eq!(open_children, vec![replacement_child_thread_id]);
+    let closed_children = state_db
+        .list_thread_spawn_children_with_status(
+            parent_thread_id,
+            DirectionalThreadSpawnEdgeStatus::Closed,
+        )
+        .await
+        .expect("closed children should load");
+    assert_eq!(closed_children, vec![old_child_thread_id]);
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(replacement_child_thread_id)
+        .await
+        .expect("replacement dispatcher shutdown should submit");
+}
+
+#[tokio::test]
+async fn resolve_agent_reference_falls_back_to_loaded_thread_source_metadata() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+    let agent_path = AgentPath::try_from("/root/dispatcher").expect("agent path should be valid");
+    let child_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello dispatcher"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(agent_path.clone()),
+                agent_nickname: None,
+                agent_role: Some("dispatcher".to_string()),
+            })),
+        )
+        .await
+        .expect("dispatcher spawn should succeed");
+
+    harness
+        .control
+        .state
+        .release_spawned_thread(child_thread_id);
+    assert_eq!(harness.control.state.agent_id_for_path(&agent_path), None);
+
+    let resolved_thread_id = harness
+        .control
+        .resolve_agent_reference(parent_thread_id, &SessionSource::Cli, agent_path.as_str())
+        .await
+        .expect("loaded thread source should resolve the path");
+    assert_eq!(resolved_thread_id, child_thread_id);
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("dispatcher shutdown should submit");
+}
+
+#[tokio::test]
+async fn list_agents_falls_back_to_loaded_thread_source_metadata() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+    harness
+        .control
+        .register_session_root(parent_thread_id, None);
+    let agent_path = AgentPath::try_from("/root/dispatcher").expect("agent path should be valid");
+    let child_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello dispatcher"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(agent_path),
+                agent_nickname: None,
+                agent_role: Some("dispatcher".to_string()),
+            })),
+        )
+        .await
+        .expect("dispatcher spawn should succeed");
+
+    harness
+        .control
+        .state
+        .release_spawned_thread(child_thread_id);
+    assert_eq!(harness.control.state.live_agents(), Vec::new());
+
+    let listed_agents = harness
+        .control
+        .list_agents(&SessionSource::Cli, None)
+        .await
+        .expect("loaded thread source should list the agent");
+    let agent_names = listed_agents
+        .iter()
+        .map(|agent| agent.agent_name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(agent_names, vec!["/root", "/root/dispatcher"]);
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("dispatcher shutdown should submit");
 }
 
 #[tokio::test]

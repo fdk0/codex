@@ -1,4 +1,5 @@
 use super::*;
+use crate::StateDbHandle;
 
 const AGENT_NAMES: &str = include_str!("../agent_names.txt");
 
@@ -60,6 +61,49 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
         RolloutItem::TurnContext(_) => preserve_reference_context_item,
         RolloutItem::Compacted(_) | RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => true,
     }
+}
+
+async fn latest_child_ids_by_agent_path(
+    state_db_ctx: &StateDbHandle,
+    child_ids: Vec<ThreadId>,
+) -> Vec<ThreadId> {
+    let mut unpathed_children = Vec::new();
+    let mut path_children = HashMap::<String, (ThreadId, i64)>::new();
+
+    for child_thread_id in child_ids {
+        let child_metadata = match state_db_ctx.get_thread(child_thread_id).await {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                warn!("failed to load stored agent metadata for {child_thread_id}: {err}");
+                None
+            }
+        };
+        let Some(child_metadata) = child_metadata else {
+            unpathed_children.push(child_thread_id);
+            continue;
+        };
+        let Some(agent_path) = child_metadata.agent_path else {
+            unpathed_children.push(child_thread_id);
+            continue;
+        };
+        let child_created_at = child_metadata.created_at.timestamp_millis();
+        path_children
+            .entry(agent_path)
+            .and_modify(|(existing_thread_id, existing_created_at)| {
+                if child_created_at > *existing_created_at
+                    || (child_created_at == *existing_created_at
+                        && child_thread_id.to_string() > existing_thread_id.to_string())
+                {
+                    *existing_thread_id = child_thread_id;
+                    *existing_created_at = child_created_at;
+                }
+            })
+            .or_insert((child_thread_id, child_created_at));
+    }
+
+    unpathed_children.extend(path_children.into_values().map(|(thread_id, _)| thread_id));
+    unpathed_children.sort_by_key(ToString::to_string);
+    unpathed_children
 }
 
 fn is_multi_agent_v2_usage_hint_message(item: &ResponseItem, usage_hint_texts: &[String]) -> bool {
@@ -566,6 +610,7 @@ impl AgentControl {
                     continue;
                 }
             };
+            let child_ids = latest_child_ids_by_agent_path(&state_db_ctx, child_ids).await;
 
             for child_thread_id in child_ids {
                 let child_depth = parent_depth + 1;
@@ -647,21 +692,43 @@ impl AgentControl {
                 agent_role: _,
                 agent_nickname: _,
             }) => {
-                let (resumed_agent_nickname, resumed_agent_role) =
-                    if let Some(state_db_ctx) = state_db_ctx.as_ref() {
-                        match state_db_ctx.get_thread(thread_id).await {
-                            Ok(Some(metadata)) => (metadata.agent_nickname, metadata.agent_role),
-                            Ok(None) | Err(_) => (None, None),
+                let stored_metadata = if let Some(state_db_ctx) = state_db_ctx.as_ref() {
+                    match state_db_ctx.get_thread(thread_id).await {
+                        Ok(metadata) => metadata,
+                        Err(err) => {
+                            warn!("failed to load stored agent metadata for {thread_id}: {err}");
+                            None
                         }
-                    } else {
-                        (None, None)
-                    };
+                    }
+                } else {
+                    None
+                };
+                let resumed_agent_path = match agent_path {
+                    Some(agent_path) => Some(agent_path),
+                    None => stored_metadata.as_ref().and_then(|metadata| {
+                        metadata.agent_path.as_ref().and_then(|agent_path| {
+                            match AgentPath::try_from(agent_path.as_str()) {
+                                Ok(agent_path) => Some(agent_path),
+                                Err(err) => {
+                                    warn!(
+                                        "failed to restore stored agent path `{agent_path}` for {thread_id}: {err}"
+                                    );
+                                    None
+                                }
+                            }
+                        })
+                    }),
+                };
+                let (resumed_agent_nickname, resumed_agent_role) = match stored_metadata {
+                    Some(metadata) => (metadata.agent_nickname, metadata.agent_role),
+                    None => (None, None),
+                };
                 self.prepare_thread_spawn(
                     &mut reservation,
                     &config,
                     parent_thread_id,
                     depth,
-                    agent_path,
+                    resumed_agent_path,
                     resumed_agent_role,
                     resumed_agent_nickname,
                 )?

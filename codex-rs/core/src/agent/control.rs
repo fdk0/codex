@@ -315,6 +315,13 @@ impl AgentControl {
         if let Some(thread_id) = self.state.agent_id_for_path(&agent_path) {
             return Ok(thread_id);
         }
+        for children in self.live_thread_spawn_children().await?.into_values() {
+            for (child_thread_id, metadata) in children {
+                if metadata.agent_path.as_ref() == Some(&agent_path) {
+                    return Ok(child_thread_id);
+                }
+            }
+        }
         Err(CodexErr::UnsupportedOperation(format!(
             "live agent path `{}` not found",
             agent_path.as_str()
@@ -369,7 +376,13 @@ impl AgentControl {
             })
             .transpose()?;
 
-        let mut live_agents = self.state.live_agents();
+        let mut live_agents = self
+            .live_thread_spawn_children()
+            .await?
+            .into_values()
+            .flatten()
+            .map(|(_, metadata)| metadata)
+            .collect::<Vec<_>>();
         live_agents.sort_by(|left, right| {
             left.agent_path
                 .as_deref()
@@ -538,23 +551,43 @@ impl AgentControl {
         // spawn edges for any loaded child thread that has not been hydrated into the registry yet.
         if let Ok(state) = self.upgrade() {
             for (parent_thread_id, child_thread_id) in state.list_live_thread_spawn_edges().await {
-                let children = children_by_parent.entry(parent_thread_id).or_default();
-                if children
-                    .iter()
-                    .any(|(existing_child_id, _)| *existing_child_id == child_thread_id)
-                {
-                    continue;
-                }
-                children.push((
-                    child_thread_id,
-                    self.state
+                let metadata = match state.get_thread(child_thread_id).await {
+                    Ok(thread) => self
+                        .state
+                        .agent_metadata_for_thread(child_thread_id)
+                        .unwrap_or_else(|| {
+                            agent_metadata_from_thread_spawn_source(
+                                child_thread_id,
+                                parent_thread_id,
+                                &thread.session_source,
+                            )
+                        }),
+                    Err(_) => self
+                        .state
                         .agent_metadata_for_thread(child_thread_id)
                         .unwrap_or(AgentMetadata {
                             agent_id: Some(child_thread_id),
                             parent_thread_id: Some(parent_thread_id),
                             ..Default::default()
                         }),
-                ));
+                };
+                let children = children_by_parent.entry(parent_thread_id).or_default();
+                if children
+                    .iter()
+                    .any(|(existing_child_id, existing_metadata)| {
+                        *existing_child_id == child_thread_id
+                            || existing_metadata
+                                .agent_path
+                                .as_ref()
+                                .zip(metadata.agent_path.as_ref())
+                                .is_some_and(|(existing_path, candidate_path)| {
+                                    existing_path == candidate_path
+                                })
+                    })
+                {
+                    continue;
+                }
+                children.push((child_thread_id, metadata));
             }
         }
 
@@ -594,6 +627,18 @@ impl AgentControl {
             .await
         {
             warn!("failed to persist thread-spawn edge: {err}");
+            return;
+        }
+        if let Some(agent_path) = session_source.and_then(SessionSource::get_agent_path)
+            && let Err(err) = state_db_ctx
+                .close_open_thread_spawn_siblings_by_path(
+                    parent_thread_id,
+                    child_thread_id,
+                    agent_path.as_str(),
+                )
+                .await
+        {
+            warn!("failed to close duplicate thread-spawn edges for {agent_path}: {err}");
         }
     }
 
@@ -622,6 +667,32 @@ impl AgentControl {
 
         Ok(descendants)
     }
+}
+
+fn agent_metadata_from_thread_spawn_source(
+    thread_id: ThreadId,
+    parent_thread_id: ThreadId,
+    session_source: &SessionSource,
+) -> AgentMetadata {
+    let mut metadata = AgentMetadata {
+        agent_id: Some(thread_id),
+        parent_thread_id: Some(parent_thread_id),
+        ..Default::default()
+    };
+    if let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        agent_path,
+        agent_nickname,
+        agent_role,
+        ..
+    }) = session_source
+    {
+        metadata.parent_thread_id = Some(*parent_thread_id);
+        metadata.agent_path = agent_path.clone();
+        metadata.agent_nickname = agent_nickname.clone();
+        metadata.agent_role = agent_role.clone();
+    }
+    metadata
 }
 
 fn agent_matches_prefix(agent_path: Option<&AgentPath>, prefix: &AgentPath) -> bool {
