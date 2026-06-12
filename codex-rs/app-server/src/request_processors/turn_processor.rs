@@ -128,6 +128,36 @@ impl TurnRequestProcessor {
         .map(|response| Some(response.into()))
     }
 
+    fn turn_start_busy_error(thread_id: &str, detail: String) -> JSONRPCErrorError {
+        invalid_request(format!(
+            "thread `{thread_id}` {detail}; use turn/steer to add input to the active turn or interrupt it before starting a new turn"
+        ))
+    }
+
+    fn turn_start_reservation_error(
+        thread_id: &str,
+        error: TurnStartReservationError,
+    ) -> JSONRPCErrorError {
+        match error {
+            TurnStartReservationError::Active(active_turn) => Self::turn_start_busy_error(
+                thread_id,
+                format!("already has an active turn `{}`", active_turn.id),
+            ),
+            TurnStartReservationError::Pending(PendingTurnStart::Reserved) => {
+                Self::turn_start_busy_error(
+                    thread_id,
+                    "already has a turn start pending".to_string(),
+                )
+            }
+            TurnStartReservationError::Pending(PendingTurnStart::Submitted(turn_id)) => {
+                Self::turn_start_busy_error(
+                    thread_id,
+                    format!("already has turn `{turn_id}` starting"),
+                )
+            }
+        }
+    }
+
     pub(crate) async fn thread_inject_items(
         &self,
         params: ThreadInjectItemsParams,
@@ -449,6 +479,26 @@ impl TurnRequestProcessor {
             )
             .await?;
 
+        let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+        let reservation_error = {
+            let mut thread_state = thread_state.lock().await;
+            thread_state.try_reserve_turn_start().err()
+        };
+        if let Some(reservation_error) = reservation_error {
+            let error = Self::turn_start_reservation_error(&params.thread_id, reservation_error);
+            self.track_error_response(&request_id, &error, /*error_type*/ None);
+            return Err(error);
+        }
+        if matches!(thread.agent_status().await, AgentStatus::Running) {
+            thread_state.lock().await.clear_pending_turn_start();
+            let error = Self::turn_start_busy_error(
+                &params.thread_id,
+                "already has an active turn".to_string(),
+            );
+            self.track_error_response(&request_id, &error, /*error_type*/ None);
+            return Err(error);
+        }
+
         // Start the turn by submitting the user input. Return its submission id as turn_id.
         let turn_op = Op::UserInput {
             items: mapped_items,
@@ -458,18 +508,26 @@ impl TurnRequestProcessor {
             additional_context,
             thread_settings,
         };
-        let turn_id = thread
+        let turn_id = match thread
             .submit_user_input_with_client_user_message_id(
                 turn_op,
                 self.request_trace_context(&request_id).await,
                 client_user_message_id,
             )
             .await
-            .map_err(|err| {
+        {
+            Ok(turn_id) => turn_id,
+            Err(err) => {
+                thread_state.lock().await.clear_pending_turn_start();
                 let error = internal_error(format!("failed to start turn: {err}"));
                 self.track_error_response(&request_id, &error, /*error_type*/ None);
-                error
-            })?;
+                return Err(error);
+            }
+        };
+        thread_state
+            .lock()
+            .await
+            .note_turn_start_submitted(turn_id.clone());
 
         if turn_has_input {
             let config_snapshot = thread.config_snapshot().await;

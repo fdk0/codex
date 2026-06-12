@@ -70,6 +70,17 @@ pub(crate) struct TurnSummary {
     pub(crate) last_error: Option<TurnError>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PendingTurnStart {
+    Reserved,
+    Submitted(String),
+}
+
+pub(crate) enum TurnStartReservationError {
+    Active(Turn),
+    Pending(PendingTurnStart),
+}
+
 #[derive(Default)]
 pub(crate) struct ThreadState {
     pub(crate) pending_interrupts: PendingInterruptQueue,
@@ -82,6 +93,7 @@ pub(crate) struct ThreadState {
     last_thread_settings: Option<ThreadSettings>,
     listener_command_tx: Option<mpsc::UnboundedSender<ThreadListenerCommand>>,
     current_turn_history: ThreadHistoryBuilder,
+    pending_turn_start: Option<PendingTurnStart>,
     listener_thread: Option<Weak<CodexThread>>,
     watch_registration: WatchRegistration,
 }
@@ -119,6 +131,7 @@ impl ThreadState {
         }
         self.listener_command_tx = None;
         self.current_turn_history.reset();
+        self.pending_turn_start = None;
         self.listener_thread = None;
         self.watch_registration = WatchRegistration::default();
     }
@@ -137,7 +150,42 @@ impl ThreadState {
         self.current_turn_history.active_turn_snapshot()
     }
 
+    pub(crate) fn try_reserve_turn_start(&mut self) -> Result<(), TurnStartReservationError> {
+        if let Some(active_turn) = self.active_turn_snapshot() {
+            return Err(TurnStartReservationError::Active(active_turn));
+        }
+        if let Some(pending_turn_start) = self.pending_turn_start.clone() {
+            return Err(TurnStartReservationError::Pending(pending_turn_start));
+        }
+        self.pending_turn_start = Some(PendingTurnStart::Reserved);
+        Ok(())
+    }
+
+    pub(crate) fn note_turn_start_submitted(&mut self, turn_id: String) {
+        if matches!(self.pending_turn_start, Some(PendingTurnStart::Reserved)) {
+            self.pending_turn_start = Some(PendingTurnStart::Submitted(turn_id));
+        }
+    }
+
+    pub(crate) fn clear_pending_turn_start(&mut self) {
+        self.pending_turn_start = None;
+    }
+
     pub(crate) fn track_current_turn_event(&mut self, event_turn_id: &str, event: &EventMsg) {
+        if self
+            .pending_turn_start
+            .as_ref()
+            .is_some_and(|pending_turn_start| match pending_turn_start {
+                PendingTurnStart::Reserved => true,
+                PendingTurnStart::Submitted(turn_id) => turn_id == event_turn_id,
+            })
+            && matches!(
+                event,
+                EventMsg::TurnStarted(_) | EventMsg::TurnAborted(_) | EventMsg::Error(_)
+            )
+        {
+            self.pending_turn_start = None;
+        }
         if let EventMsg::TurnStarted(payload) = event {
             self.turn_summary.started_at = payload.started_at;
         }
@@ -198,6 +246,8 @@ mod tests {
     use codex_protocol::config_types::CollaborationMode;
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::config_types::Settings;
+    use codex_protocol::protocol::TurnCompleteEvent;
+    use codex_protocol::protocol::TurnStartedEvent;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -214,6 +264,68 @@ mod tests {
         ];
 
         assert_eq!(results, vec![true, false, true, false]);
+    }
+
+    #[test]
+    fn turn_start_reservation_blocks_until_turn_reaches_state() {
+        let mut state = ThreadState::default();
+
+        assert!(state.try_reserve_turn_start().is_ok());
+        assert!(matches!(
+            state.try_reserve_turn_start(),
+            Err(TurnStartReservationError::Pending(
+                PendingTurnStart::Reserved
+            ))
+        ));
+
+        state.note_turn_start_submitted("turn-1".to_string());
+        assert!(matches!(
+            state.try_reserve_turn_start(),
+            Err(TurnStartReservationError::Pending(
+                PendingTurnStart::Submitted(turn_id)
+            )) if turn_id == "turn-1"
+        ));
+
+        state.track_current_turn_event("turn-1", &turn_started("turn-1"));
+        assert!(matches!(
+            state.try_reserve_turn_start(),
+            Err(TurnStartReservationError::Active(_))
+        ));
+
+        state.track_current_turn_event("turn-1", &turn_completed("turn-1"));
+        assert!(state.try_reserve_turn_start().is_ok());
+    }
+
+    #[test]
+    fn turn_start_submission_note_does_not_restore_cleared_pending_reservation() {
+        let mut state = ThreadState::default();
+
+        assert!(state.try_reserve_turn_start().is_ok());
+        state.track_current_turn_event("turn-1", &turn_started("turn-1"));
+        state.note_turn_start_submitted("turn-1".to_string());
+        state.track_current_turn_event("turn-1", &turn_completed("turn-1"));
+
+        assert!(state.try_reserve_turn_start().is_ok());
+    }
+
+    fn turn_started(turn_id: &str) -> EventMsg {
+        EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: turn_id.to_string(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        })
+    }
+
+    fn turn_completed(turn_id: &str) -> EventMsg {
+        EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: turn_id.to_string(),
+            last_agent_message: None,
+            completed_at: None,
+            duration_ms: None,
+            time_to_first_token_ms: None,
+        })
     }
 
     fn thread_settings(model: &str) -> ThreadSettings {
