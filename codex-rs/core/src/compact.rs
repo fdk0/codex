@@ -152,7 +152,7 @@ async fn run_compact_task_inner(
                     sess.as_ref(),
                     CompactionStatus::Interrupted,
                     Some(error),
-                    /*active_context_tokens_before*/ None,
+                    CompactionAnalyticsDetails::default(),
                 )
                 .await;
             return Err(CodexErr::TurnAborted);
@@ -176,7 +176,7 @@ async fn run_compact_task_inner(
                     sess.as_ref(),
                     status,
                     error,
-                    /*active_context_tokens_before*/ None,
+                    CompactionAnalyticsDetails::default(),
                 )
                 .await;
             return Err(CodexErr::TurnAborted);
@@ -193,7 +193,7 @@ async fn run_compact_task_inner(
             sess.as_ref(),
             status,
             error,
-            /*active_context_tokens_before*/ None,
+            CompactionAnalyticsDetails::default(),
         )
         .await;
     result.map(|_| ())
@@ -356,6 +356,13 @@ pub(crate) struct CompactionAnalyticsAttempt {
     start_instant: Instant,
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CompactionAnalyticsDetails {
+    pub(crate) active_context_tokens_before: Option<i64>,
+    pub(crate) retained_image_count: Option<usize>,
+    pub(crate) compaction_summary_tokens: Option<i64>,
+}
+
 impl CompactionAnalyticsAttempt {
     pub(crate) async fn begin(
         sess: &Session,
@@ -384,8 +391,13 @@ impl CompactionAnalyticsAttempt {
         sess: &Session,
         status: CompactionStatus,
         error: Option<String>,
-        active_context_tokens_before: Option<i64>,
+        details: CompactionAnalyticsDetails,
     ) {
+        let CompactionAnalyticsDetails {
+            active_context_tokens_before,
+            retained_image_count,
+            compaction_summary_tokens,
+        } = details;
         let active_context_tokens_before =
             active_context_tokens_before.unwrap_or(self.active_context_tokens_before);
         let active_context_tokens_after = sess.get_total_token_usage().await;
@@ -403,6 +415,8 @@ impl CompactionAnalyticsAttempt {
                 error,
                 active_context_tokens_before,
                 active_context_tokens_after,
+                retained_image_count,
+                compaction_summary_tokens,
                 started_at: self.started_at,
                 completed_at: now_unix_seconds(),
                 duration_ms: Some(

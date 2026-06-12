@@ -63,6 +63,8 @@ use crate::facts::SubAgentThreadStartedInput;
 use crate::facts::ThreadInitializationMode;
 use crate::facts::TrackEventsContext;
 use crate::facts::TurnCodexErrorFact;
+use crate::facts::TurnProfile;
+use crate::facts::TurnProfileFact;
 use crate::facts::TurnResolvedConfigFact;
 use crate::facts::TurnStatus;
 use crate::facts::TurnSteerRequestError;
@@ -396,6 +398,18 @@ fn sample_turn_resolved_config(thread_id: &str, turn_id: &str) -> TurnResolvedCo
     }
 }
 
+fn sample_turn_profile() -> TurnProfile {
+    TurnProfile {
+        before_first_sampling_ms: 100,
+        sampling_ms: 700,
+        between_sampling_overhead_ms: 50,
+        tool_blocking_ms: 250,
+        after_last_sampling_ms: 134,
+        sampling_request_count: 2,
+        sampling_retry_count: 1,
+    }
+}
+
 fn sample_turn_steer_request(
     thread_id: &str,
     expected_turn_id: &str,
@@ -649,6 +663,18 @@ async fn ingest_turn_prerequisites(
             )
             .await;
     }
+
+    reducer
+        .ingest(
+            AnalyticsFact::Custom(CustomAnalyticsFact::TurnProfile(Box::new(
+                TurnProfileFact {
+                    turn_id: "turn-2".to_string(),
+                    profile: sample_turn_profile(),
+                },
+            ))),
+            out,
+        )
+        .await;
 }
 
 async fn ingest_review_prerequisites(
@@ -1227,6 +1253,8 @@ fn compaction_event_serializes_expected_shape() {
                 error: None,
                 active_context_tokens_before: 120_000,
                 active_context_tokens_after: 18_000,
+                retained_image_count: None,
+                compaction_summary_tokens: None,
                 started_at: 100,
                 completed_at: 106,
                 duration_ms: Some(6543),
@@ -1275,6 +1303,8 @@ fn compaction_event_serializes_expected_shape() {
                 "error": null,
                 "active_context_tokens_before": 120000,
                 "active_context_tokens_after": 18000,
+                "retained_image_count": null,
+                "compaction_summary_tokens": null,
                 "started_at": 100,
                 "completed_at": 106,
                 "duration_ms": 6543
@@ -1795,6 +1825,8 @@ async fn compaction_event_ingests_custom_fact() {
                     error: Some("context limit exceeded".to_string()),
                     active_context_tokens_before: 131_000,
                     active_context_tokens_after: 131_000,
+                    retained_image_count: None,
+                    compaction_summary_tokens: None,
                     started_at: 100,
                     completed_at: 101,
                     duration_ms: Some(1200),
@@ -2717,6 +2749,8 @@ async fn subagent_thread_started_inherits_parent_connection_for_new_thread() {
                     error: None,
                     active_context_tokens_before: 131_000,
                     active_context_tokens_after: 64_000,
+                    retained_image_count: None,
+                    compaction_summary_tokens: None,
                     started_at: 100,
                     completed_at: 101,
                     duration_ms: Some(1200),
@@ -3284,7 +3318,6 @@ fn turn_event_serializes_expected_shape() {
             status: Some(TurnStatus::Completed),
             turn_error: None,
             codex_error_kind: None,
-            codex_error_subreason: None,
             codex_error_http_status_code: None,
             steer_count: Some(0),
             total_tool_call_count: None,
@@ -3300,6 +3333,13 @@ fn turn_event_serializes_expected_shape() {
             output_tokens: None,
             reasoning_output_tokens: None,
             total_tokens: None,
+            before_first_sampling_ms: 100,
+            sampling_ms: 700,
+            between_sampling_overhead_ms: 50,
+            tool_blocking_ms: 250,
+            after_last_sampling_ms: 134,
+            sampling_request_count: 2,
+            sampling_retry_count: 1,
             duration_ms: Some(1234),
             started_at: Some(455),
             completed_at: Some(456),
@@ -3350,7 +3390,6 @@ fn turn_event_serializes_expected_shape() {
                 "status": "completed",
                 "turn_error": null,
                 "codex_error_kind": null,
-                "codex_error_subreason": null,
                 "codex_error_http_status_code": null,
                 "steer_count": 0,
                 "total_tool_call_count": null,
@@ -3366,6 +3405,13 @@ fn turn_event_serializes_expected_shape() {
                 "output_tokens": null,
                 "reasoning_output_tokens": null,
                 "total_tokens": null,
+                "before_first_sampling_ms": 100,
+                "sampling_ms": 700,
+                "between_sampling_overhead_ms": 50,
+                "tool_blocking_ms": 250,
+                "after_last_sampling_ms": 134,
+                "sampling_request_count": 2,
+                "sampling_retry_count": 1,
                 "duration_ms": 1234,
                 "started_at": 455,
                 "completed_at": 456
@@ -4049,10 +4095,6 @@ async fn turn_lifecycle_emits_failed_turn_event() {
     assert_eq!(
         payload["event_params"]["codex_error_kind"],
         json!("invalid_request")
-    );
-    assert_eq!(
-        payload["event_params"]["codex_error_subreason"],
-        json!("unknown turn environment id `env-2`")
     );
     assert_eq!(
         payload["event_params"]["codex_error_http_status_code"],

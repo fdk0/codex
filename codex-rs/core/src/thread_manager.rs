@@ -1347,9 +1347,6 @@ impl ThreadManagerState {
             .register_live_thread_source(new_thread.thread_id, &registration_source);
         if is_resumed_thread {
             new_thread.thread.emit_thread_resume_lifecycle().await;
-            if let Err(err) = new_thread.thread.apply_goal_resume_runtime_effects().await {
-                warn!("failed to apply goal resume runtime effects: {err}");
-            }
         }
         Ok(new_thread)
     }

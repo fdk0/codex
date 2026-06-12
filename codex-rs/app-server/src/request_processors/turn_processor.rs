@@ -18,28 +18,6 @@ pub(crate) struct TurnRequestProcessor {
     skills_watcher: Arc<SkillsWatcher>,
 }
 
-fn resolve_runtime_workspace_roots(
-    workspace_roots: Vec<PathBuf>,
-    base_cwd: &AbsolutePathBuf,
-) -> Vec<AbsolutePathBuf> {
-    let mut resolved_roots = Vec::new();
-    for path in workspace_roots {
-        let root = AbsolutePathBuf::resolve_path_against_base(path, base_cwd.as_path());
-        if !resolved_roots.iter().any(|existing| existing == &root) {
-            resolved_roots.push(root);
-        }
-    }
-    resolved_roots
-}
-
-fn resolve_request_cwd(cwd: Option<PathBuf>) -> Result<Option<AbsolutePathBuf>, JSONRPCErrorError> {
-    cwd.map(|cwd| {
-        AbsolutePathBuf::relative_to_current_dir(path_utils::normalize_for_native_workdir(cwd))
-            .map_err(|err| invalid_request(format!("invalid cwd: {err}")))
-    })
-    .transpose()
-}
-
 fn map_additional_context(
     additional_context: Option<HashMap<String, AdditionalContextEntry>>,
 ) -> BTreeMap<String, CoreAdditionalContextEntry> {
@@ -65,8 +43,8 @@ fn map_additional_context(
 
 struct ThreadSettingsBuildParams {
     method: &'static str,
-    cwd: Option<AbsolutePathBuf>,
-    runtime_workspace_roots: Option<Vec<PathBuf>>,
+    environments: Option<TurnEnvironmentSelections>,
+    runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
     approval_policy: Option<codex_app_server_protocol::AskForApproval>,
     approvals_reviewer: Option<codex_app_server_protocol::ApprovalsReviewer>,
     sandbox_policy: Option<codex_app_server_protocol::SandboxPolicy>,
@@ -458,12 +436,14 @@ impl TurnRequestProcessor {
         let additional_context = map_additional_context(params.additional_context);
         let turn_has_input = !mapped_items.is_empty();
         let cwd = resolve_request_cwd(params.cwd)?;
+        let environments =
+            Self::build_environment_override(thread.as_ref(), cwd, environment_selections).await;
         let thread_settings = self
             .build_thread_settings_overrides(
                 thread.as_ref(),
                 ThreadSettingsBuildParams {
                     method: "turn/start",
-                    cwd,
+                    environments,
                     runtime_workspace_roots: params.runtime_workspace_roots,
                     approval_policy: params.approval_policy,
                     approvals_reviewer: params.approvals_reviewer,
@@ -502,7 +482,6 @@ impl TurnRequestProcessor {
         // Start the turn by submitting the user input. Return its submission id as turn_id.
         let turn_op = Op::UserInput {
             items: mapped_items,
-            environments: environment_selections,
             final_output_json_schema: params.output_schema,
             responsesapi_client_metadata: params.responsesapi_client_metadata,
             additional_context,
@@ -558,6 +537,31 @@ impl TurnRequestProcessor {
         Ok(TurnStartResponse { turn })
     }
 
+    async fn build_environment_override(
+        thread: &CodexThread,
+        cwd: Option<AbsolutePathBuf>,
+        environment_selections: Option<Vec<TurnEnvironmentSelection>>,
+    ) -> Option<TurnEnvironmentSelections> {
+        if cwd.is_none() && environment_selections.is_none() {
+            return None;
+        }
+
+        let snapshot = thread.config_snapshot().await;
+        let environment_selections =
+            environment_selections.unwrap_or_else(|| snapshot.environment_selections().to_vec());
+        let legacy_fallback_cwd = cwd.unwrap_or_else(|| {
+            environment_selections
+                .iter()
+                .find(|selection| selection.environment_id == LOCAL_ENVIRONMENT_ID)
+                .map(|selection| selection.cwd.clone())
+                .unwrap_or_else(|| snapshot.cwd().clone())
+        });
+        Some(TurnEnvironmentSelections::new(
+            legacy_fallback_cwd,
+            environment_selections,
+        ))
+    }
+
     async fn build_thread_settings_overrides(
         &self,
         thread: &CodexThread,
@@ -565,7 +569,7 @@ impl TurnRequestProcessor {
     ) -> Result<codex_protocol::protocol::ThreadSettingsOverrides, JSONRPCErrorError> {
         let ThreadSettingsBuildParams {
             method,
-            cwd,
+            environments,
             runtime_workspace_roots,
             approval_policy,
             approvals_reviewer,
@@ -588,16 +592,17 @@ impl TurnRequestProcessor {
         let collaboration_mode =
             collaboration_mode.map(|mode| self.normalize_collaboration_mode(mode));
         let runtime_workspace_roots_request = runtime_workspace_roots;
+        let has_environment_override = environments.is_some();
         // `thread/settings/update` only acknowledges that the update was queued.
         // Clients that send dependent partial updates should wait for
         // `thread/settings/updated` or combine the fields in one request.
-        let snapshot = if permissions.is_some() || runtime_workspace_roots_request.is_some() {
+        let snapshot = if permissions.is_some() {
             Some(thread.config_snapshot().await)
         } else {
             None
         };
 
-        let has_any_overrides = cwd.is_some()
+        let has_any_overrides = has_environment_override
             || runtime_workspace_roots_request.is_some()
             || approval_policy.is_some()
             || approvals_reviewer.is_some()
@@ -610,22 +615,8 @@ impl TurnRequestProcessor {
             || collaboration_mode.is_some()
             || personality.is_some();
 
-        let runtime_workspace_roots = if let Some(workspace_roots) =
-            runtime_workspace_roots_request.clone()
-        {
-            let Some(snapshot) = snapshot.as_ref() else {
-                return Err(internal_error(format!(
-                    "{method} runtime workspace roots missing thread snapshot"
-                )));
-            };
-            let base_cwd = cwd
-                .as_ref()
-                .map(|cwd| AbsolutePathBuf::resolve_path_against_base(cwd, snapshot.cwd.as_path()))
-                .unwrap_or_else(|| snapshot.cwd.clone());
-            Some(resolve_runtime_workspace_roots(workspace_roots, &base_cwd))
-        } else {
-            None
-        };
+        let runtime_workspace_roots =
+            runtime_workspace_roots_request.map(resolve_runtime_workspace_roots);
         let approval_policy =
             approval_policy.map(codex_app_server_protocol::AskForApproval::to_core);
         let approvals_reviewer =
@@ -639,16 +630,14 @@ impl TurnRequestProcessor {
                     )));
                 };
                 let overrides = ConfigOverrides {
-                    cwd: cwd.as_ref().map(AbsolutePathBuf::to_path_buf),
-                    workspace_roots: Some(runtime_workspace_roots_request.clone().unwrap_or_else(
-                        || {
-                            snapshot
-                                .workspace_roots
-                                .iter()
-                                .map(AbsolutePathBuf::to_path_buf)
-                                .collect()
-                        },
-                    )),
+                    cwd: environments
+                        .as_ref()
+                        .map(|environments| environments.legacy_fallback_cwd.to_path_buf()),
+                    workspace_roots: Some(
+                        runtime_workspace_roots
+                            .clone()
+                            .unwrap_or_else(|| snapshot.workspace_roots.clone()),
+                    ),
                     default_permissions: Some(permissions),
                     codex_linux_sandbox_exe: self.arg0_paths.codex_linux_sandbox_exe.clone(),
                     main_execve_wrapper_exe: self.arg0_paths.main_execve_wrapper_exe.clone(),
@@ -659,7 +648,7 @@ impl TurnRequestProcessor {
                     .load_for_cwd(
                         /*request_overrides*/ None,
                         overrides,
-                        Some(snapshot.cwd.to_path_buf()),
+                        Some(snapshot.cwd().to_path_buf()),
                     )
                     .await
                     .map_err(|err| config_load_error(&err))?;
@@ -686,7 +675,7 @@ impl TurnRequestProcessor {
         if has_any_overrides {
             thread
                 .preview_thread_settings_overrides(CodexThreadSettingsOverrides {
-                    cwd: cwd.clone(),
+                    environments: environments.clone(),
                     workspace_roots: runtime_workspace_roots.clone(),
                     approval_policy,
                     approvals_reviewer,
@@ -709,7 +698,7 @@ impl TurnRequestProcessor {
         }
 
         Ok(codex_protocol::protocol::ThreadSettingsOverrides {
-            cwd,
+            environments,
             workspace_roots: runtime_workspace_roots,
             profile_workspace_roots,
             approval_policy,
@@ -734,12 +723,18 @@ impl TurnRequestProcessor {
     ) -> Result<ThreadSettingsUpdateResponse, JSONRPCErrorError> {
         let (_, thread) = self.load_thread(&params.thread_id).await?;
         let cwd = resolve_request_cwd(params.cwd)?;
+        let environments = Self::build_environment_override(
+            thread.as_ref(),
+            cwd,
+            /*environment_selections*/ None,
+        )
+        .await;
         let thread_settings = self
             .build_thread_settings_overrides(
                 thread.as_ref(),
                 ThreadSettingsBuildParams {
                     method: "thread/settings/update",
-                    cwd,
+                    environments,
                     runtime_workspace_roots: None,
                     approval_policy: params.approval_policy,
                     approvals_reviewer: params.approvals_reviewer,

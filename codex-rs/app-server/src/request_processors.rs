@@ -279,8 +279,6 @@ use codex_config::loader::project_trust_key;
 use codex_config::types::McpServerTransportConfig;
 use codex_core::CodexThread;
 use codex_core::CodexThreadSettingsOverrides;
-use codex_core::ExternalGoalPreviousStatus;
-use codex_core::ExternalGoalSet;
 use codex_core::ForkSnapshot;
 use codex_core::NewThread;
 #[cfg(test)]
@@ -332,6 +330,7 @@ use codex_core_plugins::remote::RemotePluginShareContext as RemoteCatalogPluginS
 use codex_core_plugins::remote::RemotePluginShareSummary as RemoteCatalogPluginShareSummary;
 use codex_core_plugins::remote::RemotePluginSummary as RemoteCatalogPluginSummary;
 use codex_exec_server::EnvironmentManager;
+use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_exec_server::LOCAL_FS;
 use codex_features::FEATURES;
 use codex_features::Feature;
@@ -359,7 +358,6 @@ use codex_mcp::discover_supported_scopes;
 use codex_mcp::read_mcp_resource as read_mcp_resource_without_thread;
 use codex_mcp::resolve_oauth_scopes;
 use codex_memories_write::clear_memory_roots_contents;
-use codex_model_provider::ProviderAccountError;
 use codex_model_provider::create_model_provider;
 use codex_models_manager::collaboration_mode_presets::builtin_collaboration_mode_presets;
 use codex_protocol::ThreadId;
@@ -403,6 +401,7 @@ use codex_protocol::protocol::SessionConfiguredEvent;
 #[cfg(test)]
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::TurnEnvironmentSelection;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::USER_MESSAGE_BEGIN;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
@@ -464,6 +463,7 @@ mod command_exec_processor;
 mod config_processor;
 mod environment_processor;
 mod external_agent_config_processor;
+mod external_agent_session_import;
 mod feedback_doctor_report;
 mod feedback_processor;
 mod fs_processor;
@@ -514,6 +514,24 @@ use crate::thread_state::ThreadStateManager;
 use crate::thread_state::TurnStartReservationError;
 use token_usage_replay::latest_token_usage_turn_id_from_rollout_items;
 use token_usage_replay::send_thread_token_usage_update_to_connection;
+
+fn resolve_request_cwd(cwd: Option<PathBuf>) -> Result<Option<AbsolutePathBuf>, JSONRPCErrorError> {
+    cwd.map(|cwd| {
+        AbsolutePathBuf::relative_to_current_dir(path_utils::normalize_for_native_workdir(cwd))
+            .map_err(|err| invalid_request(format!("invalid cwd: {err}")))
+    })
+    .transpose()
+}
+
+fn resolve_runtime_workspace_roots(workspace_roots: Vec<AbsolutePathBuf>) -> Vec<AbsolutePathBuf> {
+    let mut resolved_roots = Vec::new();
+    for root in workspace_roots {
+        if !resolved_roots.iter().any(|existing| existing == &root) {
+            resolved_roots.push(root);
+        }
+    }
+    resolved_roots
+}
 
 mod config_errors;
 mod request_errors;

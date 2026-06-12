@@ -654,6 +654,9 @@
             "terminal_resize_reflow": {
               "type": "boolean"
             },
+            "terminal_visualization_instructions": {
+              "type": "boolean"
+            },
             "tool_call_mcp_elicitation": {
               "type": "boolean"
             },
@@ -4857,6 +4860,9 @@
           "type": "boolean"
         },
         "terminal_resize_reflow": {
+          "type": "boolean"
+        },
+        "terminal_visualization_instructions": {
           "type": "boolean"
         },
         "tool_call_mcp_elicitation": {

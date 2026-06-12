@@ -91,7 +91,6 @@ pub struct TurnContext {
     pub(crate) shell_environment_policy: ShellEnvironmentPolicy,
     pub(crate) available_models: Vec<ModelPreset>,
     pub(crate) unified_exec_shell_mode: UnifiedExecShellMode,
-    pub(crate) goal_tools_supported: bool,
     pub features: ManagedFeatures,
     pub(crate) ghost_snapshot: GhostSnapshotConfig,
     pub(crate) final_output_json_schema: Option<Value>,
@@ -168,10 +167,6 @@ impl TurnContext {
 
     pub(crate) fn tool_environment_mode(&self) -> ToolEnvironmentMode {
         ToolEnvironmentMode::from_count(self.environments.turn_environments.len())
-    }
-
-    pub(crate) fn goal_tools_enabled(&self) -> bool {
-        self.goal_tools_supported && self.features.get().enabled(Feature::Goals)
     }
 
     pub(crate) async fn with_model(
@@ -264,7 +259,6 @@ impl TurnContext {
             shell_environment_policy: self.shell_environment_policy.clone(),
             available_models,
             unified_exec_shell_mode: self.unified_exec_shell_mode.clone(),
-            goal_tools_supported: self.goal_tools_supported,
             features,
             ghost_snapshot: self.ghost_snapshot.clone(),
             final_output_json_schema: self.final_output_json_schema.clone(),
@@ -447,7 +441,7 @@ impl Session {
         session_configuration: &SessionConfiguration,
     ) -> Config {
         let mut config =
-            Self::build_per_turn_config(session_configuration, session_configuration.cwd.clone());
+            Self::build_per_turn_config(session_configuration, session_configuration.cwd().clone());
         config.model = Some(session_configuration.collaboration_mode.model().to_string());
         config.permissions.approval_policy = session_configuration.approval_policy.clone();
         config.workspace_roots = session_configuration.workspace_roots.clone();
@@ -477,7 +471,6 @@ impl Session {
         cwd: AbsolutePathBuf,
         sub_id: String,
         skills_outcome: Arc<SkillLoadOutcome>,
-        goal_tools_supported: bool,
     ) -> TurnContext {
         let reasoning_effort = session_configuration.collaboration_mode.reasoning_effort();
         let reasoning_summary = session_configuration
@@ -568,7 +561,6 @@ impl Session {
             shell_environment_policy: per_turn_config.permissions.shell_environment_policy.clone(),
             available_models,
             unified_exec_shell_mode,
-            goal_tools_supported,
             features: per_turn_config.features.clone(),
             ghost_snapshot: per_turn_config.ghost_snapshot.clone(),
             final_output_json_schema: None,
@@ -595,19 +587,9 @@ impl Session {
             let mut state = self.state.lock().await;
             match state.session_configuration.clone().apply(&updates) {
                 Ok(next) => {
-                    let mut effective_environments = updates
-                        .environments
-                        .clone()
-                        .unwrap_or_else(|| next.environments.clone());
-                    if updates.environments.is_none() {
-                        Self::overlay_runtime_cwd_on_primary_environment(
-                            &mut effective_environments,
-                            &next.cwd,
-                        );
-                    }
                     let turn_environments =
-                        self.resolve_turn_environments(&effective_environments)?;
-                    let previous_cwd = state.session_configuration.cwd.clone();
+                        self.resolve_turn_environments(next.environment_selections())?;
+                    let previous_cwd = state.session_configuration.cwd().clone();
                     let previous_permission_profile =
                         state.session_configuration.permission_profile();
                     let next_permission_profile = next.permission_profile();
@@ -664,7 +646,7 @@ impl Session {
         self.emit_config_changed_contributors(previous_config.as_ref(), new_config.as_ref());
         self.maybe_refresh_shell_snapshot_for_cwd(
             &previous_cwd,
-            &session_configuration.cwd,
+            session_configuration.cwd(),
             &codex_home,
             &session_source,
         );
@@ -739,7 +721,7 @@ impl Session {
         let cwd = primary_turn_environment
             .as_ref()
             .map(|turn_environment| turn_environment.cwd.clone())
-            .unwrap_or_else(|| session_configuration.cwd.clone());
+            .unwrap_or_else(|| session_configuration.cwd().clone());
         let per_turn_config = Self::build_per_turn_config(&session_configuration, cwd.clone());
         {
             let mcp_connection_manager = self.services.mcp_connection_manager.read().await;
@@ -781,7 +763,6 @@ impl Session {
                 .skills_for_config(&skills_input, fs)
                 .await,
         );
-        let goal_tools_supported = !per_turn_config.ephemeral && self.state_db().is_some();
         let mut turn_context: TurnContext = Self::make_turn_context(
             self.thread_id(),
             self.session_id(),
@@ -810,7 +791,6 @@ impl Session {
             cwd,
             sub_id,
             skills_outcome,
-            goal_tools_supported,
         );
         turn_context.realtime_active = self.conversation.running_state().await.is_some();
 
@@ -881,29 +861,14 @@ impl Session {
             let state = self.state.lock().await;
             state.session_configuration.clone()
         };
-        let mut effective_environments = session_configuration.environments.clone();
-        Self::overlay_runtime_cwd_on_primary_environment(
-            &mut effective_environments,
-            &session_configuration.cwd,
-        );
-        let turn_environments = match self.resolve_turn_environments(&effective_environments) {
-            Ok(turn_environments) => turn_environments,
-            Err(err) => {
-                warn!("failed to resolve stored session environments: {err}");
-                ResolvedTurnEnvironments::default()
-            }
-        };
+        let turn_environments =
+            match self.resolve_turn_environments(session_configuration.environment_selections()) {
+                Ok(turn_environments) => turn_environments,
+                Err(err) => {
+                    warn!("failed to resolve stored session environments: {err}");
+                    ResolvedTurnEnvironments::default()
+                }
+            };
         (session_configuration, turn_environments)
-    }
-
-    fn overlay_runtime_cwd_on_primary_environment(
-        environments: &mut [TurnEnvironmentSelection],
-        runtime_cwd: &AbsolutePathBuf,
-    ) {
-        if let Some(turn_environment) = environments.first_mut()
-            && turn_environment.cwd != *runtime_cwd
-        {
-            turn_environment.cwd = runtime_cwd.clone();
-        }
     }
 }

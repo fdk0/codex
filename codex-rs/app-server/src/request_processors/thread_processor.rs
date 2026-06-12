@@ -47,26 +47,16 @@ fn collect_resume_override_mismatches(
     }
     if let Some(requested_cwd) = request.cwd.as_deref() {
         let requested_cwd_path = std::path::PathBuf::from(requested_cwd);
-        if requested_cwd_path != config_snapshot.cwd.as_path() {
+        if requested_cwd_path != config_snapshot.cwd().as_path() {
             mismatch_details.push(format!(
                 "cwd requested={} active={}",
                 requested_cwd_path.display(),
-                config_snapshot.cwd.display()
+                config_snapshot.cwd().display()
             ));
         }
     }
     if let Some(requested_runtime_workspace_roots) = request.runtime_workspace_roots.as_ref() {
-        let base_cwd = request
-            .cwd
-            .as_deref()
-            .map(|cwd| {
-                AbsolutePathBuf::resolve_path_against_base(cwd, config_snapshot.cwd.as_path())
-            })
-            .unwrap_or_else(|| config_snapshot.cwd.clone());
-        let requested_runtime_workspace_roots = requested_runtime_workspace_roots
-            .iter()
-            .map(|path| AbsolutePathBuf::resolve_path_against_base(path, base_cwd.as_path()))
-            .collect::<Vec<_>>();
+        let requested_runtime_workspace_roots = requested_runtime_workspace_roots.to_vec();
         if requested_runtime_workspace_roots != config_snapshot.workspace_roots {
             mismatch_details.push(format!(
                 "runtime_workspace_roots requested={requested_runtime_workspace_roots:?} active={:?}",
@@ -846,6 +836,7 @@ impl ThreadRequestProcessor {
             ));
         }
         let environment_selections = self.parse_environment_selections(environments)?;
+        let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
             model_provider,
@@ -1163,8 +1154,9 @@ impl ThreadRequestProcessor {
 
         let sandbox = thread_response_sandbox_policy(
             &config_snapshot.permission_profile,
-            config_snapshot.cwd.as_path(),
+            config_snapshot.cwd().as_path(),
         );
+        let cwd = config_snapshot.cwd().clone();
         let active_permission_profile =
             thread_response_active_permission_profile(config_snapshot.active_permission_profile);
 
@@ -1173,7 +1165,7 @@ impl ThreadRequestProcessor {
             model: config_snapshot.model,
             model_provider: config_snapshot.model_provider_id,
             service_tier: config_snapshot.service_tier,
-            cwd: config_snapshot.cwd,
+            cwd,
             runtime_workspace_roots: config_snapshot.workspace_roots,
             instruction_sources,
             approval_policy: config_snapshot.approval_policy.into(),
@@ -1215,7 +1207,7 @@ impl ThreadRequestProcessor {
         model_provider: Option<String>,
         service_tier: Option<Option<String>>,
         cwd: Option<String>,
-        runtime_workspace_roots: Option<Vec<PathBuf>>,
+        runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
         approval_policy: Option<codex_app_server_protocol::AskForApproval>,
         approvals_reviewer: Option<codex_app_server_protocol::ApprovalsReviewer>,
         sandbox: Option<SandboxMode>,
@@ -2496,6 +2488,7 @@ impl ThreadRequestProcessor {
         };
 
         let history_cwd = thread_history.session_cwd();
+        let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
             model_provider,
@@ -2622,7 +2615,7 @@ impl ThreadRequestProcessor {
                 let config_snapshot = codex_thread.config_snapshot().await;
                 let sandbox = thread_response_sandbox_policy(
                     &config_snapshot.permission_profile,
-                    config_snapshot.cwd.as_path(),
+                    config_snapshot.cwd().as_path(),
                 );
                 let active_permission_profile = thread_response_active_permission_profile(
                     config_snapshot.active_permission_profile,
@@ -3214,6 +3207,7 @@ impl ThreadRequestProcessor {
         } else {
             Some(cli_overrides)
         };
+        let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
             model_provider,
@@ -3355,7 +3349,7 @@ impl ThreadRequestProcessor {
         let config_snapshot = forked_thread.config_snapshot().await;
         let sandbox = thread_response_sandbox_policy(
             &config_snapshot.permission_profile,
-            config_snapshot.cwd.as_path(),
+            config_snapshot.cwd().as_path(),
         );
         let active_permission_profile =
             thread_response_active_permission_profile(config_snapshot.active_permission_profile);
@@ -4233,7 +4227,7 @@ fn build_thread_from_snapshot(
         updated_at: now,
         status: ThreadStatus::NotLoaded,
         path,
-        cwd: config_snapshot.cwd.clone(),
+        cwd: config_snapshot.cwd().clone(),
         cli_version: env!("CARGO_PKG_VERSION").to_string(),
         agent_nickname: config_snapshot.session_source.get_nickname(),
         agent_role: config_snapshot.session_source.get_agent_role(),
