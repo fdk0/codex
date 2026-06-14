@@ -746,7 +746,19 @@ pub(super) async fn submission_loop(
 ) {
     // To break out of this loop, send Op::Shutdown.
     let mut shutdown_received = false;
-    while let Ok(sub) = rx_sub.recv().await {
+    loop {
+        let sub = tokio::select! {
+            sub = rx_sub.recv() => {
+                match sub {
+                    Ok(sub) => sub,
+                    Err(_) => break,
+                }
+            }
+            () = sess.pending_work_wakeup.notified() => {
+                sess.maybe_start_turn_for_pending_work().await;
+                continue;
+            }
+        };
         debug!(?sub, "Submission");
         let dispatch_span = submission_dispatch_span(&sub);
         let should_exit = async {

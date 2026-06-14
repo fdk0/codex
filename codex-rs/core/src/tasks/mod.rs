@@ -767,6 +767,9 @@ impl Session {
         if !cleared_active_turn {
             return;
         }
+        // The submission loop owns follow-up turn starts; notify it after the
+        // active turn clears so deferred trigger-turn mailbox mail can wake.
+        self.pending_work_wakeup.notify_one();
         self.emit_thread_idle_lifecycle_if_idle().await;
     }
 

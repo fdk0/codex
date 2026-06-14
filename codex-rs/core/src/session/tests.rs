@@ -158,6 +158,7 @@ use opentelemetry_sdk::metrics::data::MetricData;
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
 use std::path::Path;
 use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
 use tokio::time::timeout;
@@ -4927,6 +4928,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),
+        pending_work_wakeup: Notify::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
@@ -6992,6 +6994,7 @@ where
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),
+        pending_work_wakeup: Notify::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
@@ -8333,6 +8336,34 @@ impl SessionTask for CompletingTask {
     }
 }
 
+#[derive(Clone)]
+struct NotifyCompletingTask {
+    notify: Arc<Notify>,
+}
+
+impl SessionTask for NotifyCompletingTask {
+    fn kind(&self) -> TaskKind {
+        TaskKind::Regular
+    }
+
+    fn span_name(&self) -> &'static str {
+        "session_task.notify_completing"
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        _session: Arc<SessionTaskContext>,
+        _ctx: Arc<TurnContext>,
+        _input: Vec<TurnInput>,
+        cancellation_token: CancellationToken,
+    ) -> Option<String> {
+        tokio::select! {
+            () = self.notify.notified() => Some("done".to_string()),
+            () = cancellation_token.cancelled() => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct NeverEndingTask {
     kind: TaskKind,
@@ -9161,6 +9192,79 @@ async fn trigger_turn_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
     sess.abort_all_tasks(TurnAbortReason::Replaced).await;
 
     assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
+}
+
+#[tokio::test]
+async fn trigger_turn_mailbox_mail_starts_next_turn_after_current_turn_completes() {
+    let (sess, tc, rx) = make_session_and_context_with_rx().await;
+    let (tx_sub, rx_sub) = async_channel::bounded(1);
+    let session_loop = {
+        let sess = Arc::clone(&sess);
+        let config = sess.get_config().await;
+        tokio::spawn(async move {
+            submission_loop(sess, config, rx_sub).await;
+        })
+    };
+    let complete_current_turn = Arc::new(Notify::new());
+    sess.spawn_task(
+        Arc::clone(&tc),
+        Vec::new(),
+        NotifyCompletingTask {
+            notify: Arc::clone(&complete_current_turn),
+        },
+    )
+    .await;
+
+    sess.input_queue
+        .defer_mailbox_delivery_to_next_turn(&sess.active_turn, &tc.sub_id)
+        .await;
+    sess.input_queue
+        .enqueue_mailbox_communication(InterAgentCommunication::new(
+            AgentPath::try_from("/root/worker").expect("worker path should parse"),
+            AgentPath::root(),
+            Vec::new(),
+            "late trigger update".to_string(),
+            /*trigger_turn*/ true,
+        ))
+        .await;
+
+    assert!(
+        !sess.input_queue.has_pending_input(&sess.active_turn).await,
+        "trigger-turn mailbox mail should not extend the current turn after its answer boundary"
+    );
+
+    complete_current_turn.notify_one();
+
+    let next_turn_id = timeout(Duration::from_secs(2), async {
+        let mut saw_current_complete = false;
+        loop {
+            let event = rx.recv().await.expect("event channel should stay open");
+            match event.msg {
+                EventMsg::TurnComplete(TurnCompleteEvent { turn_id, .. })
+                    if turn_id == tc.sub_id =>
+                {
+                    saw_current_complete = true;
+                }
+                EventMsg::TurnStarted(TurnStartedEvent { turn_id, .. })
+                    if saw_current_complete && turn_id != tc.sub_id =>
+                {
+                    break turn_id;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("trigger-turn mailbox mail should start a follow-up turn");
+
+    assert!(!sess.input_queue.has_trigger_turn_mailbox_items().await);
+    sess.abort_turn_if_active(&next_turn_id, TurnAbortReason::Interrupted)
+        .await;
+    drop(tx_sub);
+    timeout(Duration::from_secs(2), session_loop)
+        .await
+        .expect("session loop should stop after submission channel closes")
+        .expect("session loop task should not panic");
 }
 
 #[tokio::test]
