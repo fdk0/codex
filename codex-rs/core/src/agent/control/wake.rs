@@ -96,29 +96,45 @@ impl AgentControl {
         let mut status_rx = self.subscribe_status(child_thread_id).await.ok()?;
         let current_status = status_rx.borrow().clone();
         let current_status_is_final = is_final(&current_status);
+        let current_status_allows_rearm =
+            current_status_is_final || matches!(current_status, AgentStatus::PendingInit);
         if current_status_is_final {
             let _ = status_rx.borrow_and_update();
         }
 
         let wake_descendant_policy = self.read_wake_descendant_policy(child_thread_id).await;
-        let mut subscriptions = self.parent_wake_subscriptions.lock().await;
-        let subscription = subscriptions.get_mut(&child_thread_id)?;
-        if let Some(wake_descendant_policy) = wake_descendant_policy {
-            subscription.wake_descendant_policy = wake_descendant_policy;
-        }
-        let previous_generation = subscription.completion_watcher_generation;
-        if !current_status_is_final
-            && subscription.last_notified_generation != Some(previous_generation)
-        {
-            return None;
-        }
-        let child_agent_path = subscription.child_agent_path.clone();
-        let child_reference = subscription.child_reference.clone();
-        subscription.completion_watcher_generation =
-            subscription.completion_watcher_generation.saturating_add(1);
-        let completion_watcher_generation = subscription.completion_watcher_generation;
-        let parent_thread_id = subscription.parent_thread_id;
-        drop(subscriptions);
+        let (
+            previous_generation,
+            child_agent_path,
+            child_reference,
+            completion_watcher_generation,
+            parent_thread_id,
+        ) = {
+            let mut subscriptions = self.parent_wake_subscriptions.lock().await;
+            let subscription = subscriptions.get_mut(&child_thread_id)?;
+            if let Some(wake_descendant_policy) = wake_descendant_policy {
+                subscription.wake_descendant_policy = wake_descendant_policy;
+            }
+            let previous_generation = subscription.completion_watcher_generation;
+            if !current_status_allows_rearm
+                && subscription.last_notified_generation != Some(previous_generation)
+            {
+                return None;
+            }
+            let child_agent_path = subscription.child_agent_path.clone();
+            let child_reference = subscription.child_reference.clone();
+            subscription.completion_watcher_generation =
+                subscription.completion_watcher_generation.saturating_add(1);
+            let completion_watcher_generation = subscription.completion_watcher_generation;
+            let parent_thread_id = subscription.parent_thread_id;
+            (
+                previous_generation,
+                child_agent_path,
+                child_reference,
+                completion_watcher_generation,
+                parent_thread_id,
+            )
+        };
 
         if current_status_is_final
             && !suppress_immediate_parent_notification
@@ -556,6 +572,28 @@ impl AgentControl {
                 last_notified_generation: None,
             },
         );
+    }
+
+    pub(crate) async fn restore_parent_wake_subscription_for_loaded_thread(
+        &self,
+        child_thread_id: ThreadId,
+        session_source: &SessionSource,
+        config: &Config,
+    ) {
+        let wake_parent_on_completion = self
+            .wake_parent_on_completion_for_thread(
+                child_thread_id,
+                Some(session_source),
+                config.agent_wake_parent_on_completion_default,
+            )
+            .await;
+        self.register_parent_wake_subscription(
+            child_thread_id,
+            Some(session_source),
+            wake_parent_on_completion,
+            config.agent_wake_descendant_policy,
+        )
+        .await;
     }
 
     pub(super) async fn wake_parent_on_completion_for_thread(

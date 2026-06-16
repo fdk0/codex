@@ -1272,26 +1272,46 @@ impl ThreadManagerState {
     ) -> CodexResult<NewThread> {
         let registration_source = session_source.clone();
         let agent_control_for_registration = agent_control.clone();
+        let config_for_registration = config.clone();
         let is_resumed_thread = matches!(&initial_history, InitialHistory::Resumed(_));
         if let InitialHistory::Resumed(resumed) = &initial_history {
-            let mut threads = self.threads.write().await;
-            if let Some(thread) = threads.get(&resumed.conversation_id).cloned() {
-                if thread.is_running() {
-                    if let Some(requested_rollout_path) = resumed.rollout_path.as_deref()
-                        && thread.rollout_path().as_deref() != Some(requested_rollout_path)
-                    {
-                        return Err(CodexErr::InvalidRequest(format!(
-                            "thread {} is already running with a different rollout path",
-                            resumed.conversation_id
-                        )));
+            let existing_thread = {
+                let mut threads = self.threads.write().await;
+                match threads.get(&resumed.conversation_id).cloned() {
+                    Some(thread) if thread.is_running() => {
+                        if let Some(requested_rollout_path) = resumed.rollout_path.as_deref()
+                            && thread.rollout_path().as_deref() != Some(requested_rollout_path)
+                        {
+                            return Err(CodexErr::InvalidRequest(format!(
+                                "thread {} is already running with a different rollout path",
+                                resumed.conversation_id
+                            )));
+                        }
+                        Some(thread)
                     }
-                    return Ok(NewThread {
-                        thread_id: resumed.conversation_id,
-                        session_configured: thread.session_configured(),
-                        thread,
-                    });
+                    Some(_) => {
+                        threads.remove(&resumed.conversation_id);
+                        None
+                    }
+                    None => None,
                 }
-                threads.remove(&resumed.conversation_id);
+            };
+            if let Some(thread) = existing_thread {
+                let thread_control = thread.codex.session.services.agent_control.clone();
+                thread_control
+                    .register_live_thread_source(resumed.conversation_id, &registration_source);
+                thread_control
+                    .restore_parent_wake_subscription_for_loaded_thread(
+                        resumed.conversation_id,
+                        &registration_source,
+                        &config_for_registration,
+                    )
+                    .await;
+                return Ok(NewThread {
+                    thread_id: resumed.conversation_id,
+                    session_configured: thread.session_configured(),
+                    thread,
+                });
             }
         }
         let environment_selections =
@@ -1346,6 +1366,13 @@ impl ThreadManagerState {
         agent_control_for_registration
             .register_live_thread_source(new_thread.thread_id, &registration_source);
         if is_resumed_thread {
+            agent_control_for_registration
+                .restore_parent_wake_subscription_for_loaded_thread(
+                    new_thread.thread_id,
+                    &registration_source,
+                    &config_for_registration,
+                )
+                .await;
             new_thread.thread.emit_thread_resume_lifecycle().await;
         }
         Ok(new_thread)

@@ -2352,12 +2352,13 @@ async fn completion_watcher_keeps_notification_pending_when_parent_missing() {
     child_thread.codex.session.active_turn.lock().await.take();
     sleep(Duration::from_millis(500)).await;
 
-    let subscriptions = harness.control.parent_wake_subscriptions.lock().await;
-    let subscription = subscriptions
-        .get(&child_thread_id)
-        .expect("child wake subscription should remain registered");
-    assert_eq!(subscription.last_notified_generation, None);
-    drop(subscriptions);
+    {
+        let subscriptions = harness.control.parent_wake_subscriptions.lock().await;
+        let subscription = subscriptions
+            .get(&child_thread_id)
+            .expect("child wake subscription should remain registered");
+        assert_eq!(subscription.last_notified_generation, None);
+    }
     assert!(
         harness
             .control
@@ -2486,6 +2487,163 @@ async fn trigger_turn_rearms_wake_subscription_even_when_child_is_running() {
     })
     .await
     .expect("triggered running child should re-arm and wake parent on completion");
+}
+
+#[tokio::test]
+async fn direct_subagent_resume_restores_wake_subscription_for_descendant_followup() {
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let harness = AgentControlHarness::new_with_config(home, config.clone()).await;
+    let root = harness
+        .manager
+        .start_thread(config.clone())
+        .await
+        .expect("root thread should start");
+    let dispatcher_path = AgentPath::root()
+        .join("dispatcher")
+        .expect("dispatcher path");
+    let review_path = dispatcher_path.join("review").expect("review path");
+    let dispatcher_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: root.thread_id,
+        depth: 1,
+        agent_path: Some(dispatcher_path.clone()),
+        agent_nickname: None,
+        agent_role: Some("dispatcher".to_string()),
+    });
+    let spawned_dispatcher = harness
+        .control
+        .spawn_agent_with_metadata(
+            config.clone(),
+            text_input("start dispatcher"),
+            Some(dispatcher_source),
+            SpawnAgentOptions {
+                parent_thread_id: Some(root.thread_id),
+                wake_parent_on_completion: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("dispatcher spawn should succeed");
+    let dispatcher_thread = harness
+        .manager
+        .get_thread(spawned_dispatcher.thread_id)
+        .await
+        .expect("dispatcher thread should exist");
+    dispatcher_thread
+        .inject_response_items(vec![assistant_message(
+            "dispatcher handoff",
+            Some(MessagePhase::FinalAnswer),
+        )])
+        .await
+        .expect("dispatcher rollout should persist");
+    let rollout_path = dispatcher_thread
+        .rollout_path()
+        .expect("dispatcher should have a rollout path");
+    dispatcher_thread
+        .shutdown_and_wait()
+        .await
+        .expect("dispatcher should shut down before direct resume");
+    assert!(
+        harness
+            .manager
+            .remove_thread(&spawned_dispatcher.thread_id)
+            .await
+            .is_some()
+    );
+
+    let resumed_dispatcher = harness
+        .manager
+        .resume_thread_from_rollout(
+            config,
+            rollout_path,
+            codex_login::AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
+            /*parent_trace*/ None,
+        )
+        .await
+        .expect("dispatcher should resume directly from rollout");
+    let resumed_control = resumed_dispatcher
+        .thread
+        .codex
+        .session
+        .services
+        .agent_control
+        .clone();
+
+    resumed_control
+        .send_inter_agent_communication(
+            resumed_dispatcher.thread_id,
+            InterAgentCommunication::new(
+                review_path,
+                dispatcher_path.clone(),
+                Vec::new(),
+                "review completed".to_string(),
+                /*trigger_turn*/ true,
+            ),
+        )
+        .await
+        .expect("descendant follow-up should submit to resumed dispatcher");
+
+    let dispatcher_reconcile_turn = resumed_dispatcher
+        .thread
+        .codex
+        .session
+        .new_default_turn()
+        .await;
+    resumed_dispatcher
+        .thread
+        .codex
+        .session
+        .send_event(
+            dispatcher_reconcile_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: dispatcher_reconcile_turn.sub_id.clone(),
+                last_agent_message: Some("driver repair required".to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    resumed_dispatcher
+        .thread
+        .codex
+        .session
+        .active_turn
+        .lock()
+        .await
+        .take();
+
+    let expected_message = crate::session_prefix::format_subagent_notification_message(
+        dispatcher_path.as_str(),
+        &AgentStatus::Completed(Some("driver repair required".to_string())),
+    );
+    let expected = (
+        root.thread_id,
+        Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                dispatcher_path,
+                AgentPath::root(),
+                Vec::new(),
+                expected_message,
+                /*trigger_turn*/ true,
+            ),
+        },
+    );
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let captured = harness
+                .manager
+                .captured_ops()
+                .into_iter()
+                .find(|entry| *entry == expected);
+            if captured == Some(expected.clone()) {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("directly resumed dispatcher should wake root after descendant-triggered completion");
 }
 
 #[tokio::test]
