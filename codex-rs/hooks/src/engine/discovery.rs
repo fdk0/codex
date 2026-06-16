@@ -70,7 +70,7 @@ pub(crate) fn discover_handlers(
     let mut hook_entries = Vec::new();
     let mut warnings = plugin_hook_load_warnings;
     let mut display_order = 0_i64;
-    let mut loaded_hooks_json_paths = HashSet::new();
+    let mut visited_json_hook_folders = HashSet::new();
     let hook_states = hook_states_from_stack(config_layer_stack);
     let policy = HookDiscoveryPolicy {
         allow_managed_hooks_only: config_layer_stack.is_some_and(|config_layer_stack| {
@@ -113,14 +113,12 @@ pub(crate) fn discover_handlers(
             if !policy.allows(&policy_source) {
                 continue;
             }
-            let mut json_hooks =
-                load_hooks_json(layer.hooks_config_folder().as_deref(), &mut warnings);
-            if let Some((source_path, _)) = json_hooks.as_ref() {
-                let key = source_path.as_path().display().to_string();
-                if !loaded_hooks_json_paths.insert(key) {
-                    json_hooks = None;
+            let json_hooks = match layer.hooks_config_folder() {
+                Some(config_folder) if visited_json_hook_folders.insert(config_folder.clone()) => {
+                    load_hooks_json(Some(config_folder.as_path()), &mut warnings)
                 }
-            }
+                _ => None,
+            };
             let toml_hooks = load_toml_hooks_from_layer(layer, &mut warnings);
 
             if let (Some((json_source_path, json_events)), Some((toml_source_path, toml_events))) =

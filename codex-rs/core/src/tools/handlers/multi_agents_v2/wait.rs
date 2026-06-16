@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent::agent_resolver::resolve_agent_target;
 use crate::agent::status::is_final;
+use crate::session::InputQueueActivity;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
@@ -31,7 +32,6 @@ impl Handler {
     }
 }
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for Handler {
     fn tool_name(&self) -> ToolName {
         ToolName::plain("wait_agent")
@@ -41,7 +41,13 @@ impl ToolExecutor<ToolInvocation> for Handler {
         create_wait_agent_tool_v2(self.options)
     }
 
-    async fn handle(
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(self.handle_call(invocation))
+    }
+}
+
+impl Handler {
+    async fn handle_call(
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
@@ -102,9 +108,16 @@ impl ToolExecutor<ToolInvocation> for Handler {
             .await;
 
         let (timed_out, agent_statuses, statuses_by_id) = if receiver_thread_ids.is_empty() {
-            let mut mailbox_rx = session.input_queue.subscribe_mailbox().await;
+            let turn_state = session
+                .input_queue
+                .turn_state_for_sub_id(&session.active_turn, &turn.sub_id)
+                .await;
+            let (mut activity_rx, pending_activity) = session
+                .input_queue
+                .subscribe_activity(turn_state.as_deref())
+                .await;
             let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-            let timed_out = !wait_for_mailbox_change(&mut mailbox_rx, deadline).await;
+            let timed_out = !wait_for_activity(&mut activity_rx, pending_activity, deadline).await;
             (timed_out, Vec::new(), HashMap::new())
         } else {
             let mut wake_enabled_children = session
@@ -321,11 +334,16 @@ async fn wait_for_final_status(
     }
 }
 
-async fn wait_for_mailbox_change(
-    mailbox_rx: &mut tokio::sync::watch::Receiver<()>,
+async fn wait_for_activity(
+    activity_rx: &mut tokio::sync::watch::Receiver<InputQueueActivity>,
+    pending_activity: Option<InputQueueActivity>,
     deadline: Instant,
 ) -> bool {
-    match timeout_at(deadline, mailbox_rx.changed()).await {
+    if pending_activity.is_some() {
+        return true;
+    }
+
+    match timeout_at(deadline, activity_rx.changed()).await {
         Ok(Ok(())) => true,
         Ok(Err(_)) | Err(_) => false,
     }

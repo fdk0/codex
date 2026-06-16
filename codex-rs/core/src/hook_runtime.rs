@@ -28,6 +28,7 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookEventName;
@@ -40,6 +41,7 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_thread_store::ReadThreadParams;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value;
+use tracing::instrument;
 
 use crate::context::ContextualUserFragment;
 use crate::context::HookAdditionalContext;
@@ -68,7 +70,7 @@ struct ContextInjectingHookOutcome {
 
 fn hook_cwd(turn_context: &TurnContext) -> AbsolutePathBuf {
     if let Some(turn_environment) = turn_context.environments.primary() {
-        turn_environment.cwd.clone()
+        turn_environment.cwd().clone()
     } else {
         #[allow(deprecated)]
         {
@@ -129,6 +131,7 @@ impl From<UserPromptSubmitOutcome> for ContextInjectingHookOutcome {
     }
 }
 
+#[instrument(level = "trace", skip_all)]
 pub(crate) async fn run_pending_session_start_hooks(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
@@ -323,6 +326,7 @@ pub(crate) async fn run_post_tool_use_hooks(
     outcome
 }
 
+#[instrument(level = "trace", skip_all)]
 pub(crate) async fn run_turn_stop_hooks(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
@@ -414,9 +418,7 @@ pub(crate) async fn run_pre_compact_hooks(
     let outcome = sess.hooks().run_pre_compact(request).await;
     emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
     if outcome.should_stop {
-        PreCompactHookOutcome::Stopped {
-            reason: outcome.stop_reason,
-        }
+        PreCompactHookOutcome::Stopped
     } else {
         PreCompactHookOutcome::Continue
     }
@@ -424,7 +426,7 @@ pub(crate) async fn run_pre_compact_hooks(
 
 pub(crate) enum PreCompactHookOutcome {
     Continue,
-    Stopped { reason: Option<String> },
+    Stopped,
 }
 
 pub(crate) enum PostCompactHookOutcome {
@@ -459,6 +461,7 @@ pub(crate) async fn run_post_compact_hooks(
     }
 }
 
+#[instrument(level = "trace", skip_all)]
 pub(crate) async fn run_legacy_after_agent_hook(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
@@ -519,7 +522,7 @@ pub(crate) async fn run_legacy_after_agent_hook(
     };
     let event = EventMsg::Error(codex_protocol::protocol::ErrorEvent {
         message,
-        codex_error_info: None,
+        codex_error_info: Some(CodexErrorInfo::Other),
     });
     sess.send_event(turn_context, event).await;
     true
@@ -584,6 +587,10 @@ pub(crate) async fn inspect_pending_input(
             should_stop: false,
             additional_contexts: Vec::new(),
         },
+        TurnInput::InterAgentCommunication(_) => HookRuntimeOutcome {
+            should_stop: false,
+            additional_contexts: Vec::new(),
+        },
     }
 }
 
@@ -610,6 +617,10 @@ pub(crate) async fn record_pending_input(
                 sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
                     .await;
             }
+        }
+        TurnInput::InterAgentCommunication(communication) => {
+            sess.record_inter_agent_communication(turn_context, communication)
+                .await;
         }
     }
     record_additional_contexts(sess, turn_context, additional_contexts).await;
@@ -892,10 +903,15 @@ mod tests {
     #[tokio::test]
     async fn hook_cwd_uses_primary_turn_environment() {
         let (_session, mut turn_context) = make_session_and_context().await;
-        let expected_cwd = turn_context.environments.turn_environments[0]
-            .cwd
-            .join("selected-env");
-        turn_context.environments.turn_environments[0].cwd = expected_cwd.clone();
+        let turn_environment = &turn_context.environments.turn_environments[0];
+        let expected_cwd = turn_environment.cwd().join("selected-env");
+        turn_context.environments.turn_environments[0] =
+            crate::session::turn_context::TurnEnvironment::new(
+                turn_environment.environment_id.clone(),
+                turn_environment.environment.clone(),
+                expected_cwd.clone(),
+                turn_environment.shell.clone(),
+            );
 
         assert_eq!(hook_cwd(&turn_context), expected_cwd);
     }
