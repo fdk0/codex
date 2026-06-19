@@ -10,6 +10,7 @@ use crate::context_manager::is_user_turn_boundary;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::parse_turn_item;
 use crate::session::emit_subagent_session_started;
+use crate::session_prefix::format_inter_agent_completion_message;
 use crate::session_prefix::format_subagent_context_line;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::thread_manager::ResumeThreadWithHistoryOptions;
@@ -462,13 +463,18 @@ impl AgentControl {
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| thread_id.to_string());
-            let last_task_message = match metadata.last_task_message.clone() {
-                Some(last_task_message) => Some(last_task_message),
-                None => last_task_message_for_thread(thread.as_ref()).await,
+            let agent_status = thread.agent_status().await;
+            let last_task_message = if is_final(&agent_status) {
+                None
+            } else {
+                match metadata.last_task_message.clone() {
+                    Some(last_task_message) => Some(last_task_message),
+                    None => last_task_message_for_thread(thread.as_ref()).await,
+                }
             };
             agents.push(ListedAgent {
                 agent_name,
-                agent_status: thread.agent_status().await,
+                agent_status,
                 last_task_message,
             });
         }

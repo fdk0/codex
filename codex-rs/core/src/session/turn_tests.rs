@@ -1,7 +1,9 @@
 use super::*;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::TurnItemContributor;
+use codex_protocol::AgentPath;
 use codex_protocol::items::AgentMessageContent;
+use codex_protocol::protocol::InterAgentCommunication;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
 
@@ -63,5 +65,58 @@ async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
     assert_eq!(
         last_agent_message.as_deref(),
         Some("plan contributed assistant text")
+    );
+}
+
+#[test]
+fn split_leading_non_user_input_preserves_user_input_boundary() {
+    let response_item = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "synthetic wake".to_string(),
+        }],
+        phase: None,
+        metadata: None,
+    };
+    let first_mail = InterAgentCommunication::new(
+        AgentPath::root().join("worker").expect("worker path"),
+        AgentPath::root(),
+        Vec::new(),
+        "first".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let second_mail = InterAgentCommunication::new(
+        AgentPath::root().join("reviewer").expect("reviewer path"),
+        AgentPath::root(),
+        Vec::new(),
+        "second".to_string(),
+        /*trigger_turn*/ false,
+    );
+    let user_input = TurnInput::UserInput {
+        content: vec![UserInput::Text {
+            text: "operator steer".to_string(),
+            text_elements: Vec::new(),
+        }],
+        client_id: None,
+    };
+
+    let (early_input, deferred_input) = split_leading_non_user_input(vec![
+        TurnInput::ResponseItem(response_item.clone()),
+        TurnInput::InterAgentCommunication(first_mail.clone()),
+        user_input.clone(),
+        TurnInput::InterAgentCommunication(second_mail.clone()),
+    ]);
+
+    assert_eq!(
+        early_input,
+        vec![
+            TurnInput::ResponseItem(response_item),
+            TurnInput::InterAgentCommunication(first_mail),
+        ]
+    );
+    assert_eq!(
+        deferred_input,
+        vec![user_input, TurnInput::InterAgentCommunication(second_mail),]
     );
 }

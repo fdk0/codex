@@ -165,9 +165,6 @@ impl AgentControl {
             self.touch_loaded_v2_residency(&state, thread_id).await;
             return Ok(());
         }
-        if self.state.agent_metadata_for_thread(thread_id).is_none() {
-            return Err(CodexErr::ThreadNotFound(thread_id));
-        }
 
         let stored_thread = state
             .read_stored_thread(ReadThreadParams {
@@ -187,16 +184,24 @@ impl AgentControl {
             history,
             rollout_path: stored_thread.rollout_path,
         });
-        if initial_history.get_multi_agent_version() != Some(MultiAgentVersion::V2) {
+        let (session_source, _) = initial_history
+            .get_resumed_session_sources()
+            .unwrap_or((stored_source, None));
+        let multi_agent_version = initial_history
+            .get_multi_agent_version()
+            .unwrap_or_else(|| match &session_source {
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }) => {
+                    config.multi_agent_version_from_features()
+                }
+                _ => MultiAgentVersion::V1,
+            });
+        if multi_agent_version != MultiAgentVersion::V2 {
             return Err(CodexErr::ThreadNotFound(thread_id));
         }
         let residency_slot = self
             .reserve_v2_residency_slot(&state, &config, Some(thread_id))
             .await?;
 
-        let (session_source, _) = initial_history
-            .get_resumed_session_sources()
-            .unwrap_or((stored_source, None));
         let parent_thread_id = initial_history
             .get_resumed_parent_thread_id()
             .or(stored_parent_thread_id);

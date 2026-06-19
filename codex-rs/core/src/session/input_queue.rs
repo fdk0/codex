@@ -116,11 +116,38 @@ impl InputQueue {
         })
     }
 
-    /// Clear any pending waiters and input buffered for the current turn.
-    pub(crate) async fn clear_pending(&self, active_turn: &ActiveTurn) {
-        let mut turn_state = active_turn.turn_state.lock().await;
-        turn_state.clear_pending_waiters();
-        turn_state.pending_input.items.clear();
+    /// Clear pending waiters and buffered input for an aborted turn.
+    ///
+    /// Inter-agent mailbox items are wake/coordination inputs, not disposable
+    /// user steering. If a turn is aborted after mailbox delivery moved them
+    /// into turn-local pending input but before the turn recorded them, requeue
+    /// them so the next turn can deliver the wake instead of silently dropping
+    /// it.
+    pub(crate) async fn clear_pending_and_requeue_mailbox(&self, active_turn: &ActiveTurn) {
+        let requeued_mailbox_items = {
+            let mut turn_state = active_turn.turn_state.lock().await;
+            turn_state.clear_pending_waiters();
+            turn_state
+                .pending_input
+                .items
+                .split_off(0)
+                .into_iter()
+                .filter_map(|input| match input {
+                    TurnInput::InterAgentCommunication(communication) => Some(communication),
+                    TurnInput::UserInput { .. } | TurnInput::ResponseItem(_) => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        if requeued_mailbox_items.is_empty() {
+            return;
+        }
+        {
+            let mut mailbox_pending_mails = self.mailbox_pending_mails.lock().await;
+            for communication in requeued_mailbox_items.into_iter().rev() {
+                mailbox_pending_mails.push_front(communication);
+            }
+        }
+        self.activity_tx.send_replace(InputQueueActivity::Mailbox);
     }
 
     pub(crate) async fn defer_mailbox_delivery_to_next_turn(
@@ -264,6 +291,7 @@ impl TurnInputQueue {
 mod tests {
     use super::*;
     use codex_protocol::AgentPath;
+    use codex_protocol::models::ContentItem;
     use pretty_assertions::assert_eq;
 
     fn make_mail(
@@ -416,5 +444,56 @@ mod tests {
             ))
             .await;
         assert!(input_queue.has_trigger_turn_mailbox_items().await);
+    }
+
+    #[tokio::test]
+    async fn clear_pending_requeues_inter_agent_communications_in_order() {
+        let input_queue = InputQueue::new();
+        let active_turn = ActiveTurn::default();
+        let worker = AgentPath::root().join("worker").expect("worker path");
+        let reviewer = AgentPath::root().join("reviewer").expect("reviewer path");
+        let first = make_mail(
+            worker,
+            AgentPath::root(),
+            "first",
+            /*trigger_turn*/ true,
+        );
+        let second = make_mail(
+            reviewer,
+            AgentPath::root(),
+            "second",
+            /*trigger_turn*/ false,
+        );
+
+        input_queue
+            .extend_pending_input_for_turn_state(
+                active_turn.turn_state.as_ref(),
+                vec![
+                    TurnInput::InterAgentCommunication(first.clone()),
+                    TurnInput::ResponseItem(ResponseItem::Message {
+                        id: None,
+                        role: "user".to_string(),
+                        content: vec![ContentItem::InputText {
+                            text: "non-mail pending input is discarded".to_string(),
+                        }],
+                        phase: None,
+                        metadata: None,
+                    }),
+                    TurnInput::InterAgentCommunication(second.clone()),
+                ],
+            )
+            .await;
+
+        input_queue
+            .clear_pending_and_requeue_mailbox(&active_turn)
+            .await;
+
+        assert_eq!(
+            input_queue.drain_mailbox_input_items().await,
+            vec![
+                TurnInput::InterAgentCommunication(first),
+                TurnInput::InterAgentCommunication(second),
+            ]
+        );
     }
 }

@@ -353,7 +353,6 @@ impl AgentControl {
 
         let delivered = if let Ok(state) = self.upgrade() {
             let child_thread = state.get_thread(child_thread_id).await.ok();
-            let message = format_subagent_notification_message(child_reference.as_str(), &status);
             if child_agent_path.is_some()
                 && child_thread
                     .as_ref()
@@ -368,6 +367,19 @@ impl AgentControl {
                     Some((child_agent_path, parent_agent_path))
                 });
                 if let Some((child_agent_path, parent_agent_path)) = delivery_paths {
+                    let Some(message) = format_inter_agent_completion_message(
+                        parent_agent_path.clone(),
+                        child_agent_path.clone(),
+                        &status,
+                    ) else {
+                        return true;
+                    };
+                    if !self
+                        .ensure_completion_parent_loaded(parent_thread_id, child_thread.as_deref())
+                        .await
+                    {
+                        return false;
+                    }
                     let communication = InterAgentCommunication::new(
                         child_agent_path,
                         parent_agent_path,
@@ -382,6 +394,14 @@ impl AgentControl {
                     true
                 }
             } else {
+                let message =
+                    format_subagent_notification_message(child_reference.as_str(), &status);
+                if !self
+                    .ensure_completion_parent_loaded(parent_thread_id, child_thread.as_deref())
+                    .await
+                {
+                    return false;
+                }
                 self.notify_parent_with_contextual_message(
                     parent_thread_id,
                     message,
@@ -406,6 +426,39 @@ impl AgentControl {
         }
         subscription.last_notified_generation = Some(completion_watcher_generation);
         true
+    }
+
+    async fn ensure_completion_parent_loaded(
+        &self,
+        parent_thread_id: ThreadId,
+        child_thread: Option<&crate::CodexThread>,
+    ) -> bool {
+        let Ok(state) = self.upgrade() else {
+            return false;
+        };
+        if state.get_thread(parent_thread_id).await.is_ok() {
+            return true;
+        }
+
+        let Some(child_thread) = child_thread else {
+            return false;
+        };
+        let config = child_thread
+            .codex
+            .session
+            .get_config()
+            .await
+            .as_ref()
+            .clone();
+        match self.ensure_v2_agent_loaded(config, parent_thread_id).await {
+            Ok(()) => true,
+            Err(err) => {
+                warn!(
+                    "failed to reload parent thread {parent_thread_id} for child completion wake: {err}"
+                );
+                false
+            }
+        }
     }
 
     async fn leaf_only_wake_blocked(&self, child_thread_id: ThreadId) -> bool {

@@ -55,7 +55,7 @@ impl AgentControl {
             .effective_agent_max_threads(MultiAgentVersion::V2)
             .unwrap_or(usize::MAX);
         Arc::clone(&self.v2_residency)
-            .reserve_slot(state, capacity, protected_thread_id)
+            .reserve_slot(self, state, capacity, protected_thread_id)
             .await
     }
 
@@ -79,6 +79,7 @@ impl AgentControl {
 impl V2Residency {
     async fn reserve_slot(
         self: Arc<Self>,
+        control: &AgentControl,
         manager: &Arc<ThreadManagerState>,
         capacity: usize,
         protected_thread_id: Option<ThreadId>,
@@ -91,7 +92,7 @@ impl V2Residency {
                 });
             }
             if !self
-                .try_unload_one_resident(manager, protected_thread_id)
+                .try_unload_one_resident(control, manager, protected_thread_id)
                 .await
             {
                 return Err(CodexErr::AgentLimitReached {
@@ -115,6 +116,7 @@ impl V2Residency {
 
     async fn try_unload_one_resident(
         &self,
+        control: &AgentControl,
         manager: &Arc<ThreadManagerState>,
         protected_thread_id: Option<ThreadId>,
     ) -> bool {
@@ -132,6 +134,13 @@ impl V2Residency {
                 continue;
             };
             if !is_unloadable(candidate_thread.as_ref()).await {
+                self.touch(candidate_thread_id);
+                continue;
+            }
+            if control
+                .has_pending_wake_enabled_children_for_parent(candidate_thread_id)
+                .await
+            {
                 self.touch(candidate_thread_id);
                 continue;
             }

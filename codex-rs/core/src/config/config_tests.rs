@@ -10106,9 +10106,13 @@ enabled = true
         ),
         (None, Some(3))
     );
+    let expected_root_usage_hint = default_multi_agent_v2_usage_hint_text(
+        DEFAULT_MULTI_AGENT_V2_ROOT_AGENT_USAGE_HINT_TEXT,
+        DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION,
+    );
     assert_eq!(
         config.multi_agent_v2.root_agent_usage_hint_text.as_deref(),
-        Some(DEFAULT_MULTI_AGENT_V2_ROOT_AGENT_USAGE_HINT_TEXT)
+        Some(expected_root_usage_hint.as_str())
     );
     assert!(
         !config
@@ -10118,9 +10122,13 @@ enabled = true
             .unwrap_or_default()
             .contains("maximum concurrency"),
     );
+    let expected_subagent_usage_hint = default_multi_agent_v2_usage_hint_text(
+        DEFAULT_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT,
+        DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION,
+    );
     assert_eq!(
         config.multi_agent_v2.subagent_usage_hint_text.as_deref(),
-        Some(DEFAULT_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT)
+        Some(expected_subagent_usage_hint.as_str())
     );
     assert!(
         !config

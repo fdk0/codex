@@ -6,17 +6,22 @@ use crate::config::test_config;
 use crate::thread_manager::ThreadManagerState;
 use codex_features::Feature;
 use codex_login::CodexAuth;
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::user_input::UserInput;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
+
+use super::super::SpawnAgentOptions;
 
 #[tokio::test]
 async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
@@ -126,6 +131,101 @@ async fn interrupted_v2_agent_is_lost_after_residency_eviction() {
     }
 }
 
+#[tokio::test]
+async fn residency_eviction_preserves_wake_parent_with_pending_child() {
+    let mut config = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    config.multi_agent_v2.max_concurrent_threads_per_session = 3;
+    let temp_home = tempfile::tempdir().expect("create temp home");
+    config.codex_home = temp_home.path().to_path_buf().try_into().unwrap();
+    config.cwd = temp_home.path().to_path_buf().try_into().unwrap();
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let root = manager
+        .start_thread(config.clone())
+        .await
+        .expect("start root thread");
+    let control = manager.agent_control();
+
+    let dispatcher_path = AgentPath::try_from("/root/dispatcher").expect("dispatcher path");
+    let dispatcher = control
+        .spawn_agent_with_metadata(
+            config.clone(),
+            text_input("start dispatcher"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root.thread_id,
+                depth: 1,
+                agent_path: Some(dispatcher_path.clone()),
+                agent_nickname: None,
+                agent_role: Some("dispatcher".to_string()),
+            })),
+            SpawnAgentOptions {
+                wake_parent_on_completion: Some(true),
+                parent_thread_id: Some(root.thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("dispatcher spawn should succeed");
+    let dispatcher_thread = manager
+        .get_thread(dispatcher.thread_id)
+        .await
+        .expect("dispatcher thread should exist");
+    mark_thread_completed(dispatcher_thread.as_ref()).await;
+
+    let review_path = dispatcher_path.join("review").expect("review path");
+    let review = control
+        .spawn_agent_with_metadata(
+            config.clone(),
+            text_input("start review"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: dispatcher.thread_id,
+                depth: 2,
+                agent_path: Some(review_path),
+                agent_nickname: None,
+                agent_role: Some("review".to_string()),
+            })),
+            SpawnAgentOptions {
+                wake_parent_on_completion: Some(true),
+                parent_thread_id: Some(dispatcher.thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("review spawn should succeed");
+
+    let replacement_err = control
+        .spawn_agent_with_metadata(
+            config,
+            text_input("start unrelated worker"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root.thread_id,
+                depth: 1,
+                agent_path: Some(AgentPath::try_from("/root/worker").expect("worker path")),
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+            SpawnAgentOptions {
+                wake_parent_on_completion: Some(true),
+                parent_thread_id: Some(root.thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("pending review should prevent dispatcher eviction");
+
+    match replacement_err {
+        CodexErr::AgentLimitReached { max_threads } => assert_eq!(max_threads, 2),
+        err => panic!("expected AgentLimitReached, got {err:?}"),
+    }
+    assert!(manager.get_thread(dispatcher.thread_id).await.is_ok());
+    assert!(manager.get_thread(review.thread_id).await.is_ok());
+}
+
 async fn spawn_v2_subagent(
     control: &AgentControl,
     state: &Arc<ThreadManagerState>,
@@ -148,6 +248,14 @@ async fn spawn_v2_subagent(
         )
         .await
         .expect("spawn v2 subagent")
+}
+
+fn text_input(text: &str) -> Op {
+    vec![UserInput::Text {
+        text: text.to_string(),
+        text_elements: Vec::new(),
+    }]
+    .into()
 }
 
 async fn mark_thread_completed(thread: &CodexThread) {

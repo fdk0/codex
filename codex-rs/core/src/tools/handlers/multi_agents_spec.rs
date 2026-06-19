@@ -26,7 +26,6 @@ pub struct SpawnAgentToolOptions {
     pub hide_agent_type_model_reasoning: bool,
     pub include_usage_hint: bool,
     pub usage_hint_text: Option<String>,
-    pub max_concurrent_threads_per_session: Option<usize>,
     pub encrypted_messages: bool,
 }
 

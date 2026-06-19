@@ -140,7 +140,7 @@ pub(crate) async fn run_turn(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
     turn_extension_data: Arc<codex_extension_api::ExtensionData>,
-    input: Vec<TurnInput>,
+    mut input: Vec<TurnInput>,
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> Option<String> {
@@ -160,6 +160,15 @@ pub(crate) async fn run_turn(
 
     sess.record_context_updates_and_set_reference_context_item(turn_context.as_ref())
         .await;
+
+    if input.is_empty() {
+        let pending_input = sess.input_queue.get_pending_input(&sess.active_turn).await;
+        let (early_input, deferred_input) = split_leading_non_user_input(pending_input);
+        if run_hooks_and_record_inputs(&sess, &turn_context, &early_input).await {
+            return None;
+        }
+        input = deferred_input;
+    }
 
     let (injection_items, explicitly_enabled_connectors) =
         build_skills_and_plugins(&sess, turn_context.as_ref(), &input, &cancellation_token).await?;
@@ -488,6 +497,16 @@ async fn run_hooks_and_record_inputs(
         }
     }
     blocked_input && !accepted_user_input
+}
+
+fn split_leading_non_user_input(input: Vec<TurnInput>) -> (Vec<TurnInput>, Vec<TurnInput>) {
+    let first_user_input = input
+        .iter()
+        .position(|input| matches!(input, TurnInput::UserInput { .. }))
+        .unwrap_or(input.len());
+    let mut early_input = input;
+    let deferred_input = early_input.split_off(first_user_input);
+    (early_input, deferred_input)
 }
 
 #[instrument(level = "trace", skip_all)]

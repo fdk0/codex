@@ -47,7 +47,6 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         hide_agent_type_model_reasoning: false,
         include_usage_hint: true,
         usage_hint_text: None,
-        max_concurrent_threads_per_session: Some(4),
         encrypted_messages: true,
     });
 
@@ -127,7 +126,6 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
         hide_agent_type_model_reasoning: false,
         include_usage_hint: true,
         usage_hint_text: None,
-        max_concurrent_threads_per_session: None,
         encrypted_messages: false,
     });
 
@@ -188,7 +186,6 @@ fn spawn_agent_tool_caps_visible_model_summaries() {
         hide_agent_type_model_reasoning: false,
         include_usage_hint: true,
         usage_hint_text: None,
-        max_concurrent_threads_per_session: Some(4),
         encrypted_messages: false,
     });
 
@@ -234,7 +231,6 @@ fn spawn_agent_tool_hides_service_tier_with_spawn_metadata() {
         hide_agent_type_model_reasoning: true,
         include_usage_hint: true,
         usage_hint_text: None,
-        max_concurrent_threads_per_session: Some(4),
         encrypted_messages: false,
     });
 
@@ -350,7 +346,6 @@ fn multi_agent_v2_message_tools_can_use_plaintext_message_schemas() {
         hide_agent_type_model_reasoning: false,
         include_usage_hint: true,
         usage_hint_text: None,
-        max_concurrent_threads_per_session: None,
         encrypted_messages: false,
     });
     let send_tool = create_send_message_tool(/*encrypted_messages*/ false);

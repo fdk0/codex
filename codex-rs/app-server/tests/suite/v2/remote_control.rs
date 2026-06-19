@@ -233,6 +233,7 @@ async fn explicit_remote_control_startup_fails_when_disabled_by_requirements() -
             AppServerRuntimeOptions {
                 plugin_startup_tasks: PluginStartupTasks::Skip,
                 remote_control_startup_mode: RemoteControlStartupMode::EnabledEphemeral,
+                remote_control_client_name: None,
                 install_shutdown_signal_handler: false,
             },
         ),

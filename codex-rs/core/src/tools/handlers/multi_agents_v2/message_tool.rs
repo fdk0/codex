@@ -91,6 +91,12 @@ pub(crate) async fn handle_message_string_tool(
     let receiver_agent_path = receiver_agent.agent_path.clone().ok_or_else(|| {
         FunctionCallError::RespondToModel("target agent is missing an agent_path".to_string())
     })?;
+    let author = turn
+        .session_source
+        .get_agent_path()
+        .unwrap_or_else(AgentPath::root);
+    validate_message_target_lineage(mode, &author, &receiver_agent_path)
+        .map_err(FunctionCallError::RespondToModel)?;
     let resume_config = build_agent_resume_config(turn.as_ref())?;
     session
         .services
@@ -106,10 +112,6 @@ pub(crate) async fn handle_message_string_tool(
             .await
             .map_err(|err| collab_agent_error(receiver_thread_id, err))?;
     }
-    let author = turn
-        .session_source
-        .get_agent_path()
-        .unwrap_or_else(AgentPath::root);
     let communication = communication_from_tool_message(
         author,
         receiver_agent_path.clone(),
@@ -138,4 +140,114 @@ pub(crate) async fn handle_message_string_tool(
         .await;
 
     Ok(FunctionToolOutput::from_text(String::new(), Some(true)))
+}
+
+fn validate_message_target_lineage(
+    mode: MessageDeliveryMode,
+    author: &AgentPath,
+    receiver: &AgentPath,
+) -> Result<(), String> {
+    if author.is_root()
+        || agent_path_has_prefix(receiver, author)
+        || (mode == MessageDeliveryMode::QueueOnly && agent_path_has_prefix(author, receiver))
+    {
+        return Ok(());
+    }
+
+    Err(format!(
+        "target agent `{receiver}` is outside the current agent lineage `{author}`; subagents can only message agents in their descendant subtree, or queue messages to an ancestor"
+    ))
+}
+
+fn agent_path_has_prefix(agent_path: &AgentPath, prefix: &AgentPath) -> bool {
+    agent_path == prefix
+        || agent_path
+            .as_str()
+            .strip_prefix(prefix.as_str())
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn root_can_message_any_agent_lineage() {
+        let root = AgentPath::root();
+        let receiver = AgentPath::try_from("/root/dispatcher/review").expect("valid path");
+
+        assert_eq!(
+            validate_message_target_lineage(MessageDeliveryMode::TriggerTurn, &root, &receiver),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn subagent_can_message_own_descendant_lineage() {
+        let dispatcher = AgentPath::try_from("/root/dispatcher").expect("valid path");
+        let review = AgentPath::try_from("/root/dispatcher/review").expect("valid path");
+
+        assert_eq!(
+            validate_message_target_lineage(MessageDeliveryMode::TriggerTurn, &dispatcher, &review),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn subagent_can_queue_message_to_ancestor_lineage() {
+        let dispatcher = AgentPath::try_from("/root/dispatcher").expect("valid path");
+        let review = AgentPath::try_from("/root/dispatcher/review").expect("valid path");
+
+        assert_eq!(
+            validate_message_target_lineage(MessageDeliveryMode::QueueOnly, &review, &dispatcher),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn subagent_cannot_trigger_ancestor_lineage() {
+        let dispatcher = AgentPath::try_from("/root/dispatcher").expect("valid path");
+        let review = AgentPath::try_from("/root/dispatcher/review").expect("valid path");
+
+        assert_eq!(
+            validate_message_target_lineage(MessageDeliveryMode::TriggerTurn, &review, &dispatcher),
+            Err(
+                "target agent `/root/dispatcher` is outside the current agent lineage `/root/dispatcher/review`; subagents can only message agents in their descendant subtree, or queue messages to an ancestor"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn subagent_cannot_message_sibling_descendant_lineage() {
+        let replacement = AgentPath::try_from("/root/dispatcher_b").expect("valid path");
+        let old_review = AgentPath::try_from("/root/dispatcher/review").expect("valid path");
+
+        assert_eq!(
+            validate_message_target_lineage(
+                MessageDeliveryMode::TriggerTurn,
+                &replacement,
+                &old_review
+            ),
+            Err(
+                "target agent `/root/dispatcher/review` is outside the current agent lineage `/root/dispatcher_b`; subagents can only message agents in their descendant subtree, or queue messages to an ancestor"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn subagent_cannot_queue_message_to_sibling_descendant_lineage() {
+        let replacement = AgentPath::try_from("/root/dispatcher_b").expect("valid path");
+        let old_review = AgentPath::try_from("/root/dispatcher/review").expect("valid path");
+
+        assert_eq!(
+            validate_message_target_lineage(MessageDeliveryMode::QueueOnly, &replacement, &old_review),
+            Err(
+                "target agent `/root/dispatcher/review` is outside the current agent lineage `/root/dispatcher_b`; subagents can only message agents in their descendant subtree, or queue messages to an ancestor"
+                    .to_string()
+            )
+        );
+    }
 }

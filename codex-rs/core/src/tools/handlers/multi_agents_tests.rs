@@ -5,7 +5,7 @@ use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
 use crate::session::tests::make_session_and_context;
-use crate::session_prefix::format_subagent_notification_message;
+use crate::session_prefix::format_inter_agent_completion_message;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
@@ -1999,10 +1999,12 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         .await
         .expect("worker thread should exist");
     let worker_path = AgentPath::try_from("/root/worker").expect("worker path");
-    let first_notification = format_subagent_notification_message(
-        worker_path.as_str(),
+    let first_notification = format_inter_agent_completion_message(
+        AgentPath::root(),
+        worker_path.clone(),
         &AgentStatus::Completed(Some("first done".to_string())),
-    );
+    )
+    .expect("completed status should render");
 
     let first_turn = thread.codex.session.new_default_turn().await;
     thread
@@ -2087,10 +2089,12 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         .await;
     thread.codex.session.active_turn.lock().await.take();
 
-    let second_notification = format_subagent_notification_message(
-        worker_path.as_str(),
+    let second_notification = format_inter_agent_completion_message(
+        AgentPath::root(),
+        worker_path.clone(),
         &AgentStatus::Completed(Some("second done".to_string())),
-    );
+    )
+    .expect("completed status should render");
 
     let notifications = timeout(Duration::from_secs(5), async {
         loop {

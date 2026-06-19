@@ -10,6 +10,7 @@ use crate::context::ContextualUserFragment;
 use crate::context::SubagentNotification;
 use crate::init_state_db;
 use assert_matches::assert_matches;
+use codex_config::types::AgentWakeDescendantPolicy;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_protocol::AgentPath;
@@ -218,6 +219,32 @@ async fn persist_thread_for_tree_resume(thread: &Arc<CodexThread>, message: &str
     thread
         .inject_user_message_without_turn(message.to_string())
         .await;
+    thread.codex.session.ensure_rollout_materialized().await;
+    thread
+        .codex
+        .session
+        .flush_rollout()
+        .await
+        .expect("test thread rollout should flush");
+}
+
+async fn complete_thread_and_persist(thread: &Arc<CodexThread>, message: &str) {
+    let turn = thread.codex.session.new_default_turn().await;
+    thread
+        .codex
+        .session
+        .send_event(
+            turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: turn.sub_id.clone(),
+                last_agent_message: Some(message.to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    *thread.codex.session.active_turn.lock().await = None;
     thread.codex.session.ensure_rollout_materialized().await;
     thread
         .codex
@@ -2158,10 +2185,12 @@ async fn leaf_only_routes_descendant_completion_to_direct_parent_only_impl() {
         .await;
     tester_thread.codex.session.active_turn.lock().await.take();
 
-    let expected_tester_message = crate::session_prefix::format_subagent_notification_message(
-        tester_path.as_str(),
+    let expected_tester_message = crate::session_prefix::format_inter_agent_completion_message(
+        worker_path.clone(),
+        tester_path.clone(),
         &AgentStatus::Completed(Some("tester done".to_string())),
-    );
+    )
+    .expect("completed status should render");
     let expected_tester_notification = (
         worker_thread_id,
         Op::InterAgentCommunication {
@@ -2469,10 +2498,12 @@ async fn trigger_turn_rearms_wake_subscription_even_when_child_is_running() {
         .await;
     child.thread.codex.session.active_turn.lock().await.take();
 
-    let expected_message = crate::session_prefix::format_subagent_notification_message(
-        child_path.as_str(),
+    let expected_message = crate::session_prefix::format_inter_agent_completion_message(
+        AgentPath::root(),
+        child_path.clone(),
         &AgentStatus::Completed(Some("second done".to_string())),
-    );
+    )
+    .expect("completed status should render");
     let expected = (
         root.thread_id,
         Op::InterAgentCommunication {
@@ -2626,10 +2657,12 @@ async fn direct_subagent_resume_restores_wake_subscription_for_descendant_follow
         .await
         .take();
 
-    let expected_message = crate::session_prefix::format_subagent_notification_message(
-        dispatcher_path.as_str(),
+    let expected_message = crate::session_prefix::format_inter_agent_completion_message(
+        AgentPath::root(),
+        dispatcher_path.clone(),
         &AgentStatus::Completed(Some("driver repair required".to_string())),
-    );
+    )
+    .expect("completed status should render");
     let expected = (
         root.thread_id,
         Op::InterAgentCommunication {
@@ -2657,6 +2690,133 @@ async fn direct_subagent_resume_restores_wake_subscription_for_descendant_follow
     })
     .await
     .expect("directly resumed dispatcher should wake root after descendant-triggered completion");
+}
+
+#[tokio::test]
+async fn child_completion_reloads_missing_parent_before_wake_delivery() {
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Sqlite);
+    config.agent_wake_descendant_policy = AgentWakeDescendantPolicy::LeafOnly;
+    let harness = AgentControlHarness::new_with_config(home, config.clone()).await;
+    let root = harness
+        .manager
+        .start_thread(config.clone())
+        .await
+        .expect("root thread should start");
+    let dispatcher_path = AgentPath::root()
+        .join("dispatcher")
+        .expect("dispatcher path");
+    let review_path = dispatcher_path.join("review").expect("review path");
+    let dispatcher_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: root.thread_id,
+        depth: 1,
+        agent_path: Some(dispatcher_path.clone()),
+        agent_nickname: None,
+        agent_role: Some("dispatcher".to_string()),
+    });
+    let spawned_dispatcher = harness
+        .control
+        .spawn_agent_with_metadata(
+            config.clone(),
+            text_input("start dispatcher"),
+            Some(dispatcher_source),
+            SpawnAgentOptions {
+                parent_thread_id: Some(root.thread_id),
+                wake_parent_on_completion: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("dispatcher spawn should succeed");
+    let dispatcher_thread = harness
+        .manager
+        .get_thread(spawned_dispatcher.thread_id)
+        .await
+        .expect("dispatcher thread should exist");
+    let review_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: spawned_dispatcher.thread_id,
+        depth: 2,
+        agent_path: Some(review_path.clone()),
+        agent_nickname: None,
+        agent_role: Some("review".to_string()),
+    });
+    let spawned_review = harness
+        .control
+        .spawn_agent_with_metadata(
+            config.clone(),
+            text_input("start review"),
+            Some(review_source),
+            SpawnAgentOptions {
+                parent_thread_id: Some(spawned_dispatcher.thread_id),
+                wake_parent_on_completion: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("review spawn should succeed");
+    let review_thread = harness
+        .manager
+        .get_thread(spawned_review.thread_id)
+        .await
+        .expect("review thread should exist");
+    complete_thread_and_persist(&dispatcher_thread, "dispatcher waiting on review").await;
+    persist_thread_for_tree_resume(&review_thread, "review persisted before parent unload").await;
+
+    dispatcher_thread
+        .shutdown_and_wait()
+        .await
+        .expect("dispatcher should shut down before simulated unload");
+    assert!(
+        harness
+            .manager
+            .remove_thread(&spawned_dispatcher.thread_id)
+            .await
+            .is_some()
+    );
+    assert_thread_not_loaded(&harness.manager, spawned_dispatcher.thread_id).await;
+
+    complete_thread_and_persist(&review_thread, "review done").await;
+
+    let expected_message = crate::session_prefix::format_inter_agent_completion_message(
+        dispatcher_path.clone(),
+        review_path.clone(),
+        &AgentStatus::Completed(Some("review done".to_string())),
+    )
+    .expect("completed status should render");
+    let expected = (
+        spawned_dispatcher.thread_id,
+        Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                review_path,
+                dispatcher_path,
+                Vec::new(),
+                expected_message,
+                /*trigger_turn*/ true,
+            ),
+        },
+    );
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let captured = harness
+                .manager
+                .captured_ops()
+                .into_iter()
+                .find(|entry| *entry == expected);
+            if captured == Some(expected.clone()) {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("review completion should reload and wake the missing dispatcher");
+
+    let _ = harness
+        .manager
+        .get_thread(spawned_dispatcher.thread_id)
+        .await
+        .expect("dispatcher should be reloaded for child wake delivery");
 }
 
 #[tokio::test]
