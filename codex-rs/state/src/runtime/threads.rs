@@ -442,7 +442,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
             .await
     }
 
-    /// List direct children of `parent_thread_id` using persisted spawn edges.
+    /// List spawned descendants of `parent_thread_id` using persisted spawn edges.
     pub async fn list_threads_by_parent(
         &self,
         page_size: usize,
@@ -1090,10 +1090,26 @@ fn push_list_threads_query(
     push_thread_filters(builder, filters);
     if let Some(parent_thread_id) = parent_thread_id {
         builder.push(
-            " AND threads.id IN (SELECT child_thread_id FROM thread_spawn_edges WHERE parent_thread_id = ",
+            r#"
+ AND threads.id IN (
+    WITH RECURSIVE subtree(child_thread_id) AS (
+        SELECT child_thread_id
+        FROM thread_spawn_edges
+        WHERE parent_thread_id =
+            "#,
         );
         builder.push_bind(parent_thread_id.to_string());
-        builder.push(")");
+        builder.push(
+            r#"
+        UNION
+        SELECT edge.child_thread_id
+        FROM thread_spawn_edges AS edge
+        JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id
+    )
+    SELECT child_thread_id FROM subtree
+)
+            "#,
+        );
     }
     let order_by_index = match filters.cwd_filters {
         // Multi-cwd listing is supported but at the time of writing has no current use in production.
@@ -1191,7 +1207,9 @@ pub(super) fn push_thread_filters<'a>(
     } else {
         builder.push(" AND threads.archived = 0");
     }
-    builder.push(" AND threads.preview <> ''");
+    builder.push(
+        " AND (threads.preview <> '' OR threads.thread_source = 'subagent' OR threads.agent_path IS NOT NULL)",
+    );
     if !allowed_sources.is_empty() {
         builder.push(" AND threads.source IN (");
         let mut separated = builder.separated(", ");
@@ -1799,7 +1817,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_threads_by_parent_filters_direct_children_with_keyset_pagination() {
+    async fn list_threads_by_parent_filters_descendants_with_keyset_pagination() {
         let codex_home = unique_temp_dir();
         let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
@@ -1820,6 +1838,12 @@ mod tests {
             metadata.created_at =
                 DateTime::<Utc>::from_timestamp(created_at, 0).expect("valid timestamp");
             metadata.updated_at = metadata.created_at;
+            if thread_id == first_child_id {
+                metadata.first_user_message = None;
+                metadata.preview = None;
+                metadata.thread_source = Some(codex_protocol::protocol::ThreadSource::Subagent);
+                metadata.agent_path = Some("/root/dispatcher".to_string());
+            }
             runtime
                 .upsert_thread(&metadata)
                 .await
@@ -1870,6 +1894,14 @@ mod tests {
             )
             .await
             .expect("second page should succeed");
+        let third_page = runtime
+            .list_threads_by_parent(
+                /*page_size*/ 1,
+                parent_id,
+                filters(second_page.next_anchor.as_ref()),
+            )
+            .await
+            .expect("third page should succeed");
 
         assert_eq!(
             first_page
@@ -1877,7 +1909,7 @@ mod tests {
                 .iter()
                 .map(|item| item.id)
                 .collect::<Vec<_>>(),
-            vec![second_child_id]
+            vec![grandchild_id]
         );
         assert_eq!(
             second_page
@@ -1885,9 +1917,17 @@ mod tests {
                 .iter()
                 .map(|item| item.id)
                 .collect::<Vec<_>>(),
+            vec![second_child_id]
+        );
+        assert_eq!(
+            third_page
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
             vec![first_child_id]
         );
-        assert_eq!(second_page.next_anchor, None);
+        assert_eq!(third_page.next_anchor, None);
     }
 
     #[tokio::test]

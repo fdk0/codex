@@ -981,7 +981,7 @@ sqlite = true
 }
 
 #[tokio::test]
-async fn thread_list_parent_filter_reads_direct_children_from_state_db() -> Result<()> {
+async fn thread_list_parent_filter_reads_descendants_from_state_db() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_minimal_config(codex_home.path())?;
     let parent_id = ThreadId::new();
@@ -1003,13 +1003,31 @@ async fn thread_list_parent_filter_reads_direct_children_from_state_db() -> Resu
         (
             newer_child_id,
             "2025-02-01T11:00:00Z",
-            CoreSessionSource::Cli,
+            CoreSessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: parent_id,
+                depth: 1,
+                agent_path: Some(
+                    codex_protocol::AgentPath::try_from("/root/dispatcher")
+                        .expect("valid agent path"),
+                ),
+                agent_nickname: Some("Feynman".to_string()),
+                agent_role: Some("dispatcher".to_string()),
+            }),
             "mock_provider",
         ),
         (
             grandchild_id,
             "2025-02-01T12:00:00Z",
-            CoreSessionSource::SubAgent(SubAgentSource::Other("agent_job:job-2".to_string())),
+            CoreSessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: newer_child_id,
+                depth: 2,
+                agent_path: Some(
+                    codex_protocol::AgentPath::try_from("/root/dispatcher/worker_1")
+                        .expect("valid agent path"),
+                ),
+                agent_nickname: Some("Gauss".to_string()),
+                agent_role: Some("worker".to_string()),
+            }),
             "mock_provider",
         ),
     ] {
@@ -1026,6 +1044,9 @@ async fn thread_list_parent_filter_reads_direct_children_from_state_db() -> Resu
         let mut metadata = builder.build(model_provider);
         metadata.preview = Some("child thread".to_string());
         metadata.first_user_message = metadata.preview.clone();
+        // App-server startup may run non-parent thread listings that prune state rows with
+        // missing rollout files; keep these rows valid so this test targets parent filtering.
+        fs::write(&metadata.rollout_path, "")?;
         state_db.upsert_thread(&metadata).await?;
     }
     for (parent_thread_id, child_thread_id) in [
@@ -1060,6 +1081,15 @@ async fn thread_list_parent_filter_reads_direct_children_from_state_db() -> Resu
         /*source_kinds*/ None,
     )
     .await?;
+    let third_page = list_threads_for_parent(
+        &mut mcp,
+        parent_id,
+        second_page.next_cursor.clone(),
+        /*limit*/ 1,
+        /*model_providers*/ None,
+        /*source_kinds*/ None,
+    )
+    .await?;
 
     assert_eq!(
         first_page
@@ -1067,7 +1097,7 @@ async fn thread_list_parent_filter_reads_direct_children_from_state_db() -> Resu
             .iter()
             .map(|thread| thread.id.clone())
             .collect::<Vec<_>>(),
-        vec![newer_child_id.to_string()]
+        vec![grandchild_id.to_string()]
     );
     assert_eq!(
         second_page
@@ -1075,15 +1105,24 @@ async fn thread_list_parent_filter_reads_direct_children_from_state_db() -> Resu
             .iter()
             .map(|thread| thread.id.clone())
             .collect::<Vec<_>>(),
+        vec![newer_child_id.to_string()]
+    );
+    assert_eq!(
+        third_page
+            .data
+            .iter()
+            .map(|thread| thread.id.clone())
+            .collect::<Vec<_>>(),
         vec![older_child_id.to_string()]
     );
-    assert_eq!(second_page.next_cursor, None);
+    assert_eq!(third_page.next_cursor, None);
     let expected_parent_id = parent_id.to_string();
     assert!(
         first_page
             .data
             .iter()
             .chain(&second_page.data)
+            .chain(&third_page.data)
             .all(|thread| thread.parent_thread_id.as_deref() == Some(expected_parent_id.as_str()))
     );
     let interactive_only = list_threads_for_parent(
@@ -1101,7 +1140,30 @@ async fn thread_list_parent_filter_reads_direct_children_from_state_db() -> Resu
             .iter()
             .map(|thread| thread.id.clone())
             .collect::<Vec<_>>(),
-        vec![newer_child_id.to_string()]
+        Vec::<String>::new()
+    );
+    let source_linked = list_threads_for_parent(
+        &mut mcp,
+        parent_id,
+        /*cursor*/ None,
+        /*limit*/ 10,
+        /*model_providers*/ None,
+        /*source_kinds*/ Some(vec![ThreadSourceKind::SubAgentThreadSpawn]),
+    )
+    .await?;
+    assert_eq!(
+        source_linked
+            .data
+            .iter()
+            .map(|thread| thread.id.clone())
+            .collect::<Vec<_>>(),
+        vec![grandchild_id.to_string(), newer_child_id.to_string()]
+    );
+    assert!(
+        source_linked
+            .data
+            .iter()
+            .all(|thread| thread.parent_thread_id.as_deref() == Some(expected_parent_id.as_str()))
     );
     Ok(())
 }

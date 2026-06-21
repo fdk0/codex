@@ -2496,7 +2496,6 @@ mod tests {
                     session_id: "67e55044-10b1-426f-9247-bb680e5fe0c7".to_string(),
                     parent_thread_id: None,
                     forked_from_id: None,
-                    parent_thread_id: None,
                     preview: "first prompt".to_string(),
                     ephemeral: true,
                     model_provider: "openai".to_string(),

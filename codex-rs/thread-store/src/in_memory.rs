@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -101,11 +102,14 @@ mod tests {
         let parent_thread_id = ThreadId::default();
         let child_thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000001").expect("valid thread id");
+        let grandchild_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000003").expect("valid thread id");
         let unrelated_thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000002").expect("valid thread id");
 
         for (thread_id, parent_thread_id) in [
             (child_thread_id, Some(parent_thread_id)),
+            (grandchild_thread_id, Some(child_thread_id)),
             (unrelated_thread_id, None),
         ] {
             store
@@ -153,7 +157,7 @@ mod tests {
                 .into_iter()
                 .map(|item| item.thread_id)
                 .collect::<Vec<_>>(),
-            vec![child_thread_id]
+            vec![child_thread_id, grandchild_thread_id]
         );
     }
 }
@@ -455,8 +459,23 @@ impl ThreadStore for InMemoryThreadStore {
         Box::pin(async move {
             let mut page = InMemoryThreadStore::list_threads(self).await?;
             if let Some(parent_thread_id) = params.parent_thread_id {
+                let mut descendants = HashSet::new();
+                let mut frontier = vec![parent_thread_id];
+                while !frontier.is_empty() {
+                    let mut next_frontier = Vec::new();
+                    for thread in &page.items {
+                        if thread
+                            .parent_thread_id
+                            .is_some_and(|parent| frontier.contains(&parent))
+                            && descendants.insert(thread.thread_id)
+                        {
+                            next_frontier.push(thread.thread_id);
+                        }
+                    }
+                    frontier = next_frontier;
+                }
                 page.items
-                    .retain(|thread| thread.parent_thread_id == Some(parent_thread_id));
+                    .retain(|thread| descendants.contains(&thread.thread_id));
             }
             Ok(page)
         })

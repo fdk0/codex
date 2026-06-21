@@ -213,6 +213,7 @@ mod tests {
     use chrono::Utc;
     use codex_protocol::ThreadId;
     use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::SubAgentSource;
     use pretty_assertions::assert_eq;
     use std::fs;
     use tempfile::TempDir;
@@ -327,6 +328,151 @@ mod tests {
             page.items[0].first_user_message.as_deref(),
             Some("plain preview")
         );
+    }
+
+    #[tokio::test]
+    async fn list_threads_by_parent_returns_descendants_from_state_db() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            home.path().to_path_buf(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
+        runtime
+            .mark_backfill_complete(/*last_watermark*/ None)
+            .await
+            .expect("backfill should be complete");
+
+        let parent_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000110").expect("valid id");
+        let child_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000111").expect("valid id");
+        let grandchild_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000112").expect("valid id");
+
+        for (thread_id, created_at, source, preview) in [
+            (
+                child_id,
+                "2025-02-01T10:00:00Z",
+                SessionSource::SubAgent(SubAgentSource::Other("agent_job:child".to_string())),
+                None,
+            ),
+            (
+                grandchild_id,
+                "2025-02-01T11:00:00Z",
+                SessionSource::SubAgent(SubAgentSource::Other("agent_job:grandchild".to_string())),
+                Some("grandchild preview"),
+            ),
+        ] {
+            let created_at = chrono::DateTime::parse_from_rfc3339(created_at)
+                .expect("valid timestamp")
+                .with_timezone(&Utc);
+            let mut builder = codex_state::ThreadMetadataBuilder::new(
+                thread_id,
+                home.path().join(format!("{thread_id}.jsonl")),
+                created_at,
+                source,
+            );
+            builder.model_provider = Some(config.default_model_provider_id.clone());
+            builder.cwd = home.path().to_path_buf();
+            builder.cli_version = Some("test_version".to_string());
+            let mut metadata = builder.build(config.default_model_provider_id.as_str());
+            metadata.first_user_message = preview.map(str::to_string);
+            metadata.preview = metadata.first_user_message.clone();
+            if thread_id == child_id {
+                metadata.thread_source = Some(codex_protocol::protocol::ThreadSource::Subagent);
+                metadata.agent_path = Some("/root/dispatcher".to_string());
+            }
+            runtime
+                .upsert_thread(&metadata)
+                .await
+                .expect("state db upsert should succeed");
+        }
+        for (parent_thread_id, child_thread_id) in
+            [(parent_id, child_id), (child_id, grandchild_id)]
+        {
+            runtime
+                .upsert_thread_spawn_edge(
+                    parent_thread_id,
+                    child_thread_id,
+                    codex_state::DirectionalThreadSpawnEdgeStatus::Open,
+                )
+                .await
+                .expect("spawn edge should persist");
+        }
+
+        let first_page = store
+            .list_threads(ListThreadsParams {
+                page_size: 1,
+                cursor: None,
+                sort_key: ThreadSortKey::CreatedAt,
+                sort_direction: SortDirection::Desc,
+                allowed_sources: Vec::new(),
+                model_providers: None,
+                cwd_filters: None,
+                archived: false,
+                search_term: None,
+                parent_thread_id: Some(parent_id),
+                use_state_db_only: false,
+            })
+            .await
+            .expect("thread listing");
+        let second_page = store
+            .list_threads(ListThreadsParams {
+                page_size: 1,
+                cursor: first_page.next_cursor.clone(),
+                sort_key: ThreadSortKey::CreatedAt,
+                sort_direction: SortDirection::Desc,
+                allowed_sources: Vec::new(),
+                model_providers: None,
+                cwd_filters: None,
+                archived: false,
+                search_term: None,
+                parent_thread_id: Some(parent_id),
+                use_state_db_only: false,
+            })
+            .await
+            .expect("thread listing");
+
+        let ids = first_page
+            .items
+            .iter()
+            .chain(&second_page.items)
+            .map(|item| item.thread_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![grandchild_id, child_id]);
+        assert_eq!(second_page.next_cursor, None);
+        assert!(
+            first_page
+                .items
+                .iter()
+                .chain(&second_page.items)
+                .all(|thread| thread.parent_thread_id == Some(parent_id))
+        );
+        let all_ids = store
+            .list_threads(ListThreadsParams {
+                page_size: 10,
+                cursor: None,
+                sort_key: ThreadSortKey::CreatedAt,
+                sort_direction: SortDirection::Desc,
+                allowed_sources: Vec::new(),
+                model_providers: None,
+                cwd_filters: None,
+                archived: false,
+                search_term: None,
+                parent_thread_id: Some(parent_id),
+                use_state_db_only: false,
+            })
+            .await
+            .expect("thread listing")
+            .items
+            .iter()
+            .map(|item| item.thread_id)
+            .collect::<Vec<_>>();
+        assert_eq!(all_ids, vec![grandchild_id, child_id]);
     }
 
     #[tokio::test]

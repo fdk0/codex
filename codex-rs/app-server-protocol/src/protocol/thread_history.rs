@@ -1,3 +1,4 @@
+use crate::protocol::event_mapping::sub_agent_activity_spawn_membership_item;
 use crate::protocol::item_builders::build_command_execution_begin_item;
 use crate::protocol::item_builders::build_command_execution_end_item;
 use crate::protocol::item_builders::build_file_change_approval_request_item;
@@ -961,12 +962,17 @@ impl ThreadHistoryBuilder {
         &mut self,
         payload: &codex_protocol::protocol::SubAgentActivityEvent,
     ) {
+        let spawn_membership_item =
+            sub_agent_activity_spawn_membership_item(payload, String::new());
         self.upsert_item_in_current_turn(ThreadItem::SubAgentActivity {
             id: payload.event_id.clone(),
             kind: payload.kind.into(),
             agent_thread_id: payload.agent_thread_id.to_string(),
             agent_path: String::from(payload.agent_path.clone()),
         });
+        if let Some(item) = spawn_membership_item {
+            self.upsert_item_in_current_turn(item);
+        }
     }
 
     fn handle_collab_waiting_begin(
@@ -3528,6 +3534,74 @@ mod tests {
     }
 
     #[test]
+    fn reconstructs_sub_agent_started_as_activity_and_spawn_membership() {
+        let spawned_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000002")
+            .expect("valid receiver thread id");
+        let events = vec![
+            EventMsg::UserMessage(UserMessageEvent {
+                client_id: None,
+                message: "spawn agent".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+                ..Default::default()
+            }),
+            EventMsg::SubAgentActivity(codex_protocol::protocol::SubAgentActivityEvent {
+                event_id: "activity-1".into(),
+                occurred_at_ms: 0,
+                agent_thread_id: spawned_thread_id,
+                agent_path: codex_protocol::AgentPath::try_from("/root/dispatcher/review_1")
+                    .expect("valid agent path"),
+                kind: codex_protocol::protocol::SubAgentActivityKind::Started,
+            }),
+        ];
+
+        let items = events
+            .into_iter()
+            .map(RolloutItem::EventMsg)
+            .collect::<Vec<_>>();
+        let turns = build_turns_from_rollout_items(&items);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].items.len(), 3);
+        assert_eq!(
+            turns[0].items[1],
+            ThreadItem::SubAgentActivity {
+                id: "activity-1".into(),
+                kind: crate::protocol::v2::SubAgentActivityKind::Started,
+                agent_thread_id: spawned_thread_id.to_string(),
+                agent_path: "/root/dispatcher/review_1".into(),
+            }
+        );
+        assert_eq!(
+            turns[0].items[2],
+            ThreadItem::CollabAgentToolCall {
+                id: "activity-1:spawn-agent-membership".into(),
+                tool: CollabAgentTool::SpawnAgent,
+                status: CollabAgentToolCallStatus::Completed,
+                sender_thread_id: String::new(),
+                receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                receiver_agents: vec![CollabAgentRef {
+                    thread_id: spawned_thread_id.to_string(),
+                    agent_nickname: None,
+                    agent_role: Some("review".into()),
+                }],
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                agents_states: [(
+                    spawned_thread_id.to_string(),
+                    CollabAgentState {
+                        status: crate::protocol::v2::CollabAgentStatus::Running,
+                        message: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }
+        );
+    }
+
+    #[test]
     fn reconstructs_interrupted_send_input_as_completed_collab_call() {
         // `send_input(interrupt=true)` first stops the child's active turn, then redirects it with
         // new input. The transient interrupted status should remain visible in agent state, but the
@@ -3810,6 +3884,7 @@ mod tests {
         let items = vec![
             RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: "turn-a".into(),
+                trace_id: None,
                 started_at: Some(1),
                 model_context_window: None,
                 collaboration_mode_kind: Default::default(),

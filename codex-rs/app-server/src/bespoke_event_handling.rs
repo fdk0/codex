@@ -85,6 +85,7 @@ use codex_app_server_protocol::WarningNotification;
 use codex_app_server_protocol::build_item_from_guardian_event;
 use codex_app_server_protocol::guardian_auto_approval_review_notification;
 use codex_app_server_protocol::item_event_to_server_notification;
+use codex_app_server_protocol::sub_agent_activity_spawn_membership_item;
 use codex_core::CodexThread;
 use codex_core::ThreadManager;
 use codex_core::review_format::format_review_findings_block;
@@ -886,12 +887,27 @@ pub(crate) async fn apply_bespoke_event_handling(
                     .remove_thread(&activity.agent_thread_id.to_string())
                     .await;
             }
+            let spawn_membership_item =
+                sub_agent_activity_spawn_membership_item(&activity, conversation_id.to_string());
+            let occurred_at_ms = activity.occurred_at_ms;
             let notification = item_event_to_server_notification(
                 EventMsg::SubAgentActivity(activity),
                 &conversation_id.to_string(),
                 &event_turn_id,
             );
             outgoing.send_server_notification(notification).await;
+            if let Some(item) = spawn_membership_item {
+                outgoing
+                    .send_server_notification(ServerNotification::ItemCompleted(
+                        ItemCompletedNotification {
+                            thread_id: conversation_id.to_string(),
+                            turn_id: event_turn_id,
+                            item,
+                            completed_at_ms: occurred_at_ms,
+                        },
+                    ))
+                    .await;
+            }
         }
         EventMsg::CollabCloseEnd(end_event) => {
             if thread_manager
@@ -3613,6 +3629,116 @@ mod tests {
                     kind: codex_app_server_protocol::SubAgentActivityKind::Interrupted,
                     agent_thread_id: child_thread_id_string,
                     agent_path: "/root/worker".to_string(),
+                },
+                thread_id: conversation_id.to_string(),
+                turn_id: "turn-1".to_string(),
+                completed_at_ms: 42,
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn started_subagent_activity_emits_spawn_membership_notification() -> Result<()> {
+        let codex_home = TempDir::new()?;
+        let config = load_default_config_for_test(&codex_home).await;
+        let thread_manager = Arc::new(
+            codex_core::test_support::thread_manager_with_models_provider_and_home(
+                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+                config.model_provider.clone(),
+                config.codex_home.to_path_buf(),
+                Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+            ),
+        );
+        let codex_core::NewThread {
+            thread_id: conversation_id,
+            thread: conversation,
+            ..
+        } = thread_manager.start_thread(config).await?;
+        let child_thread_id = ThreadId::new();
+        let child_thread_id_string = child_thread_id.to_string();
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let outgoing = Arc::new(OutgoingMessageSender::new(
+            tx,
+            codex_analytics::AnalyticsEventsClient::disabled(),
+        ));
+        let outgoing = ThreadScopedOutgoingMessageSender::new(
+            outgoing,
+            vec![ConnectionId(1)],
+            conversation_id,
+        );
+
+        apply_bespoke_event_handling(
+            Event {
+                id: "turn-1".to_string(),
+                msg: EventMsg::SubAgentActivity(SubAgentActivityEvent {
+                    event_id: "activity-1".to_string(),
+                    occurred_at_ms: 42,
+                    agent_thread_id: child_thread_id,
+                    agent_path: AgentPath::try_from("/root/dispatcher/review_1")
+                        .expect("agent path should parse"),
+                    kind: SubAgentActivityKind::Started,
+                }),
+            },
+            conversation_id,
+            conversation,
+            thread_manager,
+            outgoing,
+            new_thread_state(),
+            ThreadWatchManager::new(),
+            Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
+            "test-provider".to_string(),
+        )
+        .await;
+
+        let activity_message = recv_broadcast_message(&mut rx).await?;
+        let OutgoingMessage::AppServerNotification(ServerNotification::ItemCompleted(activity)) =
+            activity_message
+        else {
+            bail!("unexpected message: {activity_message:?}");
+        };
+        assert_eq!(
+            activity.item,
+            ThreadItem::SubAgentActivity {
+                id: "activity-1".to_string(),
+                kind: codex_app_server_protocol::SubAgentActivityKind::Started,
+                agent_thread_id: child_thread_id_string.clone(),
+                agent_path: "/root/dispatcher/review_1".to_string(),
+            }
+        );
+
+        let membership_message = recv_broadcast_message(&mut rx).await?;
+        let OutgoingMessage::AppServerNotification(ServerNotification::ItemCompleted(membership)) =
+            membership_message
+        else {
+            bail!("unexpected message: {membership_message:?}");
+        };
+        assert_eq!(
+            membership,
+            ItemCompletedNotification {
+                item: ThreadItem::CollabAgentToolCall {
+                    id: "activity-1:spawn-agent-membership".to_string(),
+                    tool: codex_app_server_protocol::CollabAgentTool::SpawnAgent,
+                    status: codex_app_server_protocol::CollabAgentToolCallStatus::Completed,
+                    sender_thread_id: conversation_id.to_string(),
+                    receiver_thread_ids: vec![child_thread_id_string.clone()],
+                    receiver_agents: vec![codex_app_server_protocol::CollabAgentRef {
+                        thread_id: child_thread_id_string.clone(),
+                        agent_nickname: None,
+                        agent_role: Some("review".to_string()),
+                    }],
+                    prompt: None,
+                    model: None,
+                    reasoning_effort: None,
+                    agents_states: [(
+                        child_thread_id_string,
+                        codex_app_server_protocol::CollabAgentState {
+                            status: codex_app_server_protocol::CollabAgentStatus::Running,
+                            message: None,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
                 },
                 thread_id: conversation_id.to_string(),
                 turn_id: "turn-1".to_string(),
