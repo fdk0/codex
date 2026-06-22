@@ -12,6 +12,17 @@ pub(crate) async fn resolve_agent_target(
 ) -> Result<ThreadId, FunctionCallError> {
     register_session_root(session, turn);
     if let Ok(thread_id) = ThreadId::from_string(target) {
+        session
+            .services
+            .agent_control
+            .ensure_agent_target_in_current_tree(session.thread_id, &turn.session_source, thread_id)
+            .await
+            .map_err(|err| match err {
+                codex_protocol::error::CodexErr::UnsupportedOperation(message) => {
+                    FunctionCallError::RespondToModel(message)
+                }
+                other => FunctionCallError::RespondToModel(other.to_string()),
+            })?;
         return Ok(thread_id);
     }
 

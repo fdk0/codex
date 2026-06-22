@@ -178,6 +178,7 @@ impl AgentRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn agent_id_for_path(&self, agent_path: &AgentPath) -> Option<ThreadId> {
         self.active_agents
             .lock()

@@ -439,6 +439,10 @@ fn list_agents_output_schema() -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "Thread identifier for the agent."
+                        },
                         "agent_name": {
                             "type": "string",
                             "description": "Canonical task name for the agent when available, otherwise the agent id."
@@ -452,7 +456,7 @@ fn list_agents_output_schema() -> Value {
                             "description": "Most recent user or inter-agent instruction received by the agent, when available."
                         }
                     },
-                    "required": ["agent_name", "agent_status", "last_task_message"],
+                    "required": ["agent_id", "agent_name", "agent_status", "last_task_message"],
                     "additionalProperties": false
                 },
                 "description": "Live agents visible in the current root thread tree."

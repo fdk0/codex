@@ -139,6 +139,30 @@ impl AgentControlHarness {
     }
 }
 
+async fn spawn_thread_spawn_agent(
+    harness: &AgentControlHarness,
+    parent_thread_id: ThreadId,
+    agent_path: &AgentPath,
+    agent_role: &str,
+    message: &str,
+) -> ThreadId {
+    harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input(message),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(agent_path.clone()),
+                agent_nickname: None,
+                agent_role: Some(agent_role.to_string()),
+            })),
+        )
+        .await
+        .expect("thread-spawn agent should spawn")
+}
+
 fn has_subagent_notification(history_items: &[ResponseItem]) -> bool {
     history_items.iter().any(|item| {
         let ResponseItem::Message { role, content, .. } = item else {
@@ -3181,6 +3205,92 @@ async fn resolve_agent_reference_falls_back_to_loaded_thread_source_metadata() {
 }
 
 #[tokio::test]
+async fn resolve_agent_reference_scopes_duplicate_paths_to_current_root_tree() {
+    let harness = AgentControlHarness::new().await;
+    let dispatcher_path =
+        AgentPath::try_from("/root/dispatcher").expect("agent path should be valid");
+
+    let (first_parent_thread_id, _) = harness.start_thread().await;
+    let first_child_thread_id = spawn_thread_spawn_agent(
+        &harness,
+        first_parent_thread_id,
+        &dispatcher_path,
+        "dispatcher",
+        "hello first dispatcher",
+    )
+    .await;
+    harness
+        .control
+        .state
+        .release_spawned_thread(first_child_thread_id);
+
+    let (second_parent_thread_id, _) = harness.start_thread().await;
+    let second_child_thread_id = spawn_thread_spawn_agent(
+        &harness,
+        second_parent_thread_id,
+        &dispatcher_path,
+        "dispatcher",
+        "hello second dispatcher",
+    )
+    .await;
+
+    let resolved_first_thread_id = harness
+        .control
+        .resolve_agent_reference(
+            first_parent_thread_id,
+            &SessionSource::Cli,
+            dispatcher_path.as_str(),
+        )
+        .await
+        .expect("first tree should resolve its dispatcher");
+    let resolved_second_thread_id = harness
+        .control
+        .resolve_agent_reference(
+            second_parent_thread_id,
+            &SessionSource::Cli,
+            dispatcher_path.as_str(),
+        )
+        .await
+        .expect("second tree should resolve its dispatcher");
+
+    assert_eq!(resolved_first_thread_id, first_child_thread_id);
+    assert_eq!(resolved_second_thread_id, second_child_thread_id);
+    assert!(
+        harness
+            .control
+            .ensure_agent_target_in_current_tree(
+                first_parent_thread_id,
+                &SessionSource::Cli,
+                first_child_thread_id,
+            )
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        harness
+            .control
+            .ensure_agent_target_in_current_tree(
+                first_parent_thread_id,
+                &SessionSource::Cli,
+                second_child_thread_id,
+            )
+            .await,
+        Err(CodexErr::UnsupportedOperation(_))
+    ));
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(first_child_thread_id)
+        .await
+        .expect("first dispatcher shutdown should submit");
+    let _ = harness
+        .control
+        .shutdown_live_agent(second_child_thread_id)
+        .await
+        .expect("second dispatcher shutdown should submit");
+}
+
+#[tokio::test]
 async fn list_agents_falls_back_to_loaded_thread_source_metadata() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, _parent_thread) = harness.start_thread().await;
@@ -3212,7 +3322,7 @@ async fn list_agents_falls_back_to_loaded_thread_source_metadata() {
 
     let listed_agents = harness
         .control
-        .list_agents(&SessionSource::Cli, None)
+        .list_agents(parent_thread_id, &SessionSource::Cli, None)
         .await
         .expect("loaded thread source should list the agent");
     let agent_names = listed_agents
@@ -3226,6 +3336,86 @@ async fn list_agents_falls_back_to_loaded_thread_source_metadata() {
         .shutdown_live_agent(child_thread_id)
         .await
         .expect("dispatcher shutdown should submit");
+}
+
+#[tokio::test]
+async fn list_agents_scopes_loaded_thread_spawn_fallback_to_current_root_tree() {
+    let harness = AgentControlHarness::new().await;
+    let dispatcher_path =
+        AgentPath::try_from("/root/dispatcher").expect("agent path should be valid");
+
+    let (first_parent_thread_id, _) = harness.start_thread().await;
+    let first_child_thread_id = spawn_thread_spawn_agent(
+        &harness,
+        first_parent_thread_id,
+        &dispatcher_path,
+        "dispatcher",
+        "hello first dispatcher",
+    )
+    .await;
+    harness
+        .control
+        .state
+        .release_spawned_thread(first_child_thread_id);
+
+    let (second_parent_thread_id, _) = harness.start_thread().await;
+    let second_child_thread_id = spawn_thread_spawn_agent(
+        &harness,
+        second_parent_thread_id,
+        &dispatcher_path,
+        "dispatcher",
+        "hello second dispatcher",
+    )
+    .await;
+
+    let first_listed_agents = harness
+        .control
+        .list_agents(first_parent_thread_id, &SessionSource::Cli, None)
+        .await
+        .expect("first tree should list only first dispatcher");
+    let second_listed_agents = harness
+        .control
+        .list_agents(second_parent_thread_id, &SessionSource::Cli, None)
+        .await
+        .expect("second tree should list only second dispatcher");
+
+    assert_eq!(
+        first_listed_agents
+            .iter()
+            .map(|agent| (agent.agent_id.clone(), agent.agent_name.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (first_parent_thread_id.to_string(), "/root".to_string()),
+            (
+                first_child_thread_id.to_string(),
+                "/root/dispatcher".to_string()
+            ),
+        ]
+    );
+    assert_eq!(
+        second_listed_agents
+            .iter()
+            .map(|agent| (agent.agent_id.clone(), agent.agent_name.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (second_parent_thread_id.to_string(), "/root".to_string()),
+            (
+                second_child_thread_id.to_string(),
+                "/root/dispatcher".to_string()
+            ),
+        ]
+    );
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(first_child_thread_id)
+        .await
+        .expect("first dispatcher shutdown should submit");
+    let _ = harness
+        .control
+        .shutdown_live_agent(second_child_thread_id)
+        .await
+        .expect("second dispatcher shutdown should submit");
 }
 
 #[tokio::test]

@@ -41,6 +41,7 @@ use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_thread_store::ReadThreadParams;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Weak;
@@ -89,6 +90,7 @@ pub(crate) struct LiveAgent {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ListedAgent {
+    pub(crate) agent_id: String,
     pub(crate) agent_name: String,
     pub(crate) agent_status: AgentStatus,
     pub(crate) last_task_message: Option<String>,
@@ -335,7 +337,7 @@ impl AgentControl {
 
     pub(crate) async fn resolve_agent_reference(
         &self,
-        _current_thread_id: ThreadId,
+        current_thread_id: ThreadId,
         current_session_source: &SessionSource,
         agent_reference: &str,
     ) -> CodexResult<ThreadId> {
@@ -345,19 +347,41 @@ impl AgentControl {
         let agent_path = current_agent_path
             .resolve(agent_reference)
             .map_err(CodexErr::UnsupportedOperation)?;
-        if let Some(thread_id) = self.state.agent_id_for_path(&agent_path) {
-            return Ok(thread_id);
+        let (root_thread_id, live_agents) = self
+            .live_thread_spawn_agents_for_current_tree(current_thread_id, current_session_source)
+            .await?;
+        if agent_path.is_root() {
+            return Ok(root_thread_id);
         }
-        for children in self.live_thread_spawn_children().await?.into_values() {
-            for (child_thread_id, metadata) in children {
-                if metadata.agent_path.as_ref() == Some(&agent_path) {
-                    return Ok(child_thread_id);
-                }
+        for (child_thread_id, metadata) in live_agents {
+            if metadata.agent_path.as_ref() == Some(&agent_path) {
+                return Ok(child_thread_id);
             }
         }
         Err(CodexErr::UnsupportedOperation(format!(
             "live agent path `{}` not found",
             agent_path.as_str()
+        )))
+    }
+
+    pub(crate) async fn ensure_agent_target_in_current_tree(
+        &self,
+        current_thread_id: ThreadId,
+        current_session_source: &SessionSource,
+        agent_id: ThreadId,
+    ) -> CodexResult<()> {
+        let (root_thread_id, live_agents) = self
+            .live_thread_spawn_agents_for_current_tree(current_thread_id, current_session_source)
+            .await?;
+        if agent_id == root_thread_id
+            || live_agents
+                .into_iter()
+                .any(|(child_thread_id, _)| child_thread_id == agent_id)
+        {
+            return Ok(());
+        }
+        Err(CodexErr::UnsupportedOperation(format!(
+            "agent id `{agent_id}` is not live in the current root thread tree"
         )))
     }
 
@@ -395,6 +419,7 @@ impl AgentControl {
 
     pub(crate) async fn list_agents(
         &self,
+        current_thread_id: ThreadId,
         current_session_source: &SessionSource,
         path_prefix: Option<&str>,
     ) -> CodexResult<Vec<ListedAgent>> {
@@ -409,24 +434,16 @@ impl AgentControl {
             })
             .transpose()?;
 
-        let mut live_agents = self
-            .live_thread_spawn_children()
-            .await?
-            .into_values()
-            .flatten()
-            .map(|(_, metadata)| metadata)
-            .collect::<Vec<_>>();
+        let (root_thread_id, mut live_agents) = self
+            .live_thread_spawn_agents_for_current_tree(current_thread_id, current_session_source)
+            .await?;
         live_agents.sort_by(|left, right| {
-            left.agent_path
+            left.1
+                .agent_path
                 .as_deref()
                 .unwrap_or_default()
-                .cmp(right.agent_path.as_deref().unwrap_or_default())
-                .then_with(|| {
-                    left.agent_id
-                        .map(|id| id.to_string())
-                        .unwrap_or_default()
-                        .cmp(&right.agent_id.map(|id| id.to_string()).unwrap_or_default())
-                })
+                .cmp(right.1.agent_path.as_deref().unwrap_or_default())
+                .then_with(|| left.0.to_string().cmp(&right.0.to_string()))
         });
 
         let root_path = AgentPath::root();
@@ -434,20 +451,17 @@ impl AgentControl {
         if resolved_prefix
             .as_ref()
             .is_none_or(|prefix| agent_matches_prefix(Some(&root_path), prefix))
-            && let Some(root_thread_id) = self.state.agent_id_for_path(&root_path)
             && let Ok(root_thread) = state.get_thread(root_thread_id).await
         {
             agents.push(ListedAgent {
+                agent_id: root_thread_id.to_string(),
                 agent_name: root_path.to_string(),
                 agent_status: root_thread.agent_status().await,
                 last_task_message: Some(ROOT_LAST_TASK_MESSAGE.to_string()),
             });
         }
 
-        for metadata in live_agents {
-            let Some(thread_id) = metadata.agent_id else {
-                continue;
-            };
+        for (thread_id, metadata) in live_agents {
             if resolved_prefix
                 .as_ref()
                 .is_some_and(|prefix| !agent_matches_prefix(metadata.agent_path.as_ref(), prefix))
@@ -473,6 +487,7 @@ impl AgentControl {
                 }
             };
             agents.push(ListedAgent {
+                agent_id: thread_id.to_string(),
                 agent_name,
                 agent_status,
                 last_task_message,
@@ -651,6 +666,21 @@ impl AgentControl {
         Ok(children_by_parent)
     }
 
+    async fn live_thread_spawn_agents_for_current_tree(
+        &self,
+        current_thread_id: ThreadId,
+        current_session_source: &SessionSource,
+    ) -> CodexResult<(ThreadId, Vec<(ThreadId, AgentMetadata)>)> {
+        let mut children_by_parent = self.live_thread_spawn_children().await?;
+        let root_thread_id = current_root_thread_id(
+            current_thread_id,
+            current_session_source,
+            &children_by_parent,
+        );
+        let descendants = remove_thread_spawn_descendants(&mut children_by_parent, root_thread_id);
+        Ok((root_thread_id, descendants))
+    }
+
     async fn persist_thread_spawn_edge_for_source(
         &self,
         thread: &crate::CodexThread,
@@ -693,26 +723,67 @@ impl AgentControl {
         root_thread_id: ThreadId,
     ) -> CodexResult<Vec<ThreadId>> {
         let mut children_by_parent = self.live_thread_spawn_children().await?;
-        let mut descendants = Vec::new();
-        let mut stack = children_by_parent
-            .remove(&root_thread_id)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(child_thread_id, _)| child_thread_id)
-            .rev()
-            .collect::<Vec<_>>();
+        Ok(
+            remove_thread_spawn_descendants(&mut children_by_parent, root_thread_id)
+                .into_iter()
+                .map(|(thread_id, _)| thread_id)
+                .collect(),
+        )
+    }
+}
 
-        while let Some(thread_id) = stack.pop() {
-            descendants.push(thread_id);
-            if let Some(children) = children_by_parent.remove(&thread_id) {
-                for (child_thread_id, _) in children.into_iter().rev() {
-                    stack.push(child_thread_id);
-                }
+fn current_root_thread_id(
+    current_thread_id: ThreadId,
+    current_session_source: &SessionSource,
+    children_by_parent: &HashMap<ThreadId, Vec<(ThreadId, AgentMetadata)>>,
+) -> ThreadId {
+    let parent_by_child = children_by_parent
+        .iter()
+        .flat_map(|(parent_thread_id, children)| {
+            children
+                .iter()
+                .map(move |(child_thread_id, _)| (*child_thread_id, *parent_thread_id))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut root_thread_id = current_thread_id;
+    if !parent_by_child.contains_key(&root_thread_id)
+        && let Some(parent_thread_id) = current_session_source.parent_thread_id()
+    {
+        root_thread_id = parent_thread_id;
+    }
+
+    let mut seen = HashSet::new();
+    while seen.insert(root_thread_id) {
+        let Some(parent_thread_id) = parent_by_child.get(&root_thread_id) else {
+            break;
+        };
+        root_thread_id = *parent_thread_id;
+    }
+    root_thread_id
+}
+
+fn remove_thread_spawn_descendants(
+    children_by_parent: &mut HashMap<ThreadId, Vec<(ThreadId, AgentMetadata)>>,
+    root_thread_id: ThreadId,
+) -> Vec<(ThreadId, AgentMetadata)> {
+    let mut descendants = Vec::new();
+    let mut stack = children_by_parent
+        .remove(&root_thread_id)
+        .unwrap_or_default()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+
+    while let Some((thread_id, metadata)) = stack.pop() {
+        descendants.push((thread_id, metadata));
+        if let Some(children) = children_by_parent.remove(&thread_id) {
+            for child in children.into_iter().rev() {
+                stack.push(child);
             }
         }
-
-        Ok(descendants)
     }
+
+    descendants
 }
 
 fn agent_metadata_from_thread_spawn_source(
