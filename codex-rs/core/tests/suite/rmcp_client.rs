@@ -822,9 +822,10 @@ async fn stdio_mcp_tool_call_includes_sandbox_state_meta() -> anyhow::Result<()>
         sandbox_meta.get("sandboxPolicy"),
         Some(&expected_sandbox_policy)
     );
+    let expected_sandbox_cwd = PathUri::from_abs_path(&fixture.config.cwd).to_string();
     assert_eq!(
         sandbox_meta.get("sandboxCwd").and_then(Value::as_str),
-        fixture.config.cwd.as_path().to_str()
+        Some(expected_sandbox_cwd.as_str())
     );
     assert_eq!(sandbox_meta.get("useLegacyLandlock"), Some(&json!(false)));
 

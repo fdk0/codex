@@ -81,6 +81,7 @@ use codex_rollout::state_db;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::truncate_text;
+use codex_utils_path_uri::PathUri;
 use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
 use rmcp::model::ToolAnnotations;
 use serde::Deserialize;
@@ -720,12 +721,19 @@ async fn augment_mcp_tool_request_meta_with_sandbox_state(
         return Ok(meta);
     }
 
+    let sandbox_cwd = turn_context
+        .environments
+        .primary()
+        .map(|turn_environment| turn_environment.cwd_uri().clone())
+        .unwrap_or_else(|| {
+            #[allow(deprecated)]
+            PathUri::from_abs_path(&turn_context.cwd)
+        });
     let sandbox_state = serde_json::to_value(SandboxState {
         permission_profile: Some(turn_context.permission_profile()),
         sandbox_policy: turn_context.sandbox_policy(),
         codex_linux_sandbox_exe: turn_context.codex_linux_sandbox_exe.clone(),
-        #[allow(deprecated)]
-        sandbox_cwd: turn_context.cwd.to_path_buf(),
+        sandbox_cwd,
         use_legacy_landlock: turn_context.features.use_legacy_landlock(),
     })?;
 

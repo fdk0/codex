@@ -13,6 +13,7 @@ use codex_exec_server::Environment;
 use codex_exec_server::EnvironmentManager;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_utils_path_uri::PathUri;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -24,7 +25,7 @@ pub struct SandboxState {
     pub permission_profile: Option<PermissionProfile>,
     pub sandbox_policy: SandboxPolicy,
     pub codex_linux_sandbox_exe: Option<PathBuf>,
-    pub sandbox_cwd: PathBuf,
+    pub sandbox_cwd: PathUri,
     #[serde(default)]
     pub use_legacy_landlock: bool,
 }
