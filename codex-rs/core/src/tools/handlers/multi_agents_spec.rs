@@ -294,11 +294,6 @@ pub fn create_list_agents_tool() -> ToolSpec {
 }
 
 pub fn create_close_agent_tool_v1() -> ToolSpec {
-    let properties = BTreeMap::from([(
-        "target".to_string(),
-        JsonSchema::string(Some("Agent id to close (from spawn_agent).".to_string())),
-    )]);
-
     ToolSpec::Namespace(ResponsesApiNamespace {
         name: MULTI_AGENT_V1_NAMESPACE.to_string(),
         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
@@ -307,12 +302,39 @@ pub fn create_close_agent_tool_v1() -> ToolSpec {
             description: "Close an agent and any open descendants when they are no longer needed, and return the target agent's previous status before shutdown was requested. Completed agents remain open and count toward the concurrency limit until closed. Don't keep agents open for too long if they are not needed anymore.".to_string(),
             strict: false,
             defer_loading: None,
-            parameters: JsonSchema::object(properties, Some(vec!["target".to_string()]), Some(false.into())),
+            parameters: close_agent_tool_parameters("Agent id to close (from spawn_agent)."),
             output_schema: Some(agent_previous_status_output_schema(
                 "The agent status observed before shutdown was requested.",
             )),
         })],
     })
+}
+
+pub fn create_close_agent_tool_v2() -> ToolSpec {
+    ToolSpec::Function(ResponsesApiTool {
+        name: "close_agent".to_string(),
+        description: "Close an agent and any open descendants when they are no longer needed, and return the target agent's previous status before shutdown was requested. Completed agents remain open and count toward the concurrency limit until closed. Don't keep agents open for too long if they are not needed anymore.".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: close_agent_tool_parameters(
+            "Agent id or canonical task name to close (from spawn_agent).",
+        ),
+        output_schema: Some(agent_previous_status_output_schema(
+            "The agent status observed before shutdown was requested.",
+        )),
+    })
+}
+
+fn close_agent_tool_parameters(target_description: &str) -> JsonSchema {
+    let properties = BTreeMap::from([(
+        "target".to_string(),
+        JsonSchema::string(Some(target_description.to_string())),
+    )]);
+    JsonSchema::object(
+        properties,
+        Some(vec!["target".to_string()]),
+        Some(false.into()),
+    )
 }
 
 pub fn create_interrupt_agent_tool_v2() -> ToolSpec {

@@ -1120,8 +1120,9 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "wait_agent",
         "interrupt_agent",
         "list_agents",
+        "close_agent",
     ]);
-    v2.assert_visible_lacks(&["send_input", "resume_agent", "assign_task", "close_agent"]);
+    v2.assert_visible_lacks(&["send_input", "resume_agent", "assign_task"]);
     let spawn_agent_description = match v2.visible_spec("spawn_agent") {
         ToolSpec::Function(tool) => tool.description.as_str(),
         other => panic!("expected spawn_agent function spec, got {other:?}"),
@@ -1294,6 +1295,7 @@ async fn multi_agent_v2_can_use_configured_tool_namespace() {
         "wait_agent",
         "interrupt_agent",
         "list_agents",
+        "close_agent",
     ] {
         namespaced.assert_visible_lacks(&[tool_name]);
         assert!(
@@ -1385,6 +1387,7 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
         "wait_agent",
         "interrupt_agent",
         "list_agents",
+        "close_agent",
     ] {
         assert!(
             plan.namespace_function_names("agents")
@@ -1459,6 +1462,7 @@ async fn hosted_tools_follow_provider_auth_model_and_config_gates() {
             "wait_agent",
             "interrupt_agent",
             "list_agents",
+            "close_agent",
             // Hosted Responses tools.
             "web_search",
             "image_generation",

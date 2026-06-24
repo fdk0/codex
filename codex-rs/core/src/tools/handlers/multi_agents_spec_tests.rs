@@ -469,3 +469,31 @@ fn list_agents_tool_status_schema_includes_interrupted() {
         ])
     );
 }
+
+#[test]
+fn close_agent_tool_v2_accepts_task_name_targets() {
+    let ToolSpec::Function(ResponsesApiTool {
+        parameters,
+        output_schema,
+        ..
+    }) = create_close_agent_tool_v2()
+    else {
+        panic!("close_agent should be a function tool");
+    };
+    let properties = parameters
+        .properties
+        .as_ref()
+        .expect("close_agent should use object params");
+
+    assert_eq!(
+        properties
+            .get("target")
+            .and_then(|schema| schema.description.as_deref()),
+        Some("Agent id or canonical task name to close (from spawn_agent).")
+    );
+    assert_eq!(parameters.required, Some(vec!["target".to_string()]));
+    assert_eq!(
+        output_schema.expect("close_agent output schema")["required"],
+        json!(["previous_status"])
+    );
+}

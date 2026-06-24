@@ -112,6 +112,9 @@ pub(crate) fn build_wait_agent_statuses(
 
 pub(crate) fn collab_spawn_error(err: CodexErr) -> FunctionCallError {
     match err {
+        CodexErr::AgentLimitReached { max_threads } => FunctionCallError::RespondToModel(format!(
+            "agent thread limit reached (max {max_threads}); use list_agents to find completed or no-longer-needed agents, then close_agent to release capacity before spawning another agent"
+        )),
         CodexErr::UnsupportedOperation(message) if message == "thread manager dropped" => {
             FunctionCallError::RespondToModel("collab manager unavailable".to_string())
         }
