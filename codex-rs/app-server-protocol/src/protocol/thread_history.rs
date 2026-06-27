@@ -12,6 +12,7 @@ use crate::protocol::v2::CollabAgentToolCallStatus;
 use crate::protocol::v2::CommandExecutionStatus;
 use crate::protocol::v2::DynamicToolCallOutputContentItem;
 use crate::protocol::v2::DynamicToolCallStatus;
+use crate::protocol::v2::McpToolCallAppContext;
 use crate::protocol::v2::McpToolCallError;
 use crate::protocol::v2::McpToolCallResult;
 use crate::protocol::v2::McpToolCallStatus;
@@ -387,7 +388,9 @@ impl ThreadHistoryBuilder {
             RolloutItem::Compacted(payload) => self.handle_compacted(payload),
             RolloutItem::ResponseItem(item) => self.handle_response_item(item),
             RolloutItem::InterAgentCommunication(_)
+            | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
+            | RolloutItem::WorldState(_)
             | RolloutItem::SessionMeta(_) => {}
         }
     }
@@ -573,52 +576,25 @@ impl ThreadHistoryBuilder {
     }
 
     fn handle_item_started(&mut self, payload: &ItemStartedEvent) {
-        match &payload.item {
-            codex_protocol::items::TurnItem::Plan(plan) => {
-                if plan.text.is_empty() {
-                    return;
-                }
-                self.upsert_item_in_turn_id(
-                    &payload.turn_id,
-                    ThreadItem::from(payload.item.clone()),
-                );
-            }
-            codex_protocol::items::TurnItem::Sleep(_) => {
-                self.upsert_item_in_turn_id(
-                    &payload.turn_id,
-                    ThreadItem::from(payload.item.clone()),
-                );
-            }
-            codex_protocol::items::TurnItem::UserMessage(_)
-            | codex_protocol::items::TurnItem::HookPrompt(_)
-            | codex_protocol::items::TurnItem::AgentMessage(_)
-            | codex_protocol::items::TurnItem::Reasoning(_)
-            | codex_protocol::items::TurnItem::WebSearch(_)
-            | codex_protocol::items::TurnItem::ImageView(_)
-            | codex_protocol::items::TurnItem::ImageGeneration(_)
-            | codex_protocol::items::TurnItem::FileChange(_)
-            | codex_protocol::items::TurnItem::McpToolCall(_)
-            | codex_protocol::items::TurnItem::ContextCompaction(_) => {}
-        }
+        self.handle_materialized_item_lifecycle(&payload.turn_id, &payload.item);
     }
 
     fn handle_item_completed(&mut self, payload: &ItemCompletedEvent) {
-        match &payload.item {
-            codex_protocol::items::TurnItem::Plan(plan) => {
-                if plan.text.is_empty() {
-                    return;
-                }
-                self.upsert_item_in_turn_id(
-                    &payload.turn_id,
-                    ThreadItem::from(payload.item.clone()),
-                );
-            }
-            codex_protocol::items::TurnItem::Sleep(_) => {
-                self.upsert_item_in_turn_id(
-                    &payload.turn_id,
-                    ThreadItem::from(payload.item.clone()),
-                );
-            }
+        self.handle_materialized_item_lifecycle(&payload.turn_id, &payload.item);
+    }
+
+    fn handle_materialized_item_lifecycle(
+        &mut self,
+        turn_id: &str,
+        item: &codex_protocol::items::TurnItem,
+    ) {
+        let should_upsert = match item {
+            codex_protocol::items::TurnItem::Plan(plan) => !plan.text.is_empty(),
+            codex_protocol::items::TurnItem::Sleep(_)
+            | codex_protocol::items::TurnItem::CommandExecution(_)
+            | codex_protocol::items::TurnItem::DynamicToolCall(_)
+            | codex_protocol::items::TurnItem::CollabAgentToolCall(_)
+            | codex_protocol::items::TurnItem::SubAgentActivity(_) => true,
             codex_protocol::items::TurnItem::UserMessage(_)
             | codex_protocol::items::TurnItem::HookPrompt(_)
             | codex_protocol::items::TurnItem::AgentMessage(_)
@@ -628,7 +604,11 @@ impl ThreadHistoryBuilder {
             | codex_protocol::items::TurnItem::ImageGeneration(_)
             | codex_protocol::items::TurnItem::FileChange(_)
             | codex_protocol::items::TurnItem::McpToolCall(_)
-            | codex_protocol::items::TurnItem::ContextCompaction(_) => {}
+            | codex_protocol::items::TurnItem::ContextCompaction(_) => false,
+        };
+
+        if should_upsert {
+            self.upsert_item_in_turn_id(turn_id, ThreadItem::from(item.clone()));
         }
     }
 
@@ -767,6 +747,17 @@ impl ThreadHistoryBuilder {
                 .arguments
                 .clone()
                 .unwrap_or(serde_json::Value::Null),
+            app_context: payload
+                .connector_id
+                .clone()
+                .map(|connector_id| McpToolCallAppContext {
+                    connector_id,
+                    link_id: payload.link_id.clone(),
+                    resource_uri: payload.mcp_app_resource_uri.clone(),
+                    app_name: payload.app_name.clone(),
+                    template_id: payload.template_id.clone(),
+                    action_name: payload.action_name.clone(),
+                }),
             mcp_app_resource_uri: payload.mcp_app_resource_uri.clone(),
             plugin_id: payload.plugin_id.clone(),
             result: None,
@@ -809,6 +800,17 @@ impl ThreadHistoryBuilder {
                 .arguments
                 .clone()
                 .unwrap_or(serde_json::Value::Null),
+            app_context: payload
+                .connector_id
+                .clone()
+                .map(|connector_id| McpToolCallAppContext {
+                    connector_id,
+                    link_id: payload.link_id.clone(),
+                    resource_uri: payload.mcp_app_resource_uri.clone(),
+                    app_name: payload.app_name.clone(),
+                    template_id: payload.template_id.clone(),
+                    action_name: payload.action_name.clone(),
+                }),
             mcp_app_resource_uri: payload.mcp_app_resource_uri.clone(),
             plugin_id: payload.plugin_id.clone(),
             result,
@@ -821,7 +823,7 @@ impl ThreadHistoryBuilder {
     fn handle_view_image_tool_call(&mut self, payload: &ViewImageToolCallEvent) {
         let item = ThreadItem::ImageView {
             id: payload.call_id.clone(),
-            path: payload.path.clone(),
+            path: payload.path.clone().into(),
         };
         self.upsert_item_in_current_turn(item);
     }
@@ -1606,6 +1608,8 @@ mod tests {
     use crate::protocol::v2::CommandExecutionSource;
     use codex_protocol::ThreadId;
     use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem as CoreDynamicToolCallOutputContentItem;
+    use codex_protocol::items::CommandExecutionItem as CoreCommandExecutionItem;
+    use codex_protocol::items::CommandExecutionStatus as CoreCommandExecutionStatus;
     use codex_protocol::items::HookPromptFragment as CoreHookPromptFragment;
     use codex_protocol::items::SleepItem as CoreSleepItem;
     use codex_protocol::items::TurnItem as CoreTurnItem;
@@ -1906,6 +1910,77 @@ mod tests {
             vec![ThreadItem::Sleep {
                 id: "sleep-1".to_string(),
                 duration_ms: 1_000,
+            }]
+        );
+    }
+
+    #[test]
+    fn rebuilds_command_execution_item_from_persisted_completion() {
+        let turn_id = "turn-1";
+        let thread_id = ThreadId::new();
+        let command_item = CoreTurnItem::CommandExecution(CoreCommandExecutionItem {
+            id: "exec-1".to_string(),
+            process_id: Some("pid-1".to_string()),
+            command: vec!["echo".to_string(), "hello world".to_string()],
+            cwd: test_path_buf("/tmp").abs().into(),
+            parsed_cmd: vec![ParsedCommand::Unknown {
+                cmd: "echo hello world".to_string(),
+            }],
+            source: ExecCommandSource::Agent,
+            interaction_input: None,
+            status: CoreCommandExecutionStatus::Completed,
+            stdout: Some("hello world\n".to_string()),
+            stderr: Some(String::new()),
+            aggregated_output: Some("hello world\n".to_string()),
+            exit_code: Some(0),
+            duration: Some(Duration::from_millis(12)),
+            formatted_output: Some("hello world\n".to_string()),
+        });
+        let events = vec![
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: turn_id.to_string(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }),
+            EventMsg::ItemCompleted(ItemCompletedEvent {
+                thread_id,
+                turn_id: turn_id.to_string(),
+                item: command_item,
+                completed_at_ms: 1_000,
+            }),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: turn_id.to_string(),
+                last_agent_message: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        ];
+
+        let items = events
+            .into_iter()
+            .map(RolloutItem::EventMsg)
+            .collect::<Vec<_>>();
+        let turns = build_turns_from_rollout_items(&items);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].items,
+            vec![ThreadItem::CommandExecution {
+                id: "exec-1".to_string(),
+                command: "echo 'hello world'".to_string(),
+                cwd: test_path_buf("/tmp").abs().into(),
+                process_id: Some("pid-1".to_string()),
+                source: CommandExecutionSource::Agent,
+                status: CommandExecutionStatus::Completed,
+                command_actions: vec![CommandAction::Unknown {
+                    command: "echo hello world".to_string(),
+                }],
+                aggregated_output: Some("hello world\n".to_string()),
+                exit_code: Some(0),
+                duration_ms: Some(12),
             }]
         );
     }
@@ -2443,7 +2518,7 @@ mod tests {
                 turn_id: "turn-1".into(),
                 completed_at_ms: 0,
                 command: vec!["echo".into(), "hello world".into()],
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
                 parsed_cmd: vec![ParsedCommand::Unknown {
                     cmd: "echo hello world".into(),
                 }],
@@ -2464,7 +2539,12 @@ mod tests {
                     tool: "lookup".into(),
                     arguments: Some(serde_json::json!({"id":"123"})),
                 },
+                connector_id: None,
                 mcp_app_resource_uri: None,
+                link_id: None,
+                app_name: None,
+                template_id: None,
+                action_name: None,
                 plugin_id: None,
                 duration: Duration::from_millis(8),
                 result: Err("boom".into()),
@@ -2494,7 +2574,7 @@ mod tests {
             ThreadItem::CommandExecution {
                 id: "exec-1".into(),
                 command: "echo 'hello world'".into(),
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
                 process_id: Some("pid-1".into()),
                 source: CommandExecutionSource::Agent,
                 status: CommandExecutionStatus::Completed,
@@ -2514,6 +2594,7 @@ mod tests {
                 tool: "lookup".into(),
                 status: McpToolCallStatus::Failed,
                 arguments: serde_json::json!({"id":"123"}),
+                app_context: None,
                 mcp_app_resource_uri: None,
                 plugin_id: None,
                 result: None,
@@ -2542,7 +2623,12 @@ mod tests {
                     tool: "lookup".into(),
                     arguments: Some(serde_json::json!({"id":"123"})),
                 },
+                connector_id: Some("calendar".into()),
                 mcp_app_resource_uri: Some("ui://widget/lookup.html".into()),
+                link_id: Some("link_calendar".into()),
+                app_name: Some("Calendar".into()),
+                template_id: Some("calendar_template".into()),
+                action_name: Some("lookup".into()),
                 plugin_id: Some("sample@test".into()),
                 duration: Duration::from_millis(8),
                 result: Ok(CallToolResult {
@@ -2573,6 +2659,14 @@ mod tests {
                 tool: "lookup".into(),
                 status: McpToolCallStatus::Completed,
                 arguments: serde_json::json!({"id":"123"}),
+                app_context: Some(McpToolCallAppContext {
+                    connector_id: "calendar".into(),
+                    link_id: Some("link_calendar".into()),
+                    resource_uri: Some("ui://widget/lookup.html".into()),
+                    app_name: Some("Calendar".into()),
+                    template_id: Some("calendar_template".into()),
+                    action_name: Some("lookup".into()),
+                }),
                 mcp_app_resource_uri: Some("ui://widget/lookup.html".into()),
                 plugin_id: Some("sample@test".into()),
                 result: Some(Box::new(McpToolCallResult {
@@ -2683,7 +2777,7 @@ mod tests {
                 turn_id: "turn-1".into(),
                 completed_at_ms: 0,
                 command: vec!["ls".into()],
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
                 parsed_cmd: vec![ParsedCommand::Unknown { cmd: "ls".into() }],
                 source: ExecCommandSource::Agent,
                 interaction_input: None,
@@ -2725,7 +2819,7 @@ mod tests {
             ThreadItem::CommandExecution {
                 id: "exec-declined".into(),
                 command: "ls".into(),
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
                 process_id: Some("pid-2".into()),
                 source: CommandExecutionSource::Agent,
                 status: CommandExecutionStatus::Declined,
@@ -2823,7 +2917,7 @@ mod tests {
             ThreadItem::CommandExecution {
                 id: "guardian-exec".into(),
                 command: "rm -rf /tmp/guardian".into(),
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
                 process_id: None,
                 source: CommandExecutionSource::Agent,
                 status: CommandExecutionStatus::Declined,
@@ -2889,7 +2983,7 @@ mod tests {
             ThreadItem::CommandExecution {
                 id: "guardian-execve".into(),
                 command: "/bin/rm -f /tmp/file.sqlite".into(),
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
                 process_id: None,
                 source: CommandExecutionSource::Agent,
                 status: CommandExecutionStatus::InProgress,
@@ -2949,7 +3043,7 @@ mod tests {
                 turn_id: "turn-a".into(),
                 completed_at_ms: 0,
                 command: vec!["echo".into(), "done".into()],
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
                 parsed_cmd: vec![ParsedCommand::Unknown {
                     cmd: "echo done".into(),
                 }],
@@ -2987,7 +3081,7 @@ mod tests {
             ThreadItem::CommandExecution {
                 id: "exec-late".into(),
                 command: "echo done".into(),
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
                 process_id: Some("pid-42".into()),
                 source: CommandExecutionSource::Agent,
                 status: CommandExecutionStatus::Completed,
@@ -3047,7 +3141,7 @@ mod tests {
                 turn_id: "turn-missing".into(),
                 completed_at_ms: 0,
                 command: vec!["echo".into(), "done".into()],
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
                 parsed_cmd: vec![ParsedCommand::Unknown {
                     cmd: "echo done".into(),
                 }],
@@ -3381,6 +3475,9 @@ mod tests {
             RolloutItem::Compacted(CompactedItem {
                 message: String::new(),
                 replacement_history: None,
+                window_number: None,
+                first_window_id: None,
+                previous_window_id: None,
                 window_id: None,
             }),
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
@@ -3943,7 +4040,7 @@ mod tests {
                     text: "plain text".into(),
                 }],
                 phase: None,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }),
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),

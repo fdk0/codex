@@ -81,7 +81,7 @@ async fn forward_events_cancelled_while_send_blocked_shuts_down_delegate() {
                     call_id: "call-1".to_string(),
                     name: "tool".to_string(),
                     input: "{}".to_string(),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             }),
         })
@@ -322,6 +322,7 @@ async fn handle_exec_approval_uses_call_id_for_guardian_review_and_approval_id_f
                     call_id: "command-item-1".to_string(),
                     approval_id: Some("callback-approval-1".to_string()),
                     turn_id: "child-turn-1".to_string(),
+                    environment_id: Some("remote".to_string()),
                     started_at_ms: 0,
                     command: vec!["rm".to_string(), "-rf".to_string(), "tmp".to_string()],
                     cwd: test_path_buf("/tmp").abs(),
@@ -410,10 +411,13 @@ async fn delegated_mcp_guardian_abort_returns_synthetic_decline_answer() {
 
     let pending_mcp_invocations = Arc::new(Mutex::new(HashMap::from([(
         "call-1".to_string(),
-        McpInvocation {
-            server: "custom_server".to_string(),
-            tool: "dangerous_tool".to_string(),
-            arguments: None,
+        PendingMcpInvocation {
+            invocation: McpInvocation {
+                server: "custom_server".to_string(),
+                tool: "dangerous_tool".to_string(),
+                arguments: None,
+            },
+            metadata: None,
         },
     )])));
     let cancel_token = CancellationToken::new();
@@ -459,10 +463,13 @@ async fn delegated_mcp_user_reviewer_returns_none_without_metadata() {
         crate::session::tests::make_session_and_context_with_rx().await;
     let pending_mcp_invocations = Arc::new(Mutex::new(HashMap::from([(
         "call-1".to_string(),
-        McpInvocation {
-            server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
-            tool: "dangerous_tool".to_string(),
-            arguments: None,
+        PendingMcpInvocation {
+            invocation: McpInvocation {
+                server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+                tool: "dangerous_tool".to_string(),
+                arguments: None,
+            },
+            metadata: None,
         },
     )])));
     let cancel_token = CancellationToken::new();

@@ -4,6 +4,8 @@ use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
+use crate::local_agent_graph_store_from_state_db;
+use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::thread_manager::thread_store_from_config;
@@ -73,8 +75,10 @@ fn invocation(
     tool_name: &str,
     payload: ToolPayload,
 ) -> ToolInvocation {
+    let step_context = StepContext::for_test(Arc::clone(&turn));
     ToolInvocation {
         session,
+        step_context,
         turn,
         cancellation_token: CancellationToken::new(),
         tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
@@ -2212,6 +2216,18 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         .await
         .expect("followup_task should succeed");
 
+    assert!(manager.captured_ops().iter().any(|(id, op)| {
+        *id == agent_id
+            && matches!(
+                op,
+                Op::InterAgentCommunication { communication }
+                    if communication.author == AgentPath::root()
+                        && communication.recipient == worker_path
+                        && communication.encrypted_content.as_deref() == Some("continue")
+                        && communication.trigger_turn
+            )
+    }));
+
     let second_turn = thread.codex.session.new_default_turn().await;
     thread
         .codex
@@ -2986,10 +3002,11 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
                     text: "materialized".to_string(),
                 }],
                 phase: None,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             })]),
             AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
             /*parent_trace*/ None,
+            /*supports_openai_form_elicitation*/ false,
         )
         .await
         .expect("start thread");
@@ -4433,9 +4450,10 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
         thread_store_from_config(&config, state_db.clone()),
-        state_db.clone(),
+        local_agent_graph_store_from_state_db(state_db.as_ref()),
         "11111111-1111-4111-8111-111111111111".to_string(),
         /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
     );
 
     let parent = manager
@@ -4652,17 +4670,19 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
         text: "base".to_string(),
     };
     turn.developer_instructions = Some("dev".to_string());
-    turn.compact_prompt = Some("compact".to_string());
-    turn.shell_environment_policy = ShellEnvironmentPolicy {
+    let mut config = (*turn.config).clone();
+    config.compact_prompt = Some("compact".to_string());
+    config.permissions.shell_environment_policy = ShellEnvironmentPolicy {
         use_profile: true,
         ..ShellEnvironmentPolicy::default()
     };
+    config.codex_linux_sandbox_exe = Some(PathBuf::from("/bin/echo"));
+    turn.config = Arc::new(config);
     let temp_dir = tempfile::tempdir().expect("temp dir");
     #[allow(deprecated)]
     {
         turn.cwd = temp_dir.abs();
     }
-    turn.codex_linux_sandbox_exe = Some(PathBuf::from("/bin/echo"));
     #[allow(deprecated)]
     let turn_cwd = turn.cwd.clone();
     let sandbox_policy = pick_allowed_sandbox_policy(
@@ -4691,9 +4711,6 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     expected.model_reasoning_effort = turn.reasoning_effort.clone();
     expected.model_reasoning_summary = Some(turn.reasoning_summary);
     expected.developer_instructions = turn.developer_instructions.clone();
-    expected.compact_prompt = turn.compact_prompt.clone();
-    expected.permissions.shell_environment_policy = turn.shell_environment_policy.clone();
-    expected.codex_linux_sandbox_exe = turn.codex_linux_sandbox_exe.clone();
     #[allow(deprecated)]
     {
         expected.cwd = turn.cwd.clone();
@@ -4729,9 +4746,6 @@ async fn build_agent_resume_config_clears_base_instructions() {
     expected.model_reasoning_effort = turn.reasoning_effort.clone();
     expected.model_reasoning_summary = Some(turn.reasoning_summary);
     expected.developer_instructions = turn.developer_instructions.clone();
-    expected.compact_prompt = turn.compact_prompt.clone();
-    expected.permissions.shell_environment_policy = turn.shell_environment_policy.clone();
-    expected.codex_linux_sandbox_exe = turn.codex_linux_sandbox_exe.clone();
     #[allow(deprecated)]
     {
         expected.cwd = turn.cwd.clone();

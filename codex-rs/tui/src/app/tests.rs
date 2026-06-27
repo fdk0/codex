@@ -1,6 +1,7 @@
 //! App-level orchestration tests for the TUI.
 
 mod model_catalog;
+mod plugin_catalog;
 mod session_summary;
 mod startup;
 
@@ -2875,15 +2876,18 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
         ServerNotification::ThreadStarted(ThreadStartedNotification {
             thread: Thread {
                 id: agent_thread_id.to_string(),
+                extra: None,
                 session_id: agent_thread_id.to_string(),
                 parent_thread_id: None,
                 forked_from_id: None,
                 parent_thread_id: None,
                 preview: "agent thread".to_string(),
                 ephemeral: false,
+                history_mode: Default::default(),
                 model_provider: "agent-provider".to_string(),
                 created_at: 1,
                 updated_at: 2,
+                recency_at: Some(2),
                 status: codex_app_server_protocol::ThreadStatus::Idle,
                 path: Some(rollout_path.clone()),
                 cwd: test_path_buf("/tmp/agent").abs(),
@@ -2968,15 +2972,18 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
         ServerNotification::ThreadStarted(ThreadStartedNotification {
             thread: Thread {
                 id: agent_thread_id.to_string(),
+                extra: None,
                 session_id: agent_thread_id.to_string(),
                 parent_thread_id: None,
                 forked_from_id: None,
                 parent_thread_id: None,
                 preview: "agent thread".to_string(),
                 ephemeral: false,
+                history_mode: Default::default(),
                 model_provider: "agent-provider".to_string(),
                 created_at: 1,
                 updated_at: 2,
+                recency_at: Some(2),
                 status: codex_app_server_protocol::ThreadStatus::Idle,
                 path: None,
                 cwd: test_path_buf("/tmp/agent").abs(),
@@ -3028,15 +3035,18 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
 
     let thread = Thread {
         id: read_thread_id.to_string(),
+        extra: None,
         session_id: read_thread_id.to_string(),
         parent_thread_id: None,
         forked_from_id: None,
         parent_thread_id: None,
         preview: "read thread".to_string(),
         ephemeral: false,
+        history_mode: Default::default(),
         model_provider: "read-provider".to_string(),
         created_at: 1,
         updated_at: 2,
+        recency_at: Some(2),
         status: codex_app_server_protocol::ThreadStatus::Idle,
         path: None,
         cwd: test_path_buf("/tmp/read").abs(),
@@ -3499,6 +3509,7 @@ async fn primary_thread_ignores_child_mcp_startup_notifications() {
                 name: "sentry".to_string(),
                 status: McpServerStartupState::Failed,
                 error: Some("sentry is not logged in".to_string()),
+                failure_reason: None,
             }),
         ),
     )
@@ -3570,6 +3581,7 @@ async fn app_scoped_mcp_startup_notifications_do_not_render_in_active_thread() {
                 name: "sentry".to_string(),
                 status: McpServerStartupState::Failed,
                 error: Some("sentry is not logged in".to_string()),
+                failure_reason: None,
             }),
         ),
     )
@@ -3634,6 +3646,7 @@ async fn active_side_thread_renders_live_mcp_startup_notifications() {
                     status,
                     error: matches!(status, McpServerStartupState::Failed)
                         .then(|| "sentry is not logged in".to_string()),
+                    failure_reason: None,
                 }),
             ),
         )
@@ -4700,10 +4713,11 @@ fn exec_approval_request(
             item_id: item_id.to_string(),
             started_at_ms: 0,
             approval_id: approval_id.map(str::to_string),
+            environment_id: None,
             reason: Some("needs approval".to_string()),
             network_approval_context: None,
             command: Some("echo hello".to_string()),
-            cwd: Some(test_path_buf("/tmp/project").abs()),
+            cwd: Some(test_path_buf("/tmp/project").abs().into()),
             command_actions: None,
             additional_permissions: None,
             proposed_execpolicy_amendment: None,
@@ -5646,15 +5660,18 @@ async fn thread_rollback_response_discards_queued_active_thread_events() {
         &ThreadRollbackResponse {
             thread: Thread {
                 id: thread_id.to_string(),
+                extra: None,
                 session_id: thread_id.to_string(),
                 parent_thread_id: None,
                 forked_from_id: None,
                 parent_thread_id: None,
                 preview: String::new(),
                 ephemeral: false,
+                history_mode: Default::default(),
                 model_provider: "openai".to_string(),
                 created_at: 0,
                 updated_at: 0,
+                recency_at: Some(0),
                 status: codex_app_server_protocol::ThreadStatus::Idle,
                 path: None,
                 cwd: test_path_buf("/tmp/project").abs(),
@@ -6045,6 +6062,7 @@ async fn inactive_thread_settings_notification_updates_cached_collaboration_mode
             effort: collaboration_mode.settings.reasoning_effort.clone(),
             summary: None,
             collaboration_mode: collaboration_mode.clone(),
+            multi_agent_mode: Default::default(),
             personality: Some(Personality::Pragmatic),
         },
     };

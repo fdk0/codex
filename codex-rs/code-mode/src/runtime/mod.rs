@@ -5,6 +5,8 @@ mod timers;
 mod value;
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
 use std::sync::OnceLock;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
@@ -18,6 +20,8 @@ use codex_protocol::ToolName;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 
+use crate::TaskFailureHandler;
+
 const EXIT_SENTINEL: &str = "__codex_code_mode_exit__";
 
 #[derive(Debug)]
@@ -25,17 +29,20 @@ pub(crate) enum RuntimeCommand {
     ToolResponse { id: String, result: JsonValue },
     ToolError { id: String, error_text: String },
     TimeoutFired { id: u64 },
+    ObservePendingFrontier,
     Terminate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum PendingRuntimeMode {
+    #[cfg(test)]
     Continue,
     PauseUntilResumed,
 }
 
 #[derive(Debug)]
 pub(crate) enum RuntimeControlCommand {
+    Continue,
     Resume,
     Terminate,
 }
@@ -60,6 +67,7 @@ pub(crate) enum RuntimeEvent {
         stored_value_writes: HashMap<String, JsonValue>,
         error_text: Option<String>,
     },
+    ThreadPanicked,
 }
 
 pub(crate) fn spawn_runtime(
@@ -67,6 +75,7 @@ pub(crate) fn spawn_runtime(
     request: ExecuteRequest,
     event_tx: mpsc::UnboundedSender<RuntimeEvent>,
     pending_mode: PendingRuntimeMode,
+    task_failure_handler: Option<TaskFailureHandler>,
 ) -> Result<
     (
         std_mpsc::Sender<RuntimeCommand>,
@@ -93,7 +102,7 @@ pub(crate) fn spawn_runtime(
         stored_values,
     };
 
-    thread::spawn(move || {
+    spawn_supervised_runtime_thread(event_tx.clone(), task_failure_handler, move || {
         run_runtime(
             config,
             event_tx,
@@ -109,6 +118,21 @@ pub(crate) fn spawn_runtime(
         .recv()
         .map_err(|_| "failed to initialize code mode runtime".to_string())?;
     Ok((command_tx, control_tx, isolate_handle))
+}
+
+fn spawn_supervised_runtime_thread(
+    event_tx: mpsc::UnboundedSender<RuntimeEvent>,
+    task_failure_handler: Option<TaskFailureHandler>,
+    runtime: impl FnOnce() + Send + 'static,
+) {
+    thread::spawn(move || {
+        if catch_unwind(AssertUnwindSafe(runtime)).is_err() {
+            if let Some(task_failure_handler) = task_failure_handler {
+                task_failure_handler("code-mode V8 runtime thread panicked".to_string());
+            }
+            let _ = event_tx.send(RuntimeEvent::ThreadPanicked);
+        }
+    });
 }
 
 #[derive(Clone)]
@@ -245,6 +269,7 @@ fn run_runtime(
                     return;
                 }
             }
+            RuntimeCommand::ObservePendingFrontier => {}
         }
 
         scope.perform_microtask_checkpoint();
@@ -283,8 +308,10 @@ fn next_runtime_command(
 
         let _ = event_tx.send(RuntimeEvent::Pending);
         match pending_mode {
+            #[cfg(test)]
             PendingRuntimeMode::Continue => return command_rx.recv().ok(),
             PendingRuntimeMode::PauseUntilResumed => match control_rx.recv().ok()? {
+                RuntimeControlCommand::Continue => return command_rx.recv().ok(),
                 RuntimeControlCommand::Resume => continue,
                 RuntimeControlCommand::Terminate => return Some(RuntimeCommand::Terminate),
             },
@@ -330,6 +357,7 @@ mod tests {
     use super::RuntimeControlCommand;
     use super::RuntimeEvent;
     use super::spawn_runtime;
+    use super::spawn_supervised_runtime_thread;
     use crate::FunctionCallOutputContentItem;
 
     fn execute_request(source: &str) -> ExecuteRequest {
@@ -343,6 +371,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_thread_panic_before_initialization_is_reported_directly() {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        drop(event_rx);
+        let (failure_tx, mut failure_rx) = mpsc::unbounded_channel();
+        spawn_supervised_runtime_thread(
+            event_tx,
+            Some(std::sync::Arc::new(move |reason| {
+                let _ = failure_tx.send(reason);
+            })),
+            || panic!("runtime thread panic probe"),
+        );
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), failure_rx.recv())
+                .await
+                .expect("runtime failure timeout")
+                .expect("runtime failure"),
+            "code-mode V8 runtime thread panicked"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_thread_panic_is_forwarded_without_owner_supervision() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        spawn_supervised_runtime_thread(
+            event_tx,
+            /*task_failure_handler*/ None,
+            || panic!("runtime thread panic probe"),
+        );
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+                .await
+                .expect("runtime panic event timeout"),
+            Some(RuntimeEvent::ThreadPanicked)
+        ));
+    }
+
+    #[tokio::test]
     async fn terminate_execution_stops_cpu_bound_module() {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let (_runtime_tx, _runtime_control_tx, runtime_terminate_handle) = spawn_runtime(
@@ -350,6 +417,7 @@ mod tests {
             execute_request("while (true) {}"),
             event_tx,
             PendingRuntimeMode::Continue,
+            /*task_failure_handler*/ None,
         )
         .unwrap();
 
@@ -392,6 +460,7 @@ await new Promise(() => {});
             ),
             event_tx,
             PendingRuntimeMode::PauseUntilResumed,
+            /*task_failure_handler*/ None,
         )
         .unwrap();
 
@@ -414,7 +483,7 @@ await new Promise(() => {});
             .send(RuntimeCommand::TimeoutFired { id: 1 })
             .unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(100), event_rx.recv())
+            tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
                 .await
                 .is_err()
         );

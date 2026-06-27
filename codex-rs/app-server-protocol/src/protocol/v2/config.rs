@@ -177,6 +177,7 @@ pub struct AppsDefaultConfig {
     pub destructive_enabled: bool,
     #[serde(default = "default_enabled")]
     pub open_world_enabled: bool,
+    pub default_tools_approval_mode: Option<AppToolApproval>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -389,6 +390,23 @@ pub struct ConfigRequirements {
     pub enforce_residency: Option<ResidencyRequirement>,
     #[experimental("configRequirements/read.network")]
     pub network: Option<NetworkRequirements>,
+    pub models: Option<ModelsRequirements>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ModelsRequirements {
+    pub new_thread: Option<NewThreadModelDefaults>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct NewThreadModelDefaults {
+    pub model: Option<String>,
+    pub model_reasoning_effort: Option<ReasoningEffort>,
+    pub service_tier: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -592,6 +610,13 @@ pub struct PluginsMigration {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct SkillMigration {
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct SessionMigration {
     pub path: PathBuf,
     pub cwd: PathBuf,
@@ -633,6 +658,8 @@ pub struct MigrationDetails {
     #[serde(default)]
     pub plugins: Vec<PluginsMigration>,
     #[serde(default)]
+    pub skills: Vec<SkillMigration>,
+    #[serde(default)]
     pub sessions: Vec<SessionMigration>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerMigration>,
@@ -666,7 +693,7 @@ pub struct ExternalAgentConfigDetectResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ExternalAgentConfigDetectParams {
-    /// If true, include detection under the user's home (~/.claude, ~/.codex, etc.).
+    /// If true, include detection under the user's home directory.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_home: bool,
     /// Zero or more working directories to include for repo-scoped detection.
@@ -679,6 +706,9 @@ pub struct ExternalAgentConfigDetectParams {
 #[ts(export_to = "v2/")]
 pub struct ExternalAgentConfigImportParams {
     pub migration_items: Vec<ExternalAgentConfigMigrationItem>,
+    /// Source product that produced the migration items. Missing means unspecified.
+    #[ts(optional = nullable)]
+    pub source: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

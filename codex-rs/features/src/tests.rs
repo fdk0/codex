@@ -477,6 +477,23 @@ fn from_sources_ignores_removed_image_detail_original_feature_key() {
 }
 
 #[test]
+fn from_sources_ignores_removed_resize_all_images_feature_key() {
+    let features_toml =
+        FeaturesToml::from(BTreeMap::from([("resize_all_images".to_string(), false)]));
+
+    let features = Features::from_sources(
+        FeatureConfigSource {
+            features: Some(&features_toml),
+            ..Default::default()
+        },
+        FeatureConfigSource::default(),
+        FeatureOverrides::default(),
+    );
+
+    assert_eq!(features, Features::with_defaults());
+}
+
+#[test]
 fn from_sources_ignores_removed_undo_feature_key() {
     let features_toml = FeaturesToml::from(BTreeMap::from([("undo".to_string(), true)]));
 
@@ -531,6 +548,25 @@ fn from_sources_ignores_removed_apply_patch_freeform_feature_key() {
 #[test]
 fn from_sources_ignores_removed_plugin_hooks_feature_key() {
     let features_toml = FeaturesToml::from(BTreeMap::from([("plugin_hooks".to_string(), true)]));
+
+    let features = Features::from_sources(
+        FeatureConfigSource {
+            features: Some(&features_toml),
+            ..Default::default()
+        },
+        FeatureConfigSource::default(),
+        FeatureOverrides::default(),
+    );
+
+    assert_eq!(features, Features::with_defaults());
+}
+
+#[test]
+fn from_sources_ignores_removed_tool_search_always_defer_mcp_tools_feature_key() {
+    let features_toml = FeaturesToml::from(BTreeMap::from([(
+        "tool_search_always_defer_mcp_tools".to_string(),
+        false,
+    )]));
 
     let features = Features::from_sources(
         FeatureConfigSource {
@@ -652,6 +688,7 @@ fn materialize_resolved_enabled_writes_all_features_and_preserves_custom_config(
     features.enable(Feature::CodeMode);
     features.enable(Feature::MultiAgentV2);
     features.enable(Feature::NetworkProxy);
+    features.enable(Feature::RespectSystemProxy);
 
     let mut features_toml = FeaturesToml {
         multi_agent_v2: Some(FeatureToml::Config(crate::MultiAgentV2ConfigToml {
@@ -709,12 +746,15 @@ fn materialize_resolved_enabled_writes_all_features_and_preserves_custom_config(
 #[test]
 fn unstable_warning_event_only_mentions_enabled_under_development_features() {
     let mut configured_features = Table::new();
-    configured_features.insert("child_agents_md".to_string(), TomlValue::Boolean(true));
+    configured_features.insert(
+        "apply_patch_streaming_events".to_string(),
+        TomlValue::Boolean(true),
+    );
     configured_features.insert("personality".to_string(), TomlValue::Boolean(true));
     configured_features.insert("unknown".to_string(), TomlValue::Boolean(true));
 
     let mut features = Features::with_defaults();
-    features.enable(Feature::ChildAgentsMd);
+    features.enable(Feature::ApplyPatchStreamingEvents);
 
     let warning = unstable_features_warning_event(
         Some(&configured_features),
@@ -727,7 +767,7 @@ fn unstable_warning_event_only_mentions_enabled_under_development_features() {
     let EventMsg::Warning(WarningEvent { message }) = warning.msg else {
         panic!("expected warning event");
     };
-    assert!(message.contains("child_agents_md"));
+    assert!(message.contains("apply_patch_streaming_events"));
     assert!(!message.contains("personality"));
     assert!(message.contains("/tmp/config.toml"));
 }

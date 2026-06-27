@@ -2,7 +2,6 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use clap::Parser;
-use codex_app_server_protocol::AuthMode;
 use codex_core::config::Config;
 use codex_core::config::find_codex_home;
 use codex_core_plugins::ConfiguredMarketplace;
@@ -22,6 +21,7 @@ use codex_login::CodexAuth;
 use codex_login::auth::read_codex_api_key_from_env;
 use codex_plugin::PluginId;
 use codex_plugin::validate_plugin_segment;
+use codex_protocol::auth::AuthMode;
 use codex_utils_cli::CliConfigOverrides;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -148,10 +148,13 @@ pub async fn run_plugin_add(
         &plugin_name,
     )?;
     let outcome = manager
-        .install_plugin(PluginInstallRequest {
-            plugin_name,
-            marketplace_path: marketplace.path,
-        })
+        .install_plugin(
+            &plugins_input.config_layer_stack,
+            PluginInstallRequest {
+                plugin_name,
+                marketplace_path: marketplace.path,
+            },
+        )
         .await?;
 
     if json {
@@ -282,6 +285,20 @@ pub async fn run_plugin_list(
                         }
                         parts.join(", ")
                     }
+                    codex_core_plugins::marketplace::MarketplacePluginSource::Npm {
+                        package,
+                        version,
+                        registry,
+                    } => {
+                        let mut parts = vec![package.clone()];
+                        if let Some(version) = version {
+                            parts.push(format!("version `{version}`"));
+                        }
+                        if let Some(registry) = registry {
+                            parts.push(format!("registry `{registry}`"));
+                        }
+                        parts.join(", ")
+                    }
                 };
                 plugin_width = plugin_width.max(plugin.id.len());
                 status_width = status_width.max(state.len());
@@ -409,6 +426,13 @@ enum JsonPluginSource {
         #[serde(skip_serializing_if = "Option::is_none")]
         sha: Option<String>,
     },
+    Npm {
+        package: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        registry: Option<String>,
+    },
 }
 
 impl JsonPluginSource {
@@ -434,6 +458,15 @@ impl JsonPluginSource {
                 ref_name,
                 sha,
             } => Self::Git { url, ref_name, sha },
+            MarketplacePluginSource::Npm {
+                package,
+                version,
+                registry,
+            } => Self::Npm {
+                package,
+                version,
+                registry,
+            },
         }
     }
 }
@@ -566,11 +599,13 @@ pub(crate) async fn load_cli_auth_mode(config: &Config) -> Option<AuthMode> {
         return Some(CodexAuth::from_api_key(&api_key).api_auth_mode());
     }
 
+    let auth_route_config = config.auth_route_config();
     CodexAuth::from_auth_storage(
         &config.codex_home,
         config.cli_auth_credentials_store_mode,
         Some(&config.chatgpt_base_url),
         config.auth_keyring_backend_kind(),
+        auth_route_config.as_ref(),
     )
     .await
     .ok()

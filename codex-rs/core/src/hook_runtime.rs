@@ -69,13 +69,14 @@ struct ContextInjectingHookOutcome {
 }
 
 fn hook_cwd(turn_context: &TurnContext) -> AbsolutePathBuf {
-    if let Some(turn_environment) = turn_context.environments.primary() {
-        turn_environment.cwd().clone()
-    } else {
-        #[allow(deprecated)]
-        {
-            turn_context.cwd.clone()
-        }
+    if let Some(turn_environment) = turn_context.environments.primary()
+        && let Ok(cwd) = turn_environment.cwd().to_abs_path()
+    {
+        return cwd;
+    }
+    #[allow(deprecated)]
+    {
+        turn_context.cwd.clone()
     }
 }
 
@@ -748,6 +749,7 @@ fn hook_run_analytics_payload(
                 .turn_id
                 .clone()
                 .unwrap_or_else(|| turn_context.sub_id.clone()),
+            turn_context.originator.clone(),
         ),
         HookRunFact {
             event_name: completed.run.event_name,
@@ -802,10 +804,9 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str); 
 fn hook_permission_mode(turn_context: &TurnContext) -> String {
     match turn_context.approval_policy.value() {
         AskForApproval::Never => "bypassPermissions",
-        AskForApproval::UnlessTrusted
-        | AskForApproval::OnFailure
-        | AskForApproval::OnRequest
-        | AskForApproval::Granular(_) => "default",
+        AskForApproval::UnlessTrusted | AskForApproval::OnRequest | AskForApproval::Granular(_) => {
+            "default"
+        }
     }
     .to_string()
 }
@@ -865,6 +866,7 @@ mod tests {
     use codex_protocol::protocol::HookRunSummary;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
+    use codex_utils_path_uri::PathUri;
 
     #[test]
     fn additional_context_messages_stay_separate_and_ordered() {
@@ -904,12 +906,17 @@ mod tests {
     async fn hook_cwd_uses_primary_turn_environment() {
         let (_session, mut turn_context) = make_session_and_context().await;
         let turn_environment = &turn_context.environments.turn_environments[0];
-        let expected_cwd = turn_environment.cwd().join("selected-env");
+        let expected_cwd = turn_environment
+            .cwd()
+            .to_abs_path()
+            .expect("primary environment cwd should be local absolute path")
+            .join("selected-env");
+        let expected_cwd_uri = PathUri::from_abs_path(&expected_cwd);
         turn_context.environments.turn_environments[0] =
             crate::session::turn_context::TurnEnvironment::new(
                 turn_environment.environment_id.clone(),
                 turn_environment.environment.clone(),
-                expected_cwd.clone(),
+                expected_cwd_uri,
                 turn_environment.shell.clone(),
             );
 

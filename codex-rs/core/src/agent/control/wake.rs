@@ -765,7 +765,7 @@ impl AgentControl {
             role: "user".to_string(),
             content: vec![ContentItem::InputText { text: message }],
             phase: None,
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         };
         if parent_thread
             .inject_if_running(vec![pending_item.clone()])

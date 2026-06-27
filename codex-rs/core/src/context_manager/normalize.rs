@@ -48,9 +48,10 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
                 missing_outputs_to_insert.push((
                     idx,
                     ResponseItem::FunctionCallOutput {
+                        id: None,
                         call_id: call_id.clone(),
                         output: FunctionCallOutputPayload::from_text("aborted".to_string()),
-                        metadata: None,
+                        internal_chat_message_metadata_passthrough: None,
                     },
                 ));
             }
@@ -62,11 +63,12 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
                 missing_outputs_to_insert.push((
                     idx,
                     ResponseItem::ToolSearchOutput {
+                        id: None,
                         call_id: Some(call_id.clone()),
                         status: "completed".to_string(),
                         execution: "client".to_string(),
                         tools: Vec::new(),
-                        metadata: None,
+                        internal_chat_message_metadata_passthrough: None,
                     },
                 ));
             }
@@ -79,10 +81,11 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
                 missing_outputs_to_insert.push((
                     idx,
                     ResponseItem::CustomToolCallOutput {
+                        id: None,
                         call_id: call_id.clone(),
                         name: None,
                         output: FunctionCallOutputPayload::from_text("aborted".to_string()),
-                        metadata: None,
+                        internal_chat_message_metadata_passthrough: None,
                     },
                 ));
             }
@@ -97,9 +100,10 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
                 missing_outputs_to_insert.push((
                     idx,
                     ResponseItem::FunctionCallOutput {
+                        id: None,
                         call_id: call_id.clone(),
                         output: FunctionCallOutputPayload::from_text("aborted".to_string()),
-                        metadata: None,
+                        internal_chat_message_metadata_passthrough: None,
                     },
                 ));
             }
@@ -368,9 +372,10 @@ mod tests {
                     text: "seed".to_string(),
                 }],
                 phase: None,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCallOutput {
+                id: None,
                 call_id: "spawn-call-1".to_string(),
                 output: FunctionCallOutputPayload {
                     body: FunctionCallOutputBody::Text(
@@ -378,7 +383,7 @@ mod tests {
                     ),
                     success: Some(true),
                 },
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ];
 
@@ -393,7 +398,7 @@ mod tests {
                     text: "seed".to_string(),
                 }],
                 phase: None,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }]
         );
     }

@@ -18,3 +18,26 @@ migration; if compliance is difficult, ask the user how to proceed.
   cases.
 - Tool call arguments that the model is expected to generate should be deserialized as regular
   `String`s with feature-specific path handling code.
+
+## Migration requirements
+
+Keep these requirements in mind while migrating code to conform with the above guidelines:
+
+* existing app-server clients keep sending and receiving legacy native-path strings
+* app-server can retain and manipulate foreign-platform path URIs
+* exec-server APIs use file:// URIs
+* local-only operation must not change model-visible text
+* model tool arguments may contain raw relative or absolute paths for any OS
+* path reasoning must work before the related environment has come online
+* URIs cannot explicitly encode the executor’s path convention or operating system
+* users must not configure the environment’s OS/path convention explicitly
+* URIs should not yet be stored in rollouts, databases, or other persistent storage
+* path conversion errors: fail-closed for security-relevant paths, fail-open for UI/diagnostics
+* prefer small focused methods on `PathUri` or `LegacyAppPathString` over local helpers
+* represent `PathUri` values as URIs in diagnostics
+
+It is OK if the conversion between paths and URIs is somewhat lossy as long as it will do the right
+thing for real users.
+
+Migrating to URIs should not add significant new failure modes. We will need to surface errors in
+some places that were previously infallible but it should be kept to a minimum.

@@ -477,7 +477,7 @@ mod tests {
                             text: "non-mail pending input is discarded".to_string(),
                         }],
                         phase: None,
-                        metadata: None,
+                        internal_chat_message_metadata_passthrough: None,
                     }),
                     TurnInput::InterAgentCommunication(second.clone()),
                 ],

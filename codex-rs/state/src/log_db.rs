@@ -32,11 +32,13 @@ use tracing::Level;
 use tracing::Metadata;
 use tracing::field::Field;
 use tracing::field::Visit;
+use tracing::level_filters::LevelFilter;
 use tracing::span::Attributes;
 use tracing::span::Id;
 use tracing::span::Record;
 use tracing_subscriber::Layer;
 use tracing_subscriber::field::RecordFields;
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::FormattedFields;
 use tracing_subscriber::fmt::format::DefaultFields;
@@ -60,6 +62,14 @@ const LOW_LEVEL_TARGETS_OMITTED_FROM_PERSISTENT_LOGS: &[&str] = &[
     "tokio_tungstenite",
     "tungstenite",
 ];
+
+pub fn default_filter() -> Targets {
+    Targets::new()
+        .with_default(LevelFilter::TRACE)
+        .with_target("log", LevelFilter::OFF)
+        .with_target("codex_otel.log_only", LevelFilter::OFF)
+        .with_target("codex_otel.trace_safe", LevelFilter::OFF)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LogSinkQueueConfig {
@@ -236,11 +246,18 @@ where
 }
 
 fn should_persist_event(metadata: &Metadata<'_>) -> bool {
+    let target = metadata.target();
+    // `tracing-log` checks filters with the original log target before
+    // dispatching an event whose tracing target is `log`, so the outer target
+    // filter cannot reliably reject these bridged events.
+    if target == "log" {
+        return false;
+    }
+
     if !matches!(*metadata.level(), Level::TRACE | Level::DEBUG) {
         return true;
     }
 
-    let target = metadata.target();
     !LOW_LEVEL_TARGETS_OMITTED_FROM_PERSISTENT_LOGS
         .iter()
         .any(|prefix| matches_target_or_child(target, prefix))

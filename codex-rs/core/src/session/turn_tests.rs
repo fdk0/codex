@@ -35,7 +35,7 @@ fn assistant_output_text(text: &str) -> ResponseItem {
             text: text.to_string(),
         }],
         phase: None,
-        metadata: None,
+        internal_chat_message_metadata_passthrough: None,
     }
 }
 
@@ -77,7 +77,7 @@ fn split_leading_non_user_input_preserves_user_input_boundary() {
             text: "synthetic wake".to_string(),
         }],
         phase: None,
-        metadata: None,
+        internal_chat_message_metadata_passthrough: None,
     };
     let first_mail = InterAgentCommunication::new(
         AgentPath::root().join("worker").expect("worker path"),
