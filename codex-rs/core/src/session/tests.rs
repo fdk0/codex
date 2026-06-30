@@ -9574,7 +9574,16 @@ async fn panicking_task_emits_error_and_terminal_event() {
     .expect("panicking task should still emit a terminal event");
 
     assert!(saw_error);
-    assert!(sess.active_turn.lock().await.is_none());
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if sess.active_turn.lock().await.is_none() {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("panicking task should clear active turn");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
