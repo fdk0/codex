@@ -9223,6 +9223,29 @@ impl SessionTask for CompletingTask {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PanickingTask;
+
+impl SessionTask for PanickingTask {
+    fn kind(&self) -> TaskKind {
+        TaskKind::Regular
+    }
+
+    fn span_name(&self) -> &'static str {
+        "session_task.panicking"
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        _session: Arc<SessionTaskContext>,
+        _ctx: Arc<TurnContext>,
+        _input: Vec<TurnInput>,
+        _cancellation_token: CancellationToken,
+    ) -> SessionTaskResult {
+        panic!("test task panic");
+    }
+}
+
 #[derive(Clone)]
 struct NotifyCompletingTask {
     notify: Arc<Notify>,
@@ -9518,6 +9541,40 @@ async fn turn_complete_flushes_terminal_event_after_delivery() {
     // 2. Terminal-event flush after TurnComplete is appended.
     let calls = wait_for_flush_count(&store, /*expected_flushes*/ 2).await;
     assert_eq!(2, calls.flush_thread);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn panicking_task_emits_error_and_terminal_event() {
+    let (sess, tc, rx) = make_session_and_context_with_rx().await;
+
+    sess.spawn_task(Arc::clone(&tc), Vec::new(), PanickingTask)
+        .await;
+
+    let mut saw_error = false;
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let event = rx.recv().await.expect("event");
+            match event.msg {
+                EventMsg::Error(error) => {
+                    saw_error = true;
+                    assert!(matches!(
+                        error.codex_error_info,
+                        Some(CodexErrorInfo::InternalServerError)
+                    ));
+                }
+                EventMsg::TurnComplete(_) => break,
+                EventMsg::TurnAborted(event) => {
+                    panic!("unexpected turn aborted event: {event:?}");
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("panicking task should still emit a terminal event");
+
+    assert!(saw_error);
+    assert!(sess.active_turn.lock().await.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

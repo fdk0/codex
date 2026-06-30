@@ -4,14 +4,17 @@ mod regular;
 mod review;
 mod user_shell;
 
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
 use codex_extension_api::ExtensionData;
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use tokio::select;
 use tokio::sync::Notify;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
@@ -381,6 +384,7 @@ impl Session {
         let task_for_run = Arc::clone(&task);
         let task_input = input;
         let task_cancellation_token = cancellation_token.child_token();
+        let (task_registered_tx, task_registered_rx) = oneshot::channel();
         // Task-owned turn spans keep a core-owned span open for the
         // full task lifecycle after the submission dispatch span ends.
         let reasoning_effort = turn_context.effective_reasoning_effort_for_tracing();
@@ -400,16 +404,32 @@ impl Session {
         );
         let handle = tokio::spawn(
             async move {
+                if task_registered_rx.await.is_err() {
+                    done_clone.notify_waiters();
+                    return;
+                }
                 let ctx_for_finish = Arc::clone(&ctx);
-                let task_result = task_for_run
-                    .run(
-                        Arc::clone(&session_ctx),
-                        ctx,
-                        task_input,
-                        task_cancellation_token.child_token(),
-                    )
-                    .instrument(trace_span!("session_task.run"))
-                    .await;
+                let task_result = AssertUnwindSafe(
+                    task_for_run
+                        .run(
+                            Arc::clone(&session_ctx),
+                            ctx,
+                            task_input,
+                            task_cancellation_token.child_token(),
+                        )
+                        .instrument(trace_span!("session_task.run")),
+                )
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|panic_payload| {
+                    let panic_message = panic_payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("unknown panic payload");
+                    warn!(panic_message, "session task panicked");
+                    Err(CodexErr::InternalAgentDied)
+                });
                 let sess = session_ctx.clone_session();
                 if let Err(err) = sess.flush_rollout().await {
                     warn!("failed to flush rollout before completing turn: {err}");
@@ -448,6 +468,7 @@ impl Session {
             _timer: timer,
         };
         turn.task = Some(running_task);
+        let _ = task_registered_tx.send(());
     }
 
     /// Starts a regular turn when the session is idle and pending work is waiting.
@@ -574,6 +595,15 @@ impl Session {
             Err(CodexErr::TurnAborted) => (None, Some(TurnAbortReason::Interrupted)),
             Err(err) => {
                 warn!(%err, "session task returned an unexpected error");
+                let error = err.to_codex_protocol_error();
+                self.emit_turn_error_lifecycle(turn_context.as_ref(), error)
+                    .await;
+                self.track_turn_codex_error(turn_context.as_ref(), &err);
+                self.send_event(
+                    turn_context.as_ref(),
+                    EventMsg::Error(err.to_error_event(/*message_prefix*/ None)),
+                )
+                .await;
                 (None, None)
             }
         };
