@@ -413,7 +413,6 @@ mod tests {
             session_id: read_thread_id.to_string(),
             parent_thread_id: None,
             forked_from_id: None,
-            parent_thread_id: None,
             preview: "read thread".to_string(),
             ephemeral: false,
             history_mode: Default::default(),

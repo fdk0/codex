@@ -387,9 +387,17 @@ impl AgentControl {
                         message,
                         wake_parent_on_completion,
                     );
-                    self.send_inter_agent_communication_boxed(parent_thread_id, communication)
-                        .await
-                        .is_ok()
+                    let context = AgentCommunicationContext::new(
+                        AgentCommunicationKind::Result,
+                        child_thread_id,
+                    );
+                    self.send_inter_agent_communication_boxed(
+                        parent_thread_id,
+                        communication,
+                        context,
+                    )
+                    .await
+                    .is_ok()
                 } else {
                     true
                 }
@@ -701,8 +709,9 @@ impl AgentControl {
         &self,
         agent_id: ThreadId,
         communication: InterAgentCommunication,
+        context: AgentCommunicationContext,
     ) -> futures::future::BoxFuture<'_, CodexResult<String>> {
-        Box::pin(self.send_inter_agent_communication(agent_id, communication))
+        Box::pin(self.send_inter_agent_communication(agent_id, communication, context))
     }
 
     pub(crate) async fn wake_enabled_children_for_parent(

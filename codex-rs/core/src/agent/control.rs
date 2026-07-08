@@ -4,6 +4,8 @@ use crate::agent::registry::AgentRegistry;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::resolve_role_config;
 use crate::agent::status::is_final;
+use crate::agent_communication::AgentCommunicationContext;
+use crate::agent_communication::AgentCommunicationKind;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::Config;
 use crate::config::RolloutBudgetConfig;
@@ -158,12 +160,12 @@ impl AgentControl {
     pub(crate) async fn send_input(
         &self,
         agent_id: ThreadId,
-        initial_operation: Op,
+        input: Vec<UserInput>,
     ) -> CodexResult<String> {
         let state = self.upgrade()?;
-        self.ensure_execution_capacity_for_op(agent_id, &initial_operation)
+        self.ensure_execution_capacity_for_turn_start(agent_id, /*starts_turn*/ true)
             .await?;
-        self.send_input_after_capacity_check(agent_id, &state, initial_operation)
+        self.send_input_after_capacity_check(agent_id, &state, input)
             .await
     }
 
@@ -171,18 +173,12 @@ impl AgentControl {
         &self,
         agent_id: ThreadId,
         state: &Arc<ThreadManagerState>,
-        initial_operation: Op,
+        input: Vec<UserInput>,
     ) -> CodexResult<String> {
-        let last_task_message = match &initial_operation {
-            Op::InterAgentCommunication { communication } => {
-                last_task_message_from_communication(communication)
-            }
-            _ => non_empty_task_message(render_input_preview(&initial_operation)),
-        };
+        let last_task_message = non_empty_task_message(render_input_preview(&input));
         let completion_watcher = self
             .maybe_prepare_completion_watcher_rearm(
-                agent_id,
-                initial_operation_triggers_turn(&initial_operation),
+                agent_id, /*trigger_turn*/ true,
                 /*suppress_immediate_parent_notification*/ false,
             )
             .await;
@@ -190,7 +186,7 @@ impl AgentControl {
             .handle_thread_request_result(
                 agent_id,
                 state,
-                state.send_op(agent_id, initial_operation).await,
+                state.send_op(agent_id, input.into()).await,
             )
             .await;
         if result.is_ok() {
@@ -219,15 +215,43 @@ impl AgentControl {
         &self,
         agent_id: ThreadId,
         communication: InterAgentCommunication,
+        agent_communication_context: AgentCommunicationContext,
+    ) -> CodexResult<String> {
+        let state = self.upgrade()?;
+        self.ensure_execution_capacity_for_turn_start(agent_id, communication.trigger_turn)
+            .await?;
+        self.send_inter_agent_communication_after_capacity_check(
+            agent_id,
+            &state,
+            communication,
+            agent_communication_context,
+        )
+        .await
+    }
+
+    async fn send_inter_agent_communication_after_capacity_check(
+        &self,
+        agent_id: ThreadId,
+        state: &Arc<ThreadManagerState>,
+        communication: InterAgentCommunication,
+        context: AgentCommunicationContext,
+    ) -> CodexResult<String> {
+        self.submit_inter_agent_communication(agent_id, state, communication, context)
+            .await
+    }
+
+    async fn submit_inter_agent_communication(
+        &self,
+        agent_id: ThreadId,
+        state: &Arc<ThreadManagerState>,
+        communication: InterAgentCommunication,
+        context: AgentCommunicationContext,
     ) -> CodexResult<String> {
         let last_task_message = last_task_message_from_communication(&communication);
         let trigger_turn = communication.trigger_turn;
         let suppress_immediate_parent_notification = self
             .communication_reuses_child_from_descendant(agent_id, &communication)
             .await;
-        let state = self.upgrade()?;
-        let op = Op::InterAgentCommunication { communication };
-        self.ensure_execution_capacity_for_op(agent_id, &op).await?;
         let completion_watcher = self
             .maybe_prepare_completion_watcher_rearm(
                 agent_id,
@@ -235,9 +259,27 @@ impl AgentControl {
                 suppress_immediate_parent_notification,
             )
             .await;
+        let communication_for_log =
+            crate::agent_communication::logging_enabled().then(|| communication.clone());
         let result = self
-            .handle_thread_request_result(agent_id, &state, state.send_op(agent_id, op).await)
+            .handle_thread_request_result(
+                agent_id,
+                state,
+                state
+                    .send_op(agent_id, Op::InterAgentCommunication { communication })
+                    .await,
+            )
             .await;
+        if let (Some(communication), Ok(communication_id)) =
+            (communication_for_log, result.as_ref())
+        {
+            crate::agent_communication::emit_agent_communication_send(
+                communication_id,
+                &context,
+                &communication,
+                agent_id,
+            );
+        }
         if result.is_ok() {
             match last_task_message {
                 Some(last_task_message) => self
@@ -931,12 +973,8 @@ fn render_user_inputs(items: &[UserInput]) -> String {
         .join("\n")
 }
 
-pub(crate) fn render_input_preview(initial_operation: &Op) -> String {
-    match initial_operation {
-        Op::UserInput { items, .. } => render_user_inputs(items),
-        Op::InterAgentCommunication { communication } => communication.content.clone(),
-        _ => String::new(),
-    }
+pub(crate) fn render_input_preview(input: &[UserInput]) -> String {
+    render_user_inputs(input)
 }
 
 fn last_task_message_from_communication(communication: &InterAgentCommunication) -> Option<String> {
@@ -948,14 +986,6 @@ fn last_task_message_from_communication(communication: &InterAgentCommunication)
 
 fn non_empty_task_message(message: String) -> Option<String> {
     (!message.is_empty()).then_some(message)
-}
-
-fn initial_operation_triggers_turn(initial_operation: &Op) -> bool {
-    match initial_operation {
-        Op::InterAgentCommunication { communication } => communication.trigger_turn,
-        Op::UserInput { .. } => true,
-        _ => false,
-    }
 }
 
 fn thread_spawn_depth(session_source: &SessionSource) -> Option<i32> {

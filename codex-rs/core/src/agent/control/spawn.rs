@@ -9,6 +9,17 @@ struct SpawnAgentThreadInheritance {
     exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
 }
 
+/// Initial input delivered after a spawned agent acquires execution capacity.
+///
+/// V2 communication spawns keep the communication and its context paired so centralized
+/// submission and lifecycle logging cannot receive one without the other. Other spawn sources
+/// provide user input directly, making an uncontextualized inter-agent communication
+/// unrepresentable.
+enum SpawnInitialInput {
+    UserInput(Vec<UserInput>),
+    InterAgentCommunication(InterAgentCommunication, AgentCommunicationContext),
+}
+
 fn default_agent_nickname_list() -> Vec<&'static str> {
     AGENT_NAMES
         .lines()
@@ -136,12 +147,12 @@ impl AgentControl {
     pub(crate) async fn spawn_agent(
         &self,
         config: Config,
-        initial_operation: Op,
+        initial_input: Vec<UserInput>,
         session_source: Option<SessionSource>,
     ) -> CodexResult<ThreadId> {
         let spawned_agent = Box::pin(self.spawn_agent_internal(
             config,
-            initial_operation,
+            SpawnInitialInput::UserInput(initial_input),
             session_source,
             SpawnAgentOptions::default(),
         ))
@@ -153,12 +164,34 @@ impl AgentControl {
     pub(crate) async fn spawn_agent_with_metadata(
         &self,
         config: Config,
-        initial_operation: Op,
+        initial_input: Vec<UserInput>,
         session_source: Option<SessionSource>,
         options: SpawnAgentOptions, // TODO(jif) drop with new fork.
     ) -> CodexResult<LiveAgent> {
-        Box::pin(self.spawn_agent_internal(config, initial_operation, session_source, options))
-            .await
+        Box::pin(self.spawn_agent_internal(
+            config,
+            SpawnInitialInput::UserInput(initial_input),
+            session_source,
+            options,
+        ))
+        .await
+    }
+
+    pub(crate) async fn spawn_agent_with_communication(
+        &self,
+        config: Config,
+        communication: InterAgentCommunication,
+        context: AgentCommunicationContext,
+        session_source: Option<SessionSource>,
+        options: SpawnAgentOptions,
+    ) -> CodexResult<LiveAgent> {
+        Box::pin(self.spawn_agent_internal(
+            config,
+            SpawnInitialInput::InterAgentCommunication(communication, context),
+            session_source,
+            options,
+        ))
+        .await
     }
 
     pub(crate) async fn ensure_v2_agent_loaded(
@@ -204,16 +237,21 @@ impl AgentControl {
         if multi_agent_version != MultiAgentVersion::V2 {
             return Err(CodexErr::ThreadNotFound(thread_id));
         }
-        let residency_slot = self
-            .reserve_v2_residency_slot(&state, &config, Some(thread_id))
-            .await?;
-
         let parent_thread_id = initial_history
             .get_resumed_parent_thread_id()
             .or(stored_parent_thread_id);
         let notification_source = session_source.clone();
-        let wake_parent_on_completion_default = config.agent_wake_parent_on_completion_default;
+        let wake_parent_on_completion = self
+            .wake_parent_on_completion_for_thread(
+                thread_id,
+                Some(&notification_source),
+                config.agent_wake_parent_on_completion_default,
+            )
+            .await;
         let wake_descendant_policy = config.agent_wake_descendant_policy;
+        let residency_slot = self
+            .reserve_v2_residency_slot(&state, &config, Some(thread_id))
+            .await?;
         let inherited_environments = self
             .inherited_environments_for_source(&state, Some(&session_source))
             .await;
@@ -242,13 +280,6 @@ impl AgentControl {
                     Some(&notification_source),
                 )
                 .await;
-                let wake_parent_on_completion = self
-                    .wake_parent_on_completion_for_thread(
-                        reloaded_thread.thread_id,
-                        Some(&notification_source),
-                        wake_parent_on_completion_default,
-                    )
-                    .await;
                 self.register_parent_wake_subscription(
                     reloaded_thread.thread_id,
                     Some(&notification_source),
@@ -272,7 +303,7 @@ impl AgentControl {
     async fn spawn_agent_internal(
         &self,
         config: Config,
-        initial_operation: Op,
+        initial_input: SpawnInitialInput,
         session_source: Option<SessionSource>,
         options: SpawnAgentOptions,
     ) -> CodexResult<LiveAgent> {
@@ -442,10 +473,22 @@ impl AgentControl {
         )
         .await;
 
-        if let Err(err) = self
-            .send_input_after_capacity_check(new_thread.thread_id, &state, initial_operation)
-            .await
-        {
+        let input_result = match initial_input {
+            SpawnInitialInput::UserInput(input) => {
+                self.send_input_after_capacity_check(new_thread.thread_id, &state, input)
+                    .await
+            }
+            SpawnInitialInput::InterAgentCommunication(communication, context) => {
+                self.send_inter_agent_communication_after_capacity_check(
+                    new_thread.thread_id,
+                    &state,
+                    communication,
+                    context,
+                )
+                .await
+            }
+        };
+        if let Err(err) = input_result {
             self.clear_parent_wake_state(new_thread.thread_id).await;
             return Err(err);
         }

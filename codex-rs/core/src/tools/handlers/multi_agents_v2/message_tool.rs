@@ -4,6 +4,8 @@
 //! resulting `InterAgentCommunication` should wake the target immediately.
 
 use super::*;
+use crate::agent_communication::AgentCommunicationContext;
+use crate::agent_communication::AgentCommunicationKind;
 use crate::tools::context::FunctionToolOutput;
 use crate::turn_timing::now_unix_timestamp_ms;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -48,7 +50,7 @@ pub(crate) struct FollowupTaskArgs {
     pub(crate) interrupt: bool,
 }
 
-fn message_content(message: String) -> Result<String, FunctionCallError> {
+pub(super) fn message_content(message: String) -> Result<String, FunctionCallError> {
     if message.trim().is_empty() {
         return Err(FunctionCallError::RespondToModel(
             "Empty message can't be sent to an agent".to_string(),
@@ -118,10 +120,15 @@ pub(crate) async fn handle_message_string_tool(
         message,
         turn.config.multi_agent_v2.encrypted_messages,
     );
+    let kind = match mode {
+        MessageDeliveryMode::QueueOnly => AgentCommunicationKind::Message,
+        MessageDeliveryMode::TriggerTurn => AgentCommunicationKind::Followup,
+    };
+    let context = AgentCommunicationContext::new(kind, session.thread_id);
     let result = session
         .services
         .agent_control
-        .send_inter_agent_communication(receiver_thread_id, mode.apply(communication))
+        .send_inter_agent_communication(receiver_thread_id, mode.apply(communication), context)
         .await
         .map_err(|err| collab_agent_error(receiver_thread_id, err));
     result?;

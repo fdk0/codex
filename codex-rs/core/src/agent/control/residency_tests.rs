@@ -10,7 +10,6 @@ use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSource;
@@ -250,12 +249,11 @@ async fn spawn_v2_subagent(
         .expect("spawn v2 subagent")
 }
 
-fn text_input(text: &str) -> Op {
+fn text_input(text: &str) -> Vec<UserInput> {
     vec![UserInput::Text {
         text: text.to_string(),
         text_elements: Vec::new(),
     }]
-    .into()
 }
 
 async fn mark_thread_completed(thread: &CodexThread) {

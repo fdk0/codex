@@ -285,6 +285,7 @@ async fn conversation_start_audio_text_close_round_trip() -> Result<()> {
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -431,6 +432,7 @@ async fn conversation_start_defaults_to_v2_and_gpt_realtime_1_5() -> Result<()> 
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -526,6 +528,7 @@ async fn conversation_webrtc_start_posts_generated_session() -> Result<()> {
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -718,6 +721,7 @@ async fn conversation_webrtc_start_uses_avas_query() -> Result<()> {
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -816,6 +820,7 @@ async fn conversation_webrtc_default_v1_ignores_configured_v2_voice() -> Result<
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -876,6 +881,7 @@ async fn conversation_webrtc_default_v1_rejects_explicit_v2_voice() -> Result<()
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -946,6 +952,7 @@ async fn conversation_webrtc_start_uses_configured_call_base_url_for_avas() -> R
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -1040,6 +1047,7 @@ async fn conversation_webrtc_close_while_sideband_connecting_drops_pending_join(
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -1131,6 +1139,7 @@ async fn conversation_webrtc_sideband_connect_failure_closes_with_error() -> Res
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -1224,6 +1233,7 @@ async fn conversation_start_uses_openai_env_key_fallback_with_chatgpt_auth() -> 
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -1276,27 +1286,46 @@ async fn conversation_start_uses_openai_env_key_fallback_with_chatgpt_auth() -> 
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn conversation_transport_close_emits_closed_event() -> Result<()> {
+async fn assert_transport_close_tail_flush(
+    flush_transcript_tail_on_session_end: bool,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let session_updated = vec![json!({
-        "type": "session.updated",
-        "session": { "id": "sess_1", "instructions": "backend prompt" }
-    })];
-    let server = start_websocket_server(vec![vec![], vec![session_updated]]).await;
+    let api_server = start_mock_server().await;
+    let response_mock = responses::mount_sse_once(
+        &api_server,
+        responses::sse(vec![
+            responses::ev_response_created("resp-1"),
+            responses::ev_assistant_message("msg-1", "ok"),
+            responses::ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let realtime_server = start_websocket_server(vec![vec![vec![
+        json!({
+            "type": "session.updated",
+            "session": { "id": "sess_1", "instructions": "backend prompt" }
+        }),
+        json!({
+            "type": "conversation.input_transcript.delta",
+            "delta": "transport tail"
+        }),
+    ]]])
+    .await;
 
-    let mut builder = test_codex();
-    let test = builder.build_with_websocket_server(&server).await?;
-    assert!(
-        server
-            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
-            .await
-    );
+    let mut builder = test_codex().with_config({
+        let realtime_base_url = realtime_server.uri().to_string();
+        move |config| {
+            config.experimental_realtime_ws_base_url = Some(realtime_base_url);
+            config.realtime.version = RealtimeWsVersion::V1;
+        }
+    });
+    let test = builder.build(&api_server).await?;
 
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -1339,8 +1368,27 @@ async fn conversation_transport_close_emits_closed_event() -> Result<()> {
     })
     .await;
     assert_eq!(closed.reason.as_deref(), Some("transport_closed"));
+    if flush_transcript_tail_on_session_end {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while response_mock.requests().is_empty() {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(response_mock.single_request().message_input_texts("user").iter().any(|text| text
+            == "<realtime_delegation>\n  <input>The user just ended their realtime session. Here is the remaining handoff/transcript tail. You probably do not have to do anything; acknowledge the handoff unless the transcript itself asks for something.</input>\n  <transcript_delta>user: transport tail</transcript_delta>\n</realtime_delegation>"));
+    } else {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(response_mock.requests().is_empty());
+    }
 
-    server.shutdown().await;
+    realtime_server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_transport_close_tail_flush_is_opt_in() -> Result<()> {
+    assert_transport_close_tail_flush(/*flush_transcript_tail_on_session_end*/ false).await?;
+    assert_transport_close_tail_flush(/*flush_transcript_tail_on_session_end*/ true).await?;
     Ok(())
 }
 
@@ -1394,6 +1442,7 @@ async fn conversation_start_preflight_failure_emits_realtime_error_only() -> Res
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -1445,6 +1494,7 @@ async fn conversation_start_connect_failure_emits_realtime_error_only() -> Resul
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -1544,6 +1594,7 @@ async fn conversation_second_start_replaces_runtime() -> Result<()> {
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -1574,6 +1625,7 @@ async fn conversation_second_start_replaces_runtime() -> Result<()> {
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -1675,6 +1727,7 @@ async fn conversation_uses_experimental_realtime_ws_base_url_override() -> Resul
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -1744,6 +1797,7 @@ async fn conversation_uses_default_realtime_backend_prompt() -> Result<()> {
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -1821,6 +1875,7 @@ async fn conversation_uses_empty_instructions_for_null_or_empty_prompt() -> Resu
         test.codex
             .submit(Op::RealtimeConversationStart(ConversationStartParams {
                 client_managed_handoffs: false,
+                flush_transcript_tail_on_session_end: false,
                 codex_responses_as_items: false,
                 codex_response_item_prefix: None,
                 codex_response_handoff_prefix: None,
@@ -1891,6 +1946,7 @@ async fn conversation_uses_explicit_start_voice() -> Result<()> {
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -1953,6 +2009,7 @@ async fn conversation_uses_configured_realtime_voice() -> Result<()> {
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -2003,6 +2060,7 @@ async fn conversation_rejects_voice_for_wrong_realtime_version() -> Result<()> {
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -2054,6 +2112,7 @@ async fn conversation_uses_experimental_realtime_ws_backend_prompt_override() ->
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -2131,6 +2190,7 @@ async fn conversation_uses_experimental_realtime_ws_startup_context_override() -
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -2202,6 +2262,7 @@ async fn conversation_disables_realtime_startup_context_with_empty_override() ->
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -2266,6 +2327,7 @@ async fn conversation_start_injects_startup_context_from_thread_history() -> Res
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -2385,6 +2447,7 @@ async fn conversation_startup_context_current_thread_selects_many_turns_by_budge
     codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -2497,6 +2560,7 @@ async fn conversation_startup_context_falls_back_to_workspace_map() -> Result<()
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -2561,6 +2625,7 @@ async fn conversation_startup_context_is_truncated_and_sent_once_per_start() -> 
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -2646,6 +2711,7 @@ async fn conversation_user_text_turn_is_not_sent_to_realtime() -> Result<()> {
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -2747,6 +2813,7 @@ async fn realtime_v2_noop_tool_call_returns_empty_function_output_without_respon
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -2850,6 +2917,7 @@ async fn conversation_mirrors_assistant_message_text_to_realtime_handoff() -> Re
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -2989,6 +3057,7 @@ async fn conversation_handoff_persists_across_item_done_until_turn_complete() ->
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: Some(SILENT_CONTEXT_PREFIX.to_string()),
@@ -3145,6 +3214,7 @@ async fn inbound_handoff_request_starts_turn() -> Result<()> {
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -3259,6 +3329,7 @@ async fn inbound_handoff_request_uses_active_transcript() -> Result<()> {
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -3366,6 +3437,7 @@ async fn inbound_handoff_request_sends_transcript_delta_after_each_handoff() -> 
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -3432,6 +3504,115 @@ async fn inbound_handoff_request_sends_transcript_delta_after_each_handoff() -> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_close_routes_only_remaining_transcript_tail_once() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let api_server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &api_server,
+        vec![
+            responses::sse(vec![
+                responses::ev_response_created("resp-1"),
+                responses::ev_assistant_message("msg-1", "first ok"),
+                responses::ev_completed("resp-1"),
+            ]),
+            responses::sse(vec![
+                responses::ev_response_created("resp-2"),
+                responses::ev_assistant_message("msg-2", "tail ok"),
+                responses::ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+    let realtime_server = start_websocket_server(vec![vec![
+        vec![
+            json!({
+                "type": "session.updated",
+                "session": { "id": "sess_tail", "instructions": "backend prompt" }
+            }),
+            json!({
+                "type": "conversation.input_transcript.delta",
+                "delta": "already handed off"
+            }),
+            json!({
+                "type": "conversation.handoff.requested",
+                "handoff_id": "handoff_tail",
+                "item_id": "item_tail",
+                "input_transcript": "already handed off"
+            }),
+            json!({
+                "type": "conversation.output_transcript.delta",
+                "delta": "remaining answer"
+            }),
+            json!({
+                "type": "conversation.input_transcript.delta",
+                "delta": "remaining question"
+            }),
+        ],
+        vec![],
+    ]])
+    .await;
+    let mut builder = test_codex().with_config({
+        let realtime_base_url = realtime_server.uri().to_string();
+        move |config| {
+            config.experimental_realtime_ws_base_url = Some(realtime_base_url);
+            config.realtime.version = RealtimeWsVersion::V1;
+        }
+    });
+    let test = builder.build(&api_server).await?;
+
+    test.codex
+        .submit(Op::RealtimeConversationStart(ConversationStartParams {
+            client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: true,
+            codex_responses_as_items: false,
+            codex_response_item_prefix: None,
+            codex_response_handoff_prefix: None,
+            model: None,
+            output_modality: RealtimeOutputModality::Audio,
+            include_startup_context: true,
+            prompt: Some(Some("backend prompt".to_string())),
+            realtime_session_id: None,
+            transport: None,
+            version: None,
+            voice: None,
+        }))
+        .await?;
+
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    test.codex.submit(Op::RealtimeConversationClose).await?;
+
+    let closed = wait_for_event_match(&test.codex, |msg| match msg {
+        EventMsg::RealtimeConversationClosed(closed) => Some(closed.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(closed.reason.as_deref(), Some("requested"));
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while response_mock.requests().len() < 2 {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    test.codex.submit(Op::RealtimeConversationClose).await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].message_input_texts("user").iter().any(|text| text
+        == "<realtime_delegation>\n  <input>already handed off</input>\n  <transcript_delta>user: already handed off</transcript_delta>\n</realtime_delegation>"));
+    assert!(requests[1].message_input_texts("user").iter().any(|text| text
+        == "<realtime_delegation>\n  <input>The user just ended their realtime session. Here is the remaining handoff/transcript tail. You probably do not have to do anything; acknowledge the handoff unless the transcript itself asks for something.</input>\n  <transcript_delta>assistant: remaining answer\nuser: remaining question</transcript_delta>\n</realtime_delegation>"));
+
+    realtime_server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inbound_conversation_item_does_not_start_turn_and_still_forwards_audio() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -3471,6 +3652,7 @@ async fn inbound_conversation_item_does_not_start_turn_and_still_forwards_audio(
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -3598,6 +3780,7 @@ async fn delegated_turn_user_role_echo_does_not_redelegate_and_still_forwards_au
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -3755,6 +3938,7 @@ async fn inbound_handoff_request_does_not_block_realtime_event_forwarding() -> R
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -3901,6 +4085,7 @@ async fn inbound_handoff_request_steers_active_turn() -> Result<()> {
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,
@@ -4058,6 +4243,7 @@ async fn inbound_handoff_request_starts_turn_and_does_not_block_realtime_audio()
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
             client_managed_handoffs: false,
+            flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_prefix: None,

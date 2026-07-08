@@ -147,7 +147,6 @@ mod tests {
             thread_source: None,
             agent_nickname: None,
             agent_role: None,
-            parent_thread_id: None,
             git_info: None,
             name: None,
             turns: Vec::new(),

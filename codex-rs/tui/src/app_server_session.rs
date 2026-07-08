@@ -2357,7 +2357,6 @@ mod tests {
                 session_id: ThreadId::new().to_string(),
                 parent_thread_id: None,
                 forked_from_id: Some(forked_from_id.to_string()),
-                parent_thread_id: None,
                 preview: "hello".to_string(),
                 ephemeral: false,
                 history_mode: Default::default(),

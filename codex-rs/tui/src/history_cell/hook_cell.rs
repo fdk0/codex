@@ -12,12 +12,17 @@
 //! 4. Completed runs only persist when they have output or a non-success status.
 use super::HistoryCell;
 use super::plain_lines;
+use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
 use crate::motion::MotionMode;
 use crate::motion::ReducedMotionIndicator;
 use crate::motion::activity_indicator;
 use crate::motion::shimmer_text;
 use crate::render::line_utils::prefix_lines;
+use crate::render::line_utils::push_owned_lines;
 use crate::render::renderable::Renderable;
+use crate::ui_consts::TRANSCRIPT_HINT;
+use crate::wrapping::RtOptions;
+use crate::wrapping::word_wrap_line;
 use codex_app_server_protocol::HookEventName;
 use codex_app_server_protocol::HookOutputEntry;
 use codex_app_server_protocol::HookOutputEntryKind;
@@ -48,6 +53,9 @@ const HOOK_RUN_REVEAL_DELAY: Duration = Duration::from_millis(300);
 /// This pairs with `HOOK_RUN_REVEAL_DELAY`: once the user has seen a hook row, keep it stable long
 /// enough to read instead of removing it immediately when the success event arrives.
 const QUIET_HOOK_MIN_VISIBLE: Duration = Duration::from_millis(600);
+
+const HOOK_OUTPUT_INDENT: &str = "  ";
+const HOOK_CONTEXT_MAX_DISPLAY_ROWS: usize = 5;
 
 #[derive(Debug)]
 struct HookRunCell {
@@ -292,11 +300,9 @@ impl HookCell {
             run.reveal_running_after_delayed_redraw_for_test(now);
         }
     }
-}
 
-impl HistoryCell for HookCell {
-    /// Builds viewport lines while coalescing adjacent visible-running hooks.
-    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+    /// Builds hook lines for either the bounded main viewport or the full transcript overlay.
+    fn output_lines(&self, width: u16, render_full_context: bool) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         let mut running_group: Option<RunningHookGroup> = None;
         for run in &self.runs {
@@ -311,7 +317,12 @@ impl HistoryCell for HookCell {
                     push_running_hook_group(&mut lines, &group, self.animations_enabled);
                 }
                 push_hook_line_separator(&mut lines);
-                run.push_display_lines(&mut lines, self.animations_enabled);
+                run.push_display_lines(
+                    &mut lines,
+                    self.animations_enabled,
+                    width,
+                    render_full_context,
+                );
                 continue;
             };
 
@@ -336,14 +347,21 @@ impl HistoryCell for HookCell {
         }
         lines
     }
+}
 
-    /// Hook transcript output matches viewport output.
+impl HistoryCell for HookCell {
+    /// Builds viewport lines while coalescing adjacent visible-running hooks.
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.output_lines(width, /*render_full_context*/ false)
+    }
+
+    /// The transcript overlay preserves complete hook context hidden by the viewport preview.
     fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.display_lines(width)
+        self.output_lines(width, /*render_full_context*/ true)
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
-        plain_lines(self.display_lines(u16::MAX))
+        plain_lines(self.output_lines(u16::MAX, /*render_full_context*/ true))
     }
 
     /// Produces a coarse cache key for transcript overlays while hook animations are active.
@@ -418,7 +436,13 @@ impl HookRunCell {
     }
 
     /// Appends the lines for a single, ungrouped hook run.
-    fn push_display_lines(&self, lines: &mut Vec<Line<'static>>, animations_enabled: bool) {
+    fn push_display_lines(
+        &self,
+        lines: &mut Vec<Line<'static>>,
+        animations_enabled: bool,
+        width: u16,
+        render_full_context: bool,
+    ) {
         let label = hook_event_label(self.event_name);
         match &self.state {
             HookRunState::VisibleRunning { start_time, .. }
@@ -444,12 +468,80 @@ impl HookRunCell {
                     .into(),
                 );
                 for entry in entries {
-                    push_hook_output_entry(lines, entry);
+                    if !render_full_context && entry.kind == HookOutputEntryKind::Context {
+                        lines.extend(hook_context_preview_lines(&entry.text, width));
+                    } else {
+                        push_hook_output_entry(lines, entry);
+                    }
                 }
             }
             HookRunState::PendingReveal { .. } => {}
         }
     }
+}
+
+fn hook_context_preview_lines(text: &str, width: u16) -> Vec<Line<'static>> {
+    let width = usize::from(width.max(1));
+    let mut wrapped = Vec::new();
+    let prefix = format!(
+        "{HOOK_OUTPUT_INDENT}{}",
+        hook_output_prefix(HookOutputEntryKind::Context)
+    );
+    let continuation_prefix = " ".repeat(prefix.len());
+    let mut source_lines = text.split('\n');
+    let first_line = source_lines.next().unwrap_or_default();
+    push_wrapped_hook_context_line(
+        &mut wrapped,
+        first_line,
+        width,
+        Line::from(prefix),
+        Line::from(continuation_prefix.clone()),
+    );
+    for line in source_lines {
+        if line.is_empty() {
+            wrapped.push(continuation_prefix.clone().into());
+        } else {
+            push_wrapped_hook_context_line(
+                &mut wrapped,
+                line,
+                width,
+                Line::from(continuation_prefix.clone()),
+                Line::from(continuation_prefix.clone()),
+            );
+        }
+    }
+
+    if wrapped.len() <= HOOK_CONTEXT_MAX_DISPLAY_ROWS {
+        return wrapped;
+    }
+
+    let retained_rows = HOOK_CONTEXT_MAX_DISPLAY_ROWS - 1;
+    let omitted_rows = wrapped.len() - retained_rows;
+    wrapped.truncate(retained_rows);
+    let hint = vec![
+        continuation_prefix.into(),
+        format!("… +{omitted_rows} lines ({TRANSCRIPT_HINT})").dim(),
+    ]
+    .into();
+    wrapped.push(truncate_line_with_ellipsis_if_overflow(hint, width));
+    wrapped
+}
+
+fn push_wrapped_hook_context_line(
+    output: &mut Vec<Line<'static>>,
+    text: &str,
+    width: usize,
+    initial_indent: Line<'static>,
+    subsequent_indent: Line<'static>,
+) {
+    let line = Line::from(text.to_string());
+    let wrapped = word_wrap_line(
+        &line,
+        RtOptions::new(width)
+            .initial_indent(initial_indent)
+            .subsequent_indent(subsequent_indent),
+    );
+    push_owned_lines(&wrapped, output);
 }
 
 impl HookRunState {
@@ -766,14 +858,13 @@ mod tests {
     }
 
     #[test]
-    fn completed_hook_multiline_context_preserves_display_and_raw_lines() {
+    fn completed_hook_short_multiline_context_preserves_display_transcript_and_raw_lines() {
         let cell = completed_hook_cell(
             HookEventName::SessionStart,
             HookRunStatus::Completed,
             vec![HookOutputEntry {
                 kind: HookOutputEntryKind::Context,
-                text: "## Working Memory Recall\n\nSource: Codex compaction\nScope: Durable workspace memory"
-                    .to_string(),
+                text: "## Working Memory Recall\n\nSource: Codex compaction".to_string(),
             }],
         );
         let expected = vec![
@@ -781,11 +872,85 @@ mod tests {
             "  hook context: ## Working Memory Recall".to_string(),
             "                ".to_string(),
             "                Source: Codex compaction".to_string(),
-            "                Scope: Durable workspace memory".to_string(),
         ];
 
         assert_eq!(line_texts(&cell.display_lines(/*width*/ 80)), expected);
+        assert_eq!(line_texts(&cell.transcript_lines(/*width*/ 80)), expected);
         assert_eq!(line_texts(&cell.raw_lines()), expected);
+    }
+
+    #[test]
+    fn completed_hook_long_single_line_context_is_truncated_only_in_display() {
+        let full_context = format!(
+            "{}tail-marker",
+            "context words that should wrap across the terminal width ".repeat(8)
+        );
+        let cell = completed_hook_cell(
+            HookEventName::SessionStart,
+            HookRunStatus::Completed,
+            vec![HookOutputEntry {
+                kind: HookOutputEntryKind::Context,
+                text: full_context.clone(),
+            }],
+        );
+
+        let display_lines = cell.display_lines(/*width*/ 80);
+        let display = line_texts(&display_lines);
+        assert_eq!(display.len(), HOOK_CONTEXT_MAX_DISPLAY_ROWS + 1);
+        assert_eq!(
+            Paragraph::new(Text::from(display_lines[1..].to_vec()))
+                .wrap(Wrap { trim: false })
+                .line_count(/*width*/ 80),
+            HOOK_CONTEXT_MAX_DISPLAY_ROWS
+        );
+        assert!(
+            display
+                .iter()
+                .any(|line| line.contains("ctrl + t to view transcript")),
+            "expected truncated context to advertise the transcript: {display:?}"
+        );
+        assert!(display.iter().all(|line| !line.contains("tail-marker")));
+
+        let expected_full = vec![
+            "• SessionStart hook (completed)".to_string(),
+            format!("  hook context: {full_context}"),
+        ];
+        assert_eq!(
+            line_texts(&cell.transcript_lines(/*width*/ 80)),
+            expected_full
+        );
+        assert_eq!(line_texts(&cell.raw_lines()), expected_full);
+    }
+
+    #[test]
+    fn completed_hook_non_context_entries_are_not_truncated() {
+        for kind in [
+            HookOutputEntryKind::Warning,
+            HookOutputEntryKind::Stop,
+            HookOutputEntryKind::Feedback,
+            HookOutputEntryKind::Error,
+        ] {
+            let cell = completed_hook_cell(
+                HookEventName::UserPromptSubmit,
+                HookRunStatus::Stopped,
+                vec![HookOutputEntry {
+                    kind,
+                    text: "first\nsecond\nthird\nfourth\nfifth".to_string(),
+                }],
+            );
+
+            let display = line_texts(&cell.display_lines(/*width*/ 20));
+            assert!(
+                display.iter().any(|line| line.trim_start() == "fifth"),
+                "expected {kind:?} output to remain complete: {display:?}"
+            );
+            assert!(
+                display
+                    .iter()
+                    .all(|line| !line.contains("ctrl + t to view transcript")),
+                "did not expect a transcript hint for {kind:?}: {display:?}"
+            );
+        }
     }
 
     #[test]
