@@ -55,7 +55,7 @@ const TURN_0_FORK_PROMPT: &str = "seed fork context";
 const TURN_1_PROMPT: &str = "spawn a child and continue";
 const TURN_2_NO_WAIT_PROMPT: &str = "follow up without wait";
 const CHILD_PROMPT: &str = "child: do work";
-const INHERITED_MODEL: &str = "gpt-5.3-codex";
+const INHERITED_MODEL: &str = "gpt-5.2";
 const INHERITED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::XHigh;
 const REQUESTED_MODEL: &str = "gpt-5.4";
 const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
@@ -64,6 +64,7 @@ const ROLE_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::High;
 const SUBAGENT_START_CONTEXT: &str = "subagent start context reaches child";
 const SUBAGENT_STOP_CONTINUATION: &str = "continue only the child";
 const INTERNAL_SUBAGENT_PROMPT: &str = "internal subagent: review";
+const V2_COMPLETION_NOTIFICATION_NEEDLE: &str = "Sender: /root/worker_1";
 
 fn body_contains(req: &wiremock::Request, text: &str) -> bool {
     decoded_body(req)
@@ -355,14 +356,24 @@ async fn wait_for_requests(
 async fn wait_for_notification_request_count(
     mock: &core_test_support::responses::ResponseMock,
 ) -> Result<usize> {
+    wait_for_request_count_matching(mock, has_subagent_notification).await
+}
+
+async fn wait_for_request_count_containing(
+    mock: &core_test_support::responses::ResponseMock,
+    text: &str,
+) -> Result<usize> {
+    wait_for_request_count_matching(mock, |request| request.body_contains_text(text)).await
+}
+
+async fn wait_for_request_count_matching(
+    mock: &core_test_support::responses::ResponseMock,
+    predicate: impl Fn(&ResponsesRequest) -> bool,
+) -> Result<usize> {
     let deadline = Instant::now() + Duration::from_secs(4);
     let mut first_notification_at: Option<Instant> = None;
     loop {
-        let notification_count = mock
-            .requests()
-            .into_iter()
-            .filter(has_subagent_notification)
-            .count();
+        let notification_count = mock.requests().into_iter().filter(&predicate).count();
         if notification_count > 0 {
             match first_notification_at {
                 Some(first_seen)
@@ -383,17 +394,38 @@ async fn wait_for_notification_request_count(
     }
 }
 
+async fn wait_for_parent_rollout_text(test: &TestCodex, needle: &str) -> Result<()> {
+    let rollout_path = test
+        .codex
+        .rollout_path()
+        .ok_or_else(|| anyhow::anyhow!("expected parent rollout path"))?;
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let has_notification = tokio::fs::read_to_string(&rollout_path)
+            .await
+            .is_ok_and(|rollout| rollout.contains(needle));
+        if has_notification {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for parent rollout to include {needle:?}");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn setup_turn_one_with_spawned_child(
     server: &MockServer,
     child_response_delay: Option<Duration>,
 ) -> Result<(TestCodex, String)> {
     let (test, spawned_id, _child_request_log) = setup_turn_one_with_custom_spawned_child(
         server,
+        MULTI_AGENT_V1_NAMESPACE,
         json!({
             "message": CHILD_PROMPT,
         }),
         child_response_delay,
-        /*wait_for_parent_notification*/ true,
+        Some("<subagent_notification>"),
         |builder| builder,
     )
     .await?;
@@ -402,9 +434,10 @@ async fn setup_turn_one_with_spawned_child(
 
 async fn setup_turn_one_with_custom_spawned_child(
     server: &MockServer,
+    spawn_namespace: &'static str,
     spawn_args: serde_json::Value,
     child_response_delay: Option<Duration>,
-    wait_for_parent_notification: bool,
+    parent_rollout_needle: Option<&str>,
     configure_test: impl FnOnce(
         core_test_support::test_codex::TestCodexBuilder,
     ) -> core_test_support::test_codex::TestCodexBuilder,
@@ -422,7 +455,7 @@ async fn setup_turn_one_with_custom_spawned_child(
             ev_response_created("resp-turn1-1"),
             ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                MULTI_AGENT_V1_NAMESPACE,
+                spawn_namespace,
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -477,27 +510,11 @@ async fn setup_turn_one_with_custom_spawned_child(
     }));
     let test = builder.build(server).await?;
     test.submit_turn(TURN_1_PROMPT).await?;
-    if child_response_delay.is_none() && wait_for_parent_notification {
+    if child_response_delay.is_none()
+        && let Some(needle) = parent_rollout_needle
+    {
         let _ = wait_for_requests(&child_request_log).await?;
-        let rollout_path = test
-            .codex
-            .rollout_path()
-            .ok_or_else(|| anyhow::anyhow!("expected parent rollout path"))?;
-        let deadline = Instant::now() + Duration::from_secs(6);
-        loop {
-            let has_notification = tokio::fs::read_to_string(&rollout_path)
-                .await
-                .is_ok_and(|rollout| rollout.contains("<subagent_notification>"));
-            if has_notification {
-                break;
-            }
-            if Instant::now() >= deadline {
-                anyhow::bail!(
-                    "timed out waiting for parent rollout to include subagent notification"
-                );
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
+        wait_for_parent_rollout_text(&test, needle).await?;
     }
     let spawned_id = wait_for_spawned_thread_id(&test).await?;
 
@@ -513,9 +530,10 @@ async fn spawn_child_and_capture_snapshot(
 ) -> Result<ThreadConfigSnapshot> {
     let (test, spawned_id, _child_request_log) = setup_turn_one_with_custom_spawned_child(
         server,
+        MULTI_AGENT_V1_NAMESPACE,
         spawn_args,
         /*child_response_delay*/ None,
-        /*wait_for_parent_notification*/ false,
+        None,
         configure_test,
     )
     .await?;
@@ -905,12 +923,13 @@ async fn wake_enabled_child_triggers_parent_turn_without_wait() -> Result<()> {
 
     let (_test, _spawned_id, _child_response) = setup_turn_one_with_custom_spawned_child(
         &server,
+        MULTI_AGENT_V1_NAMESPACE,
         json!({
             "message": CHILD_PROMPT,
             "wake_parent_on_completion": true,
         }),
         None,
-        true,
+        Some("<subagent_notification>"),
         |builder| builder,
     )
     .await?;
@@ -929,7 +948,7 @@ async fn wake_enabled_multi_agent_v2_child_triggers_single_parent_turn_without_w
     let server = start_mock_server().await;
     let wake_turn = mount_sse_once_match(
         &server,
-        |req: &wiremock::Request| body_contains(req, "<subagent_notification>"),
+        |req: &wiremock::Request| body_contains(req, V2_COMPLETION_NOTIFICATION_NEEDLE),
         sse(vec![
             ev_response_created("resp-wake-v2-1"),
             ev_assistant_message("msg-wake-v2-1", "wake handled"),
@@ -940,13 +959,14 @@ async fn wake_enabled_multi_agent_v2_child_triggers_single_parent_turn_without_w
 
     let (_test, _spawned_id, _child_response) = setup_turn_one_with_custom_spawned_child(
         &server,
+        MULTI_AGENT_V2_NAMESPACE,
         json!({
             "task_name": "worker_1",
             "message": CHILD_PROMPT,
             "wake_parent_on_completion": true,
         }),
         None,
-        true,
+        Some(V2_COMPLETION_NOTIFICATION_NEEDLE),
         |builder| {
             builder.with_config(|config| {
                 config
@@ -958,7 +978,8 @@ async fn wake_enabled_multi_agent_v2_child_triggers_single_parent_turn_without_w
     )
     .await?;
 
-    let notification_requests = wait_for_notification_request_count(&wake_turn).await?;
+    let notification_requests =
+        wait_for_request_count_containing(&wake_turn, V2_COMPLETION_NOTIFICATION_NEEDLE).await?;
     assert_eq!(notification_requests, 1);
 
     Ok(())
@@ -1229,10 +1250,22 @@ async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
 
     test.submit_turn(TURN_1_PROMPT).await?;
 
-    let child_request = wait_for_requests(&child_request_log)
-        .await?
-        .pop()
-        .expect("child request");
+    // The response mock records candidate requests before its request matcher runs, so wait for
+    // the child request instead of assuming the latest recorded request is already it.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let child_request = loop {
+        if let Some(request) = child_request_log
+            .requests()
+            .into_iter()
+            .find(|request| !request.inputs_of_type("agent_message").is_empty())
+        {
+            break request;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for child agent message request");
+        }
+        sleep(Duration::from_millis(10)).await;
+    };
     assert_eq!(
         strip_metadata_from_json(Value::Array(child_request.inputs_of_type("agent_message"))),
         Value::Array(vec![json!({

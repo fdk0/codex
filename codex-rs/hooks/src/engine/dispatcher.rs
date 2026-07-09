@@ -138,7 +138,7 @@ pub(crate) async fn execute_handlers<T>(
         let input_json = input_json.clone();
         let turn_id = turn_id.clone();
         pending.push(async move {
-            let result = run_command(shell, &handler, &input_json, cwd).await;
+            let result = run_command(shell, &handler, configured_order, &input_json, cwd).await;
             (configured_order, parse(&handler, result, turn_id))
         });
     }
@@ -178,7 +178,7 @@ pub(crate) fn completed_summary(
     }
 }
 
-fn scope_for_event(event_name: HookEventName) -> HookScope {
+pub(crate) fn scope_for_event(event_name: HookEventName) -> HookScope {
     match event_name {
         HookEventName::SessionStart | HookEventName::SubagentStart => HookScope::Thread,
         HookEventName::PreToolUse
@@ -193,6 +193,62 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
     }
 }
 
+pub(crate) fn hook_event_name_label(event_name: HookEventName) -> &'static str {
+    match event_name {
+        HookEventName::PreToolUse => "PreToolUse",
+        HookEventName::PermissionRequest => "PermissionRequest",
+        HookEventName::PostToolUse => "PostToolUse",
+        HookEventName::PreCompact => "PreCompact",
+        HookEventName::PostCompact => "PostCompact",
+        HookEventName::SessionStart => "SessionStart",
+        HookEventName::AfterCompaction => "AfterCompaction",
+        HookEventName::UserPromptSubmit => "UserPromptSubmit",
+        HookEventName::SubagentStart => "SubagentStart",
+        HookEventName::SubagentStop => "SubagentStop",
+        HookEventName::Stop => "Stop",
+    }
+}
+
+pub(crate) fn hook_execution_mode_label(mode: HookExecutionMode) -> &'static str {
+    match mode {
+        HookExecutionMode::Sync => "sync",
+        HookExecutionMode::Async => "async",
+    }
+}
+
+pub(crate) fn hook_handler_type_label(handler_type: HookHandlerType) -> &'static str {
+    match handler_type {
+        HookHandlerType::Command => "command",
+        HookHandlerType::Prompt => "prompt",
+        HookHandlerType::Agent => "agent",
+    }
+}
+
+pub(crate) fn hook_scope_label(scope: HookScope) -> &'static str {
+    match scope {
+        HookScope::Thread => "thread",
+        HookScope::Turn => "turn",
+    }
+}
+
+pub(crate) fn hook_source_label(source: codex_protocol::protocol::HookSource) -> &'static str {
+    match source {
+        codex_protocol::protocol::HookSource::System => "system",
+        codex_protocol::protocol::HookSource::User => "user",
+        codex_protocol::protocol::HookSource::Project => "project",
+        codex_protocol::protocol::HookSource::Mdm => "mdm",
+        codex_protocol::protocol::HookSource::SessionFlags => "session_flags",
+        codex_protocol::protocol::HookSource::Plugin => "plugin",
+        codex_protocol::protocol::HookSource::CloudRequirements => "cloud_requirements",
+        codex_protocol::protocol::HookSource::CloudManagedConfig => "cloud_managed_config",
+        codex_protocol::protocol::HookSource::LegacyManagedConfigFile => {
+            "legacy_managed_config_file"
+        }
+        codex_protocol::protocol::HookSource::LegacyManagedConfigMdm => "legacy_managed_config_mdm",
+        codex_protocol::protocol::HookSource::Unknown => "unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use codex_config::HookConditions;
@@ -200,6 +256,7 @@ mod tests {
     use codex_protocol::protocol::HookSource;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
+    use pretty_assertions::assert_eq;
 
     use super::ConfiguredHandler;
     use super::HookSelectionContext;

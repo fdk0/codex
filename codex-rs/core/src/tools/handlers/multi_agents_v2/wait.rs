@@ -6,7 +6,6 @@ use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v2;
-use crate::turn_timing::now_unix_timestamp_ms;
 use codex_config::types::AgentWaitOnWakeEnabledBehavior;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
@@ -94,20 +93,24 @@ impl Handler {
         }
 
         session
-            .send_event(
+            .emit_turn_item_started(
                 &turn,
-                CollabWaitingBeginEvent {
-                    started_at_ms: now_unix_timestamp_ms(),
+                &TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
+                    id: call_id.clone(),
+                    tool: CollabAgentTool::Wait,
+                    status: CollabAgentToolCallStatus::InProgress,
                     sender_thread_id: session.thread_id,
                     receiver_thread_ids: receiver_thread_ids.clone(),
                     receiver_agents: receiver_agents.clone(),
-                    call_id: call_id.clone(),
-                }
-                .into(),
+                    prompt: None,
+                    model: None,
+                    reasoning_effort: None,
+                    agents_states: Default::default(),
+                }),
             )
             .await;
 
-        let (timed_out, agent_statuses, statuses_by_id) = if receiver_thread_ids.is_empty() {
+        let (timed_out, statuses_by_id) = if receiver_thread_ids.is_empty() {
             let turn_state = session
                 .input_queue
                 .turn_state_for_sub_id(&session.active_turn, &turn.sub_id)
@@ -118,7 +121,7 @@ impl Handler {
                 .await;
             let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
             let timed_out = !wait_for_activity(&mut activity_rx, pending_activity, deadline).await;
-            (timed_out, Vec::new(), HashMap::new())
+            (timed_out, HashMap::new())
         } else {
             let mut wake_enabled_children = session
                 .services
@@ -171,19 +174,23 @@ impl Handler {
                         let mut statuses = HashMap::with_capacity(1);
                         statuses.insert(*id, session.services.agent_control.get_status(*id).await);
                         session
-                            .send_event(
+                            .emit_turn_item_completed(
                                 &turn,
-                                CollabWaitingEndEvent {
+                                TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
+                                    id: call_id.clone(),
+                                    tool: CollabAgentTool::Wait,
+                                    status: wait_tool_call_status(&statuses),
                                     sender_thread_id: session.thread_id,
-                                    call_id: call_id.clone(),
-                                    completed_at_ms: now_unix_timestamp_ms(),
-                                    agent_statuses: build_wait_agent_statuses(
+                                    receiver_thread_ids: statuses.keys().copied().collect(),
+                                    receiver_agents: wait_receiver_agents(
                                         &statuses,
                                         &receiver_agents,
                                     ),
-                                    statuses,
-                                }
-                                .into(),
+                                    prompt: None,
+                                    model: None,
+                                    reasoning_effort: None,
+                                    agents_states: statuses,
+                                }),
                             )
                             .await;
                         return Err(collab_agent_error(*id, err));
@@ -225,22 +232,25 @@ impl Handler {
 
             let timed_out = statuses.is_empty();
             let statuses_by_id = statuses.into_iter().collect::<HashMap<_, _>>();
-            let agent_statuses = build_wait_agent_statuses(&statuses_by_id, &receiver_agents);
-            (timed_out, agent_statuses, statuses_by_id)
+            (timed_out, statuses_by_id)
         };
         let result = WaitAgentResult::from_timed_out(timed_out);
 
         session
-            .send_event(
+            .emit_turn_item_completed(
                 &turn,
-                CollabWaitingEndEvent {
+                TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
+                    id: call_id.clone(),
+                    tool: CollabAgentTool::Wait,
+                    status: wait_tool_call_status(&statuses_by_id),
                     sender_thread_id: session.thread_id,
-                    call_id,
-                    completed_at_ms: now_unix_timestamp_ms(),
-                    agent_statuses,
-                    statuses: statuses_by_id,
-                }
-                .into(),
+                    receiver_thread_ids: statuses_by_id.keys().copied().collect(),
+                    receiver_agents: wait_receiver_agents(&statuses_by_id, &receiver_agents),
+                    prompt: None,
+                    model: None,
+                    reasoning_effort: None,
+                    agents_states: statuses_by_id,
+                }),
             )
             .await;
 
@@ -332,6 +342,32 @@ async fn wait_for_final_status(
             return Some((thread_id, status));
         }
     }
+}
+
+fn wait_tool_call_status(statuses: &HashMap<ThreadId, AgentStatus>) -> CollabAgentToolCallStatus {
+    if statuses
+        .values()
+        .any(|status| matches!(status, AgentStatus::Errored(_) | AgentStatus::NotFound))
+    {
+        CollabAgentToolCallStatus::Failed
+    } else {
+        CollabAgentToolCallStatus::Completed
+    }
+}
+
+fn wait_receiver_agents(
+    statuses: &HashMap<ThreadId, AgentStatus>,
+    receiver_agents: &[CollabAgentRef],
+) -> Vec<CollabAgentRef> {
+    if statuses.is_empty() {
+        return Vec::new();
+    }
+
+    receiver_agents
+        .iter()
+        .filter(|agent| statuses.contains_key(&agent.thread_id))
+        .cloned()
+        .collect()
 }
 
 async fn wait_for_activity(

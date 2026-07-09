@@ -50,7 +50,10 @@ use uuid::Uuid;
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 async fn init_mcp(codex_home: &Path) -> Result<TestAppServer> {
-    let mut mcp = TestAppServer::new(codex_home).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home)
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
     Ok(mcp)
 }
@@ -257,7 +260,7 @@ async fn thread_list_reports_system_error_idle_flag_after_failed_turn() -> Resul
     let mut mcp = init_mcp(codex_home.path()).await?;
 
     let start_id = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             ..Default::default()
         })
@@ -1101,9 +1104,9 @@ async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result
         /*source_kinds*/ None,
     )
     .await?;
-    let third_page = list_threads_for_parent(
+    let third_page = list_threads_for_relation(
         &mut mcp,
-        parent_id,
+        ThreadListRelation::DirectChildrenOf(parent_id),
         second_page.next_cursor.clone(),
         /*limit*/ 1,
         /*model_providers*/ None,
@@ -1162,9 +1165,9 @@ async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result
             .collect::<Vec<_>>(),
         Vec::<String>::new()
     );
-    let source_linked = list_threads_for_parent(
+    let source_linked = list_threads_for_relation(
         &mut mcp,
-        parent_id,
+        ThreadListRelation::DirectChildrenOf(parent_id),
         /*cursor*/ None,
         /*limit*/ 10,
         /*model_providers*/ None,
