@@ -96,6 +96,7 @@ use tracing::instrument;
 use tracing::warn;
 
 const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
+const RESERVED_MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 const IMAGE_GEN_NAMESPACE: &str = "image_gen";
 const IMAGEGEN_TOOL_NAME: &str = "imagegen";
 
@@ -795,9 +796,17 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
             } else {
                 ToolExposure::Direct
             };
-            let tool_namespace = namespace_tools_enabled(turn_context)
+            let configured_tool_namespace = namespace_tools_enabled(turn_context)
                 .then_some(turn_context.config.multi_agent_v2.tool_namespace.as_deref())
                 .flatten();
+            // The Responses API reserves `collaboration` for the exact upstream multi-agent
+            // function schemas. This fork intentionally extends those schemas (for example with
+            // spawn env/wake controls, targeted waits, and close_agent), so placing any of the
+            // extended family in that namespace causes request validation failures. Preserve the
+            // canonical function names as plain tools for the reserved default, while still
+            // honoring explicitly configured non-reserved namespaces.
+            let tool_namespace = configured_tool_namespace
+                .filter(|namespace| *namespace != RESERVED_MULTI_AGENT_V2_NAMESPACE);
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);
             planned_tools.add_arc(override_tool_exposure(

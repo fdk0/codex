@@ -1213,47 +1213,36 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         });
     })
     .await;
-    v2.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
-    v2.assert_visible_lacks(&[
+    let v2_tool_names = [
         "spawn_agent",
         "send_message",
         "followup_task",
         "wait_agent",
         "interrupt_agent",
         "list_agents",
+        "close_agent",
+    ];
+    v2.assert_visible_contains(&v2_tool_names);
+    v2.assert_visible_lacks(&[
+        MULTI_AGENT_V2_NAMESPACE,
         "send_input",
         "resume_agent",
         "assign_task",
-        "close_agent",
     ]);
-    for tool_name in [
-        "spawn_agent",
-        "send_message",
-        "followup_task",
-        "wait_agent",
-        "interrupt_agent",
-        "list_agents",
-        "close_agent",
-    ] {
+    for tool_name in v2_tool_names {
         assert!(
-            v2.namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
-                .iter()
-                .any(|name| name == tool_name),
-            "expected {tool_name} in {MULTI_AGENT_V2_NAMESPACE} namespace"
+            v2.registered_names
+                .contains(&ToolName::plain(tool_name).to_string()),
+            "expected a plain {tool_name} runtime"
+        );
+        assert!(
+            !v2.registered_names
+                .contains(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, tool_name).to_string()),
+            "custom {tool_name} schema must stay out of the reserved collaboration namespace"
         );
     }
-    let ToolSpec::Namespace(namespace) = v2.visible_spec(MULTI_AGENT_V2_NAMESPACE) else {
-        panic!("expected {MULTI_AGENT_V2_NAMESPACE} namespace");
-    };
-    let Some(ResponsesApiNamespaceTool::Function(spawn_agent)) =
-        namespace.tools.iter().find(|tool| {
-            matches!(
-                tool,
-                ResponsesApiNamespaceTool::Function(tool) if tool.name == "spawn_agent"
-            )
-        })
-    else {
-        panic!("expected spawn_agent in {MULTI_AGENT_V2_NAMESPACE} namespace");
+    let ToolSpec::Function(spawn_agent) = v2.visible_spec("spawn_agent") else {
+        panic!("expected plain spawn_agent function");
     };
     let spawn_agent_description = spawn_agent.description.as_str();
     assert!(!spawn_agent_description.contains("max_concurrent_threads_per_session"));
@@ -1275,11 +1264,14 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         });
     })
     .await;
-    direct_model_only.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
-    direct_model_only.assert_visible_lacks(&["spawn_agent", "send_message", "wait_agent"]);
+    direct_model_only.assert_visible_contains(&v2_tool_names);
+    direct_model_only.assert_visible_lacks(&[MULTI_AGENT_V2_NAMESPACE]);
     assert_eq!(
-        direct_model_only
-            .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
+        direct_model_only.exposure("spawn_agent"),
+        ToolExposure::DirectModelOnly
+    );
+    assert_eq!(
+        direct_model_only.exposure("close_agent"),
         ToolExposure::DirectModelOnly
     );
 }
@@ -1290,17 +1282,9 @@ async fn multi_agent_v2_message_schemas_default_to_plaintext() {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
     })
     .await;
-    let ToolSpec::Namespace(namespace) = plan.visible_spec(MULTI_AGENT_V2_NAMESPACE) else {
-        panic!("expected {MULTI_AGENT_V2_NAMESPACE} namespace");
-    };
     for tool_name in ["spawn_agent", "send_message", "followup_task"] {
-        let Some(ResponsesApiNamespaceTool::Function(tool)) = namespace.tools.iter().find(|tool| {
-            matches!(
-                tool,
-                ResponsesApiNamespaceTool::Function(tool) if tool.name == tool_name
-            )
-        }) else {
-            panic!("expected {tool_name} in {MULTI_AGENT_V2_NAMESPACE} namespace");
+        let ToolSpec::Function(tool) = plan.visible_spec(tool_name) else {
+            panic!("expected plain {tool_name} function");
         };
         let properties = tool
             .parameters
@@ -1626,8 +1610,14 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
             codex_code_mode::PUBLIC_TOOL_NAME,
             codex_code_mode::WAIT_TOOL_NAME,
             "request_user_input",
-            // Multi-agent v2 tools.
-            MULTI_AGENT_V2_NAMESPACE,
+            // Custom multi-agent v2 tools stay out of the reserved namespace.
+            "spawn_agent",
+            "send_message",
+            "followup_task",
+            "wait_agent",
+            "interrupt_agent",
+            "list_agents",
+            "close_agent",
             // Hosted Responses tools.
             "web_search",
         ]
