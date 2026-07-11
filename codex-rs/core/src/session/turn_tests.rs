@@ -2,6 +2,7 @@ use super::*;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::TurnItemContributor;
 use codex_protocol::AgentPath;
+use codex_protocol::ResponseItemId;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::protocol::InterAgentCommunication;
 use pretty_assertions::assert_eq;
@@ -29,7 +30,7 @@ impl TurnItemContributor for RewriteAgentMessageContributor {
 
 fn assistant_output_text(text: &str) -> ResponseItem {
     ResponseItem::Message {
-        id: Some("msg-1".to_string()),
+        id: Some(ResponseItemId::with_suffix("msg", "1")),
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
             text: text.to_string(),
