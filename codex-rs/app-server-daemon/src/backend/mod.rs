@@ -13,21 +13,32 @@ pub enum BackendKind {
     Pid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackendRemoteControlMode {
+    Enabled,
+    Disabled,
+    ResolvePersisted,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct BackendPaths {
     pub(crate) codex_bin: PathBuf,
     pub(crate) pid_file: PathBuf,
     pub(crate) update_pid_file: PathBuf,
-    pub(crate) remote_control_enabled: bool,
+    pub(crate) remote_control_mode: BackendRemoteControlMode,
     pub(crate) remote_control_client_name: Option<String>,
+    pub(crate) analytics_default_enabled: bool,
 }
 
 pub(crate) fn pid_backend(paths: BackendPaths) -> PidBackend {
     PidBackend::new(
         paths.codex_bin,
         paths.pid_file,
-        paths.remote_control_enabled,
-        paths.remote_control_client_name,
+        pid::PidAppServerOptions {
+            remote_control_mode: paths.remote_control_mode,
+            remote_control_client_name: paths.remote_control_client_name,
+            analytics_default_enabled: paths.analytics_default_enabled,
+        },
     )
 }
 

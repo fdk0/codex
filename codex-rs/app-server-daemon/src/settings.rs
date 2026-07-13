@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -12,6 +13,12 @@ pub(crate) struct DaemonSettings {
     pub(crate) remote_control_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) remote_control_client_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) codex_bin: Option<PathBuf>,
+    #[serde(default)]
+    pub(crate) analytics_default_enabled: bool,
+    #[serde(default)]
+    pub(crate) resolve_persisted_remote_control: bool,
 }
 
 impl DaemonSettings {
@@ -58,9 +65,12 @@ mod tests {
             serde_json::to_string(&DaemonSettings {
                 remote_control_enabled: true,
                 remote_control_client_name: None,
+                codex_bin: None,
+                analytics_default_enabled: false,
+                resolve_persisted_remote_control: false,
             })
             .expect("serialize"),
-            r#"{"remoteControlEnabled":true}"#
+            r#"{"remoteControlEnabled":true,"analyticsDefaultEnabled":false,"resolvePersistedRemoteControl":false}"#
         );
     }
 
@@ -70,9 +80,27 @@ mod tests {
             serde_json::to_string(&DaemonSettings {
                 remote_control_enabled: true,
                 remote_control_client_name: Some("Codex Desktop".to_string()),
+                codex_bin: Some("/Applications/Codex.app/Contents/Resources/codex".into()),
+                analytics_default_enabled: true,
+                resolve_persisted_remote_control: true,
             })
             .expect("serialize"),
-            r#"{"remoteControlEnabled":true,"remoteControlClientName":"Codex Desktop"}"#
+            r#"{"remoteControlEnabled":true,"remoteControlClientName":"Codex Desktop","codexBin":"/Applications/Codex.app/Contents/Resources/codex","analyticsDefaultEnabled":true,"resolvePersistedRemoteControl":true}"#
+        );
+    }
+
+    #[test]
+    fn daemon_settings_load_without_desktop_launch_overrides() {
+        assert_eq!(
+            serde_json::from_str::<DaemonSettings>(r#"{"remoteControlEnabled":true}"#)
+                .expect("deserialize"),
+            DaemonSettings {
+                remote_control_enabled: true,
+                remote_control_client_name: None,
+                codex_bin: None,
+                analytics_default_enabled: false,
+                resolve_persisted_remote_control: false,
+            }
         );
     }
 }

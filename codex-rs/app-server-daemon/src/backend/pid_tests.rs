@@ -5,6 +5,8 @@ use tempfile::TempDir;
 
 use codex_app_server_transport::REMOTE_CONTROL_DISABLED_ENV_VAR;
 
+use super::super::BackendRemoteControlMode;
+use super::PidAppServerOptions;
 use super::PidBackend;
 use super::PidCommandKind;
 use super::PidFileState;
@@ -13,6 +15,14 @@ use super::PidRecord;
 use super::read_stderr_log_tail;
 use super::stderr_log_file_for_pid_file;
 use super::try_lock_file;
+
+fn app_server_options(remote_control_mode: BackendRemoteControlMode) -> PidAppServerOptions {
+    PidAppServerOptions {
+        remote_control_mode,
+        remote_control_client_name: None,
+        analytics_default_enabled: false,
+    }
+}
 
 #[tokio::test]
 async fn locked_empty_pid_file_is_treated_as_active_reservation() {
@@ -24,8 +34,7 @@ async fn locked_empty_pid_file_is_treated_as_active_reservation() {
     let backend = PidBackend::new(
         temp_dir.path().join("codex"),
         pid_file.clone(),
-        /*remote_control_enabled*/ false,
-        /*remote_control_client_name*/ None,
+        app_server_options(BackendRemoteControlMode::Disabled),
     );
     let reservation = tokio::fs::OpenOptions::new()
         .create(true)
@@ -53,8 +62,7 @@ async fn unlocked_empty_pid_file_is_treated_as_stale_reservation() {
     let backend = PidBackend::new(
         temp_dir.path().join("codex"),
         pid_file.clone(),
-        /*remote_control_enabled*/ false,
-        /*remote_control_client_name*/ None,
+        app_server_options(BackendRemoteControlMode::Disabled),
     );
 
     assert_eq!(
@@ -74,8 +82,7 @@ async fn stop_waits_for_live_reservation_to_resolve() {
     let backend = PidBackend::new(
         temp_dir.path().join("codex"),
         pid_file.clone(),
-        /*remote_control_enabled*/ false,
-        /*remote_control_client_name*/ None,
+        app_server_options(BackendRemoteControlMode::Disabled),
     );
     let reservation = tokio::fs::OpenOptions::new()
         .create(true)
@@ -107,8 +114,7 @@ async fn start_retries_stale_empty_pid_file_under_its_own_lock() {
     let backend = PidBackend::new(
         temp_dir.path().join("missing-codex"),
         pid_file,
-        /*remote_control_enabled*/ false,
-        /*remote_control_client_name*/ None,
+        app_server_options(BackendRemoteControlMode::Disabled),
     );
 
     let err = backend.start().await.expect_err("start");
@@ -125,8 +131,7 @@ async fn stale_record_cleanup_preserves_replacement_record() {
     let backend = PidBackend::new(
         temp_dir.path().join("codex"),
         pid_file.clone(),
-        /*remote_control_enabled*/ false,
-        /*remote_control_client_name*/ None,
+        app_server_options(BackendRemoteControlMode::Disabled),
     );
     let stale = PidRecord {
         pid: 1,
@@ -178,8 +183,11 @@ fn remote_control_client_name_is_passed_to_app_server() {
         pid_file: "app-server.pid".into(),
         lock_file: "app-server.pid.lock".into(),
         command_kind: PidCommandKind::AppServer {
-            remote_control_enabled: true,
-            remote_control_client_name: Some("Codex Desktop".to_string()),
+            options: PidAppServerOptions {
+                remote_control_mode: BackendRemoteControlMode::Enabled,
+                analytics_default_enabled: false,
+                remote_control_client_name: Some("Codex Desktop".to_string()),
+            },
         },
     };
 
@@ -201,8 +209,7 @@ fn app_server_remote_control_uses_runtime_flag() {
     let backend = PidBackend::new(
         "codex".into(),
         "app-server.pid".into(),
-        /*remote_control_enabled*/ true,
-        /*remote_control_client_name*/ None,
+        app_server_options(BackendRemoteControlMode::Enabled),
     );
 
     assert_eq!(
@@ -216,7 +223,7 @@ fn app_server_disabled_remote_control_uses_compatible_args_and_runtime_env() {
     let backend = PidBackend::new(
         "codex".into(),
         "app-server.pid".into(),
-        /*remote_control_enabled*/ false,
+        app_server_options(BackendRemoteControlMode::Disabled),
     );
 
     assert_eq!(
@@ -226,6 +233,42 @@ fn app_server_disabled_remote_control_uses_compatible_args_and_runtime_env() {
     assert_eq!(
         backend.command_env(),
         Some((REMOTE_CONTROL_DISABLED_ENV_VAR, "1"))
+    );
+}
+
+#[test]
+fn app_server_resolves_persisted_remote_control_without_disable_env() {
+    let mut options = app_server_options(BackendRemoteControlMode::ResolvePersisted);
+    options.remote_control_client_name = Some("Custom ChatGPT".to_string());
+    let backend = PidBackend::new("codex".into(), "app-server.pid".into(), options);
+
+    assert_eq!(
+        backend.command_args(),
+        vec![
+            "app-server",
+            "--listen",
+            "unix://",
+            "--remote-control-client-name",
+            "Custom ChatGPT"
+        ]
+    );
+    assert_eq!(backend.command_env(), None);
+}
+
+#[test]
+fn app_server_analytics_default_uses_runtime_flag() {
+    let mut options = app_server_options(BackendRemoteControlMode::ResolvePersisted);
+    options.analytics_default_enabled = true;
+    let backend = PidBackend::new("codex".into(), "app-server.pid".into(), options);
+
+    assert_eq!(
+        backend.command_args(),
+        vec![
+            "app-server",
+            "--analytics-default-enabled",
+            "--listen",
+            "unix://"
+        ]
     );
 }
 

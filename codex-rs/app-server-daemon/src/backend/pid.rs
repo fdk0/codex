@@ -19,6 +19,10 @@ use tokio::io::AsyncSeekExt;
 use tokio::process::Command;
 use tokio::time::sleep;
 
+use super::BackendRemoteControlMode;
+use crate::DESKTOP_SHARED_APP_SERVER_CLIENT_NAME_ENV_VAR;
+use crate::DESKTOP_SHARED_APP_SERVER_ENV_VAR;
+
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const STOP_GRACE_PERIOD: Duration = Duration::from_secs(60);
 const STOP_TIMEOUT: Duration = Duration::from_secs(70);
@@ -70,29 +74,25 @@ enum PidFileState {
 #[derive(Debug, Clone)]
 #[cfg_attr(not(unix), allow(dead_code))]
 enum PidCommandKind {
-    AppServer {
-        remote_control_enabled: bool,
-        remote_control_client_name: Option<String>,
-    },
+    AppServer { options: PidAppServerOptions },
     UpdateLoop,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PidAppServerOptions {
+    pub(crate) remote_control_mode: BackendRemoteControlMode,
+    pub(crate) remote_control_client_name: Option<String>,
+    pub(crate) analytics_default_enabled: bool,
+}
+
 impl PidBackend {
-    pub(crate) fn new(
-        codex_bin: PathBuf,
-        pid_file: PathBuf,
-        remote_control_enabled: bool,
-        remote_control_client_name: Option<String>,
-    ) -> Self {
+    pub(crate) fn new(codex_bin: PathBuf, pid_file: PathBuf, options: PidAppServerOptions) -> Self {
         let lock_file = pid_file.with_extension("pid.lock");
         Self {
             codex_bin,
             pid_file,
             lock_file,
-            command_kind: PidCommandKind::AppServer {
-                remote_control_enabled,
-                remote_control_client_name,
-            },
+            command_kind: PidCommandKind::AppServer { options },
         }
     }
 
@@ -174,7 +174,9 @@ impl PidBackend {
             .args(self.command_args())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr_log.into_std().await));
+            .stderr(Stdio::from(stderr_log.into_std().await))
+            .env_remove(DESKTOP_SHARED_APP_SERVER_ENV_VAR)
+            .env_remove(DESKTOP_SHARED_APP_SERVER_CLIENT_NAME_ENV_VAR);
         if let Some((key, value)) = self.command_env() {
             command.env(key, value);
         }
@@ -410,30 +412,23 @@ impl PidBackend {
     #[cfg(unix)]
     fn command_args(&self) -> Vec<String> {
         match &self.command_kind {
-            PidCommandKind::AppServer {
-                remote_control_enabled: true,
-                remote_control_client_name,
-            } => {
-                let mut args = vec![
-                    "app-server".to_string(),
-                    "--remote-control".to_string(),
-                    "--listen".to_string(),
-                    "unix://".to_string(),
-                ];
-                if let Some(client_name) = remote_control_client_name {
+            PidCommandKind::AppServer { options } => {
+                let mut args = vec!["app-server".to_string()];
+                if options.remote_control_mode == BackendRemoteControlMode::Enabled {
+                    args.push("--remote-control".to_string());
+                }
+                if options.analytics_default_enabled {
+                    args.push("--analytics-default-enabled".to_string());
+                }
+                args.extend(["--listen".to_string(), "unix://".to_string()]);
+                if options.remote_control_mode != BackendRemoteControlMode::Disabled
+                    && let Some(client_name) = &options.remote_control_client_name
+                {
                     args.push("--remote-control-client-name".to_string());
                     args.push(client_name.clone());
                 }
                 args
             }
-            PidCommandKind::AppServer {
-                remote_control_enabled: false,
-                ..
-            } => vec![
-                "app-server".to_string(),
-                "--listen".to_string(),
-                "unix://".to_string(),
-            ],
             PidCommandKind::UpdateLoop => vec![
                 "app-server".to_string(),
                 "daemon".to_string(),
@@ -444,16 +439,13 @@ impl PidBackend {
 
     #[cfg(unix)]
     fn command_env(&self) -> Option<(&'static str, &'static str)> {
-        match self.command_kind {
-            PidCommandKind::AppServer {
-                remote_control_enabled: false,
-                ..
-            } => Some((REMOTE_CONTROL_DISABLED_ENV_VAR, "1")),
-            PidCommandKind::AppServer {
-                remote_control_enabled: true,
-                ..
+        match &self.command_kind {
+            PidCommandKind::AppServer { options }
+                if options.remote_control_mode == BackendRemoteControlMode::Disabled =>
+            {
+                Some((REMOTE_CONTROL_DISABLED_ENV_VAR, "1"))
             }
-            | PidCommandKind::UpdateLoop => None,
+            PidCommandKind::AppServer { .. } | PidCommandKind::UpdateLoop => None,
         }
     }
 

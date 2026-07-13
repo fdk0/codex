@@ -15,8 +15,11 @@ use codex_app_server_protocol::RequestId;
 use codex_uds::UnixStream;
 use futures::SinkExt;
 use futures::StreamExt;
+use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
+use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
 use tokio::time::timeout;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::client_async;
@@ -68,6 +71,77 @@ pub(crate) async fn connect(socket_path: &Path) -> Result<WebSocketStream<UnixSt
         .await
         .with_context(|| format!("failed to upgrade {}", socket_path.display()))?;
     Ok(websocket)
+}
+
+pub(crate) async fn proxy_json_lines<R, W>(
+    socket_path: &Path,
+    input: R,
+    mut output: W,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let websocket = connect(socket_path).await?;
+    let (mut websocket_writer, mut websocket_reader) = websocket.split();
+    let mut input_lines = BufReader::new(input).lines();
+    let mut input_open = true;
+
+    loop {
+        tokio::select! {
+            input_line = input_lines.next_line(), if input_open => {
+                match input_line.context("failed to read app-server proxy input")? {
+                    Some(input_line) => websocket_writer
+                        .send(Message::Text(input_line.into()))
+                        .await
+                        .context("failed to send app-server proxy request")?,
+                    None => {
+                        input_open = false;
+                        websocket_writer
+                            .close()
+                            .await
+                            .context("failed to close app-server proxy websocket")?;
+                    }
+                }
+            }
+            websocket_frame = websocket_reader.next() => {
+                let Some(websocket_frame) = websocket_frame else {
+                    break;
+                };
+                match websocket_frame.context("failed to read app-server proxy response")? {
+                    Message::Text(payload) => {
+                        output
+                            .write_all(payload.as_bytes())
+                            .await
+                            .context("failed to write app-server proxy response")?;
+                        output
+                            .write_all(b"\n")
+                            .await
+                            .context("failed to terminate app-server proxy response")?;
+                        output
+                            .flush()
+                            .await
+                            .context("failed to flush app-server proxy response")?;
+                    }
+                    Message::Ping(payload) if input_open => websocket_writer
+                        .send(Message::Pong(payload))
+                        .await
+                        .context("failed to answer app-server proxy ping")?,
+                    Message::Close(_) => break,
+                    Message::Binary(_)
+                    | Message::Ping(_)
+                    | Message::Pong(_)
+                    | Message::Frame(_) => {}
+                }
+            }
+        }
+    }
+
+    output
+        .flush()
+        .await
+        .context("failed to flush app-server proxy output")?;
+    Ok(())
 }
 
 pub(crate) async fn initialize<S>(
@@ -159,9 +233,72 @@ fn parse_version_from_user_agent(user_agent: &str) -> Result<String> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use codex_uds::UnixListener;
+    use futures::SinkExt;
+    use futures::StreamExt;
     use pretty_assertions::assert_eq;
+    use tokio::io::AsyncBufReadExt;
+    use tokio::io::AsyncWriteExt;
+    use tokio::io::BufReader;
+    use tokio::io::duplex;
+    use tokio::time::Duration;
+    use tokio::time::timeout;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::Message;
 
     use super::parse_version_from_user_agent;
+    use super::proxy_json_lines;
+
+    #[tokio::test]
+    async fn proxy_upgrades_control_socket_and_relays_json_lines() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let socket_path = temp_dir.path().join("app-server.sock");
+        let mut listener = UnixListener::bind(&socket_path)
+            .await
+            .expect("bind control socket");
+        let server_task = tokio::spawn(async move {
+            let stream = listener.accept().await.expect("accept proxy");
+            let mut websocket = accept_async(stream).await.expect("upgrade proxy");
+            assert_eq!(
+                websocket
+                    .next()
+                    .await
+                    .expect("request frame")
+                    .expect("request"),
+                Message::Text("request".into())
+            );
+            websocket
+                .send(Message::Text("response".into()))
+                .await
+                .expect("send response");
+            websocket.close(None).await.expect("close websocket");
+        });
+
+        let (mut input_writer, input_reader) = duplex(1024);
+        let (output_writer, output_reader) = duplex(1024);
+        let proxy_socket_path = socket_path.clone();
+        let proxy_task = tokio::spawn(async move {
+            proxy_json_lines(&proxy_socket_path, input_reader, output_writer).await
+        });
+
+        input_writer
+            .write_all(b"request\n")
+            .await
+            .expect("write request");
+        let mut output_reader = BufReader::new(output_reader);
+        let mut response = String::new();
+        timeout(
+            Duration::from_secs(1),
+            output_reader.read_line(&mut response),
+        )
+        .await
+        .expect("response timeout")
+        .expect("read response");
+        assert_eq!(response, "response\n");
+
+        server_task.await.expect("server task");
+        proxy_task.await.expect("proxy task").expect("proxy result");
+    }
 
     #[test]
     fn parses_version_from_codex_user_agent() {
