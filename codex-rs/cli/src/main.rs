@@ -600,7 +600,7 @@ enum AppServerSubcommand {
     /// Manage the local app-server daemon.
     Daemon(AppServerDaemonCommand),
 
-    /// Proxy app-server JSONL over stdio to the running control socket.
+    /// Proxy stdio bytes to the running app-server control socket.
     Proxy(AppServerProxyCommand),
 
     /// [experimental] Generate TypeScript bindings for the app server protocol.
@@ -1262,12 +1262,9 @@ async fn cli_main(
                             codex_app_server::app_server_control_socket_path(&codex_home)?
                         }
                     };
-                    codex_app_server_daemon::proxy_app_server_json_lines(
-                        socket_path.as_path(),
-                        tokio::io::stdin(),
-                        tokio::io::stdout(),
-                    )
-                    .await?;
+                    // Remote desktop clients already speak WebSocket over SSH
+                    // stdio, so this boundary must remain byte-transparent.
+                    codex_stdio_to_uds::run(socket_path.as_path()).await?;
                 }
                 Some(AppServerSubcommand::GenerateTs(gen_cli)) => {
                     let options = codex_app_server_protocol::GenerateTsOptions {

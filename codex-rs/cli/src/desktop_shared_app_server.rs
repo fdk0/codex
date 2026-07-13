@@ -47,6 +47,9 @@ pub(crate) async fn run_if_enabled(options: DesktopSharedAppServerOptions<'_>) -
         remote_control_client_name,
     })
     .await?;
+    // The local desktop launches Codex with the JSONL stdio transport, while
+    // the shared daemon exposes a WebSocket control socket. Adapt only here;
+    // the SSH-facing `app-server proxy` must remain a raw byte tunnel.
     codex_app_server_daemon::proxy_app_server_json_lines(
         output.socket_path.as_path(),
         tokio::io::stdin(),
