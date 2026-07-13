@@ -53,15 +53,18 @@ async fn turn_interrupt_aborts_running_turn() -> Result<()> {
     let working_directory = tmp.path().join("workdir");
     std::fs::create_dir(&working_directory)?;
 
-    // Mock server: long-running shell command then (after abort) nothing else needed.
-    let server =
-        create_mock_responses_server_sequence_unchecked(vec![create_shell_command_sse_response(
+    // Mock server: a long-running shell command followed by a normal response
+    // for the first turn started after the interrupt completes.
+    let server = create_mock_responses_server_sequence_unchecked(vec![
+        create_shell_command_sse_response(
             shell_command.clone(),
             Some(&working_directory),
             Some(10_000),
             "call_sleep",
-        )?])
-        .await;
+        )?,
+        create_final_assistant_message_sse_response("recovered")?,
+    ])
+    .await;
     create_config_toml(&codex_home, &server.uri(), "never", "workspace-write")?;
 
     let mut mcp = TestAppServer::builder()
@@ -135,6 +138,41 @@ async fn turn_interrupt_aborts_running_turn() -> Result<()> {
     )?;
     assert_eq!(completed.thread_id, thread_id);
     assert_eq!(completed.turn.status, TurnStatus::Interrupted);
+
+    // A completed interrupt must leave the thread immediately usable. This
+    // catches stale app-server turn bookkeeping that otherwise leaves desktop
+    // clients unable to submit until the app-server is restarted.
+    let next_turn_req = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread_id.clone(),
+            client_user_message_id: None,
+            input: vec![V2UserInput::Text {
+                text: "continue after interrupt".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let next_turn_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(next_turn_req)),
+    )
+    .await??;
+    let TurnStartResponse { turn: next_turn } = to_response::<TurnStartResponse>(next_turn_resp)?;
+
+    let completed_notif: JSONRPCNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    let completed: TurnCompletedNotification = serde_json::from_value(
+        completed_notif
+            .params
+            .expect("turn/completed params must be present"),
+    )?;
+    assert_eq!(completed.thread_id, thread_id);
+    assert_eq!(completed.turn.id, next_turn.id);
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
 
     Ok(())
 }

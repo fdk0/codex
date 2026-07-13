@@ -1264,6 +1264,7 @@ impl ThreadHistoryBuilder {
             if let Some(turn) = self.current_turn.as_mut().filter(|turn| turn.id == turn_id) {
                 let changed_turn = apply_abort(turn);
                 self.record_changed_turn(changed_turn);
+                self.finish_current_turn();
                 return;
             }
 
@@ -1281,6 +1282,7 @@ impl ThreadHistoryBuilder {
         if let Some(turn) = self.current_turn.as_mut() {
             let changed_turn = apply_abort(turn);
             self.record_changed_turn(changed_turn);
+            self.finish_current_turn();
         }
     }
 
@@ -2485,6 +2487,27 @@ mod tests {
                 memory_citation: None,
             }
         );
+    }
+
+    #[test]
+    fn turn_aborted_closes_explicit_active_turn() {
+        let mut builder = ThreadHistoryBuilder::new();
+        builder.handle_event(&EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".into(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        }));
+
+        builder.handle_event(&EventMsg::TurnAborted(TurnAbortedEvent {
+            turn_id: Some("turn-1".into()),
+            reason: TurnAbortReason::Interrupted,
+            completed_at: None,
+            duration_ms: None,
+        }));
+
+        assert!(!builder.has_active_turn());
     }
 
     #[test]

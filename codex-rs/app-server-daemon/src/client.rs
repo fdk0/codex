@@ -271,6 +271,10 @@ mod tests {
                 .send(Message::Text("response".into()))
                 .await
                 .expect("send response");
+            websocket
+                .send(Message::Text("turn-completed".into()))
+                .await
+                .expect("send notification");
             websocket.close(None).await.expect("close websocket");
         });
 
@@ -295,6 +299,16 @@ mod tests {
         .expect("response timeout")
         .expect("read response");
         assert_eq!(response, "response\n");
+
+        let mut notification = String::new();
+        timeout(
+            Duration::from_secs(1),
+            output_reader.read_line(&mut notification),
+        )
+        .await
+        .expect("notification timeout")
+        .expect("read notification");
+        assert_eq!(notification, "turn-completed\n");
 
         server_task.await.expect("server task");
         proxy_task.await.expect("proxy task").expect("proxy result");
