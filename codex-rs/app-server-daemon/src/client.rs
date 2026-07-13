@@ -1,4 +1,7 @@
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -20,6 +23,7 @@ use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::client_async;
@@ -83,31 +87,43 @@ where
     W: AsyncWrite + Unpin,
 {
     let websocket = connect(socket_path).await?;
-    let (mut websocket_writer, mut websocket_reader) = websocket.split();
-    let mut input_lines = BufReader::new(input).lines();
-    let mut input_open = true;
+    let (websocket_writer, mut websocket_reader) = websocket.split();
+    let websocket_writer = Arc::new(Mutex::new(websocket_writer));
+    let input_open = Arc::new(AtomicBool::new(true));
 
-    loop {
-        tokio::select! {
-            input_line = input_lines.next_line(), if input_open => {
-                match input_line.context("failed to read app-server proxy input")? {
-                    Some(input_line) => websocket_writer
-                        .send(Message::Text(input_line.into()))
-                        .await
-                        .context("failed to send app-server proxy request")?,
-                    None => {
-                        input_open = false;
-                        websocket_writer
-                            .close()
-                            .await
-                            .context("failed to close app-server proxy websocket")?;
-                    }
-                }
+    let input_to_websocket = {
+        let websocket_writer = Arc::clone(&websocket_writer);
+        let input_open = Arc::clone(&input_open);
+        async move {
+            let mut input_lines = BufReader::new(input).lines();
+            while let Some(input_line) = input_lines
+                .next_line()
+                .await
+                .context("failed to read app-server proxy input")?
+            {
+                websocket_writer
+                    .lock()
+                    .await
+                    .send(Message::Text(input_line.into()))
+                    .await
+                    .context("failed to send app-server proxy request")?;
             }
-            websocket_frame = websocket_reader.next() => {
-                let Some(websocket_frame) = websocket_frame else {
-                    break;
-                };
+
+            let mut websocket_writer = websocket_writer.lock().await;
+            input_open.store(false, Ordering::Release);
+            websocket_writer
+                .close()
+                .await
+                .context("failed to close app-server proxy websocket")?;
+            Ok::<(), anyhow::Error>(())
+        }
+    };
+
+    let websocket_to_output = {
+        let websocket_writer = Arc::clone(&websocket_writer);
+        let input_open = Arc::clone(&input_open);
+        async move {
+            while let Some(websocket_frame) = websocket_reader.next().await {
                 match websocket_frame.context("failed to read app-server proxy response")? {
                     Message::Text(payload) => {
                         output
@@ -123,25 +139,37 @@ where
                             .await
                             .context("failed to flush app-server proxy response")?;
                     }
-                    Message::Ping(payload) if input_open => websocket_writer
-                        .send(Message::Pong(payload))
-                        .await
-                        .context("failed to answer app-server proxy ping")?,
+                    Message::Ping(payload) => {
+                        let mut websocket_writer = websocket_writer.lock().await;
+                        if input_open.load(Ordering::Acquire) {
+                            websocket_writer
+                                .send(Message::Pong(payload))
+                                .await
+                                .context("failed to answer app-server proxy ping")?;
+                        }
+                    }
                     Message::Close(_) => break,
-                    Message::Binary(_)
-                    | Message::Ping(_)
-                    | Message::Pong(_)
-                    | Message::Frame(_) => {}
+                    Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
                 }
             }
+
+            output
+                .flush()
+                .await
+                .context("failed to flush app-server proxy output")?;
+            Ok::<(), anyhow::Error>(())
+        }
+    };
+
+    tokio::pin!(input_to_websocket);
+    tokio::pin!(websocket_to_output);
+    tokio::select! {
+        output_result = &mut websocket_to_output => output_result,
+        input_result = &mut input_to_websocket => {
+            input_result?;
+            websocket_to_output.await
         }
     }
-
-    output
-        .flush()
-        .await
-        .context("failed to flush app-server proxy output")?;
-    Ok(())
 }
 
 pub(crate) async fn initialize<S>(
@@ -233,14 +261,22 @@ fn parse_version_from_user_agent(user_agent: &str) -> Result<String> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use std::future::Future;
+    use std::io;
+    use std::pin::Pin;
+    use std::task::Context;
+    use std::task::Poll;
+
     use codex_uds::UnixListener;
     use futures::SinkExt;
     use futures::StreamExt;
     use pretty_assertions::assert_eq;
     use tokio::io::AsyncBufReadExt;
+    use tokio::io::AsyncWrite;
     use tokio::io::AsyncWriteExt;
     use tokio::io::BufReader;
     use tokio::io::duplex;
+    use tokio::sync::oneshot;
     use tokio::time::Duration;
     use tokio::time::timeout;
     use tokio_tungstenite::accept_async;
@@ -248,6 +284,53 @@ mod tests {
 
     use super::parse_version_from_user_agent;
     use super::proxy_json_lines;
+
+    struct BlockingWriter {
+        blocked_tx: Option<oneshot::Sender<()>>,
+        release_rx: oneshot::Receiver<()>,
+        released: bool,
+    }
+
+    impl BlockingWriter {
+        fn poll_release(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            if self.released {
+                return Poll::Ready(Ok(()));
+            }
+
+            match Pin::new(&mut self.release_rx).poll(cx) {
+                Poll::Ready(_) => {
+                    self.released = true;
+                    Poll::Ready(Ok(()))
+                }
+                Poll::Pending => Poll::Pending,
+            }
+        }
+    }
+
+    impl AsyncWrite for BlockingWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if let Some(blocked_tx) = self.blocked_tx.take() {
+                let _ = blocked_tx.send(());
+            }
+            match self.poll_release(cx) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(buffer.len())),
+                Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                Poll::Pending => Poll::Pending,
+            }
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.poll_release(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.poll_release(cx)
+        }
+    }
 
     #[tokio::test]
     async fn proxy_upgrades_control_socket_and_relays_json_lines() {
@@ -309,6 +392,76 @@ mod tests {
         .expect("notification timeout")
         .expect("read notification");
         assert_eq!(notification, "turn-completed\n");
+
+        server_task.await.expect("server task");
+        proxy_task.await.expect("proxy task").expect("proxy result");
+    }
+
+    #[tokio::test]
+    async fn proxy_forwards_input_while_output_is_backpressured() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let socket_path = temp_dir.path().join("app-server.sock");
+        let mut listener = UnixListener::bind(&socket_path)
+            .await
+            .expect("bind control socket");
+        let (second_request_tx, second_request_rx) = oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let stream = listener.accept().await.expect("accept proxy");
+            let mut websocket = accept_async(stream).await.expect("upgrade proxy");
+            assert_eq!(
+                websocket
+                    .next()
+                    .await
+                    .expect("first request frame")
+                    .expect("first request"),
+                Message::Text("first-request".into())
+            );
+            websocket
+                .send(Message::Text("blocked-response".into()))
+                .await
+                .expect("send response");
+            assert_eq!(
+                timeout(Duration::from_secs(1), websocket.next())
+                    .await
+                    .expect("second request timeout")
+                    .expect("second request frame")
+                    .expect("second request"),
+                Message::Text("second-request".into())
+            );
+            let _ = second_request_tx.send(());
+            websocket.close(None).await.expect("close websocket");
+        });
+
+        let (mut input_writer, input_reader) = duplex(1024);
+        let (blocked_tx, blocked_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let output_writer = BlockingWriter {
+            blocked_tx: Some(blocked_tx),
+            release_rx,
+            released: false,
+        };
+        let proxy_socket_path = socket_path.clone();
+        let proxy_task = tokio::spawn(async move {
+            proxy_json_lines(&proxy_socket_path, input_reader, output_writer).await
+        });
+
+        input_writer
+            .write_all(b"first-request\n")
+            .await
+            .expect("write first request");
+        timeout(Duration::from_secs(1), blocked_rx)
+            .await
+            .expect("output backpressure timeout")
+            .expect("output writer dropped");
+        input_writer
+            .write_all(b"second-request\n")
+            .await
+            .expect("write second request");
+        timeout(Duration::from_secs(1), second_request_rx)
+            .await
+            .expect("input forwarding timeout")
+            .expect("server task dropped");
+        release_tx.send(()).expect("release output writer");
 
         server_task.await.expect("server task");
         proxy_task.await.expect("proxy task").expect("proxy result");
