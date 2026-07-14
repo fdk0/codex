@@ -23,8 +23,9 @@ use tokio::io::BufReader;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::client_async;
+use tokio_tungstenite::client_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 pub(crate) const CONTROL_SOCKET_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const CLIENT_NAME: &str = "codex_app_server_daemon";
@@ -66,12 +67,20 @@ async fn probe_inner(socket_path: &Path) -> Result<ProbeInfo> {
 }
 
 pub(crate) async fn connect(socket_path: &Path) -> Result<WebSocketStream<UnixStream>> {
+    connect_with_config(socket_path, WebSocketConfig::default()).await
+}
+
+async fn connect_with_config(
+    socket_path: &Path,
+    websocket_config: WebSocketConfig,
+) -> Result<WebSocketStream<UnixStream>> {
     let stream = UnixStream::connect(socket_path)
         .await
         .with_context(|| format!("failed to connect to {}", socket_path.display()))?;
-    let (websocket, _response) = client_async("ws://localhost/", stream)
-        .await
-        .with_context(|| format!("failed to upgrade {}", socket_path.display()))?;
+    let (websocket, _response) =
+        client_async_with_config("ws://localhost/", stream, Some(websocket_config))
+            .await
+            .with_context(|| format!("failed to upgrade {}", socket_path.display()))?;
     Ok(websocket)
 }
 
@@ -84,7 +93,15 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let websocket = connect(socket_path).await?;
+    // This trusted local bridge replaces the app-server's upstream stdio transport, which does
+    // not impose WebSocket frame or message limits. Keep the adapter byte-transparent as well.
+    let websocket = connect_with_config(
+        socket_path,
+        WebSocketConfig::default()
+            .max_message_size(None)
+            .max_frame_size(None),
+    )
+    .await?;
     let (mut websocket_writer, mut websocket_reader) = websocket.split();
     let (pong_tx, mut pong_rx) = mpsc::channel(PONG_CHANNEL_CAPACITY);
 
@@ -262,6 +279,7 @@ mod tests {
     use futures::StreamExt;
     use pretty_assertions::assert_eq;
     use tokio::io::AsyncBufReadExt;
+    use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWrite;
     use tokio::io::AsyncWriteExt;
     use tokio::io::BufReader;
@@ -394,6 +412,50 @@ mod tests {
         .expect("notification timeout")
         .expect("read notification");
         assert_eq!(notification, "turn-completed\n");
+
+        server_task.await.expect("server task");
+        proxy_task.await.expect("proxy task").expect("proxy result");
+    }
+
+    #[tokio::test]
+    async fn proxy_relays_response_larger_than_default_websocket_frame_limit() {
+        const DEFAULT_MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let socket_path = temp_dir.path().join("app-server.sock");
+        let mut listener = UnixListener::bind(&socket_path)
+            .await
+            .expect("bind control socket");
+        let response = "x".repeat(DEFAULT_MAX_FRAME_SIZE + 1);
+        let server_response = response.clone();
+        let server_task = tokio::spawn(async move {
+            let stream = listener.accept().await.expect("accept proxy");
+            let mut websocket = accept_async(stream).await.expect("upgrade proxy");
+            websocket
+                .send(Message::Text(server_response.into()))
+                .await
+                .expect("send oversized response");
+            websocket.close(None).await.expect("close websocket");
+        });
+
+        let (_input_writer, input_reader) = duplex(64 * 1024);
+        let (output_writer, mut output_reader) = duplex(64 * 1024);
+        let proxy_socket_path = socket_path.clone();
+        let proxy_task = tokio::spawn(async move {
+            proxy_json_lines(&proxy_socket_path, input_reader, output_writer).await
+        });
+
+        let mut output = Vec::new();
+        timeout(
+            Duration::from_secs(10),
+            output_reader.read_to_end(&mut output),
+        )
+        .await
+        .expect("oversized response timeout")
+        .expect("read oversized response");
+        let mut expected = response.into_bytes();
+        expected.push(b'\n');
+        assert_eq!(output, expected);
 
         server_task.await.expect("server task");
         proxy_task.await.expect("proxy task").expect("proxy result");
