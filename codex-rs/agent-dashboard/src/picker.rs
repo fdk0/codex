@@ -259,20 +259,30 @@ mod tests {
     use codex_app_server_protocol::SessionSource;
     use std::path::PathBuf;
 
-    fn thread(id: &str, updated_at: i64, parent_thread_id: Option<&str>) -> Thread {
+    fn thread(
+        id: &str,
+        session_id: &str,
+        updated_at: i64,
+        parent_thread_id: Option<&str>,
+    ) -> Thread {
         Thread {
             id: id.to_string(),
+            extra: None,
+            session_id: session_id.to_string(),
             forked_from_id: None,
             preview: format!("{id} preview"),
             ephemeral: false,
+            history_mode: Default::default(),
             model_provider: "mock".to_string(),
             created_at: 0,
             updated_at,
+            recency_at: Some(updated_at),
             status: ThreadStatus::Idle,
             path: None,
             cwd: PathBuf::from(format!("/tmp/{id}")).try_into().unwrap(),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Exec,
+            thread_source: None,
             parent_thread_id: parent_thread_id.map(str::to_string),
             agent_nickname: None,
             agent_role: None,
@@ -285,9 +295,9 @@ mod tests {
     #[test]
     fn picker_filters_to_root_threads_and_sorts_by_updated_at() {
         let state = SessionPickerState::from_threads(vec![
-            thread("older-root", 1, None),
-            thread("child", 99, Some("parent")),
-            thread("newer-root", 5, None),
+            thread("older-root", "older-root", 1, None),
+            thread("child", "parent", 99, Some("parent")),
+            thread("newer-root", "newer-root", 5, None),
         ])
         .expect("picker state");
 
@@ -299,8 +309,8 @@ mod tests {
     #[test]
     fn picker_selection_stays_in_bounds() {
         let mut state = SessionPickerState::from_threads(vec![
-            thread("root-a", 1, None),
-            thread("root-b", 2, None),
+            thread("root-a", "root-a", 1, None),
+            thread("root-b", "root-b", 2, None),
         ])
         .expect("picker state");
 
@@ -313,7 +323,7 @@ mod tests {
 
     #[test]
     fn picker_uses_cwd_basename_as_project_name() {
-        let state = SessionPickerState::from_threads(vec![thread("root-a", 1, None)])
+        let state = SessionPickerState::from_threads(vec![thread("root-a", "root-a", 1, None)])
             .expect("picker state");
 
         assert_eq!(state.choices[0].project_name, "root-a");

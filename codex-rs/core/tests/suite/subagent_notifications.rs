@@ -17,6 +17,7 @@ use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::ev_tool_search_call;
@@ -50,7 +51,6 @@ use wiremock::MockServer;
 
 const SPAWN_CALL_ID: &str = "spawn-call-1";
 const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
-const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 const TURN_0_FORK_PROMPT: &str = "seed fork context";
 const TURN_1_PROMPT: &str = "spawn a child and continue";
 const TURN_2_NO_WAIT_PROMPT: &str = "follow up without wait";
@@ -420,7 +420,7 @@ async fn setup_turn_one_with_spawned_child(
 ) -> Result<(TestCodex, String)> {
     let (test, spawned_id, _child_request_log) = setup_turn_one_with_custom_spawned_child(
         server,
-        MULTI_AGENT_V1_NAMESPACE,
+        SpawnToolSurface::MultiAgentV1,
         json!({
             "message": CHILD_PROMPT,
         }),
@@ -432,9 +432,15 @@ async fn setup_turn_one_with_spawned_child(
     Ok((test, spawned_id))
 }
 
+#[derive(Clone, Copy)]
+enum SpawnToolSurface {
+    MultiAgentV1,
+    MultiAgentV2,
+}
+
 async fn setup_turn_one_with_custom_spawned_child(
     server: &MockServer,
-    spawn_namespace: &'static str,
+    spawn_tool_surface: SpawnToolSurface,
     spawn_args: serde_json::Value,
     child_response_delay: Option<Duration>,
     parent_rollout_needle: Option<&str>,
@@ -448,17 +454,23 @@ async fn setup_turn_one_with_custom_spawned_child(
 )> {
     let spawn_args = serde_json::to_string(&spawn_args)?;
 
+    let spawn_call = match spawn_tool_surface {
+        SpawnToolSurface::MultiAgentV1 => ev_function_call_with_namespace(
+            SPAWN_CALL_ID,
+            MULTI_AGENT_V1_NAMESPACE,
+            "spawn_agent",
+            &spawn_args,
+        ),
+        SpawnToolSurface::MultiAgentV2 => {
+            ev_function_call(SPAWN_CALL_ID, "spawn_agent", &spawn_args)
+        }
+    };
     mount_sse_once_match(
         server,
         |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
         sse(vec![
             ev_response_created("resp-turn1-1"),
-            ev_function_call_with_namespace(
-                SPAWN_CALL_ID,
-                spawn_namespace,
-                "spawn_agent",
-                &spawn_args,
-            ),
+            spawn_call,
             ev_completed("resp-turn1-1"),
         ]),
     )
@@ -530,7 +542,7 @@ async fn spawn_child_and_capture_snapshot(
 ) -> Result<ThreadConfigSnapshot> {
     let (test, spawned_id, _child_request_log) = setup_turn_one_with_custom_spawned_child(
         server,
-        MULTI_AGENT_V1_NAMESPACE,
+        SpawnToolSurface::MultiAgentV1,
         spawn_args,
         /*child_response_delay*/ None,
         None,
@@ -923,7 +935,7 @@ async fn wake_enabled_child_triggers_parent_turn_without_wait() -> Result<()> {
 
     let (_test, _spawned_id, _child_response) = setup_turn_one_with_custom_spawned_child(
         &server,
-        MULTI_AGENT_V1_NAMESPACE,
+        SpawnToolSurface::MultiAgentV1,
         json!({
             "message": CHILD_PROMPT,
             "wake_parent_on_completion": true,
@@ -959,7 +971,7 @@ async fn wake_enabled_multi_agent_v2_child_triggers_single_parent_turn_without_w
 
     let (_test, _spawned_id, _child_response) = setup_turn_one_with_custom_spawned_child(
         &server,
-        MULTI_AGENT_V2_NAMESPACE,
+        SpawnToolSurface::MultiAgentV2,
         json!({
             "task_name": "worker_1",
             "message": CHILD_PROMPT,
@@ -1202,12 +1214,7 @@ async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
         |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
         sse(vec![
             ev_response_created("resp-parent-1"),
-            ev_function_call_with_namespace(
-                SPAWN_CALL_ID,
-                MULTI_AGENT_V2_NAMESPACE,
-                "spawn_agent",
-                &spawn_args,
-            ),
+            ev_function_call(SPAWN_CALL_ID, "spawn_agent", &spawn_args),
             ev_completed("resp-parent-1"),
         ]),
     )
@@ -1345,12 +1352,7 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
         |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
         sse(vec![
             ev_response_created("resp-parent-1"),
-            ev_function_call_with_namespace(
-                SPAWN_CALL_ID,
-                MULTI_AGENT_V2_NAMESPACE,
-                "spawn_agent",
-                &spawn_args,
-            ),
+            ev_function_call(SPAWN_CALL_ID, "spawn_agent", &spawn_args),
             ev_completed("resp-parent-1"),
         ]),
     )
@@ -1404,12 +1406,7 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
         },
         sse(vec![
             ev_response_created("resp-parent-3"),
-            ev_function_call_with_namespace(
-                "wait-agent-call",
-                MULTI_AGENT_V2_NAMESPACE,
-                "wait_agent",
-                "{}",
-            ),
+            ev_function_call("wait-agent-call", "wait_agent", "{}"),
             ev_completed("resp-parent-3"),
         ]),
     )

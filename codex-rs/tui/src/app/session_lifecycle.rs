@@ -397,7 +397,7 @@ impl App {
         let previous_thread_id = self.active_thread_id;
         self.store_active_thread_receiver().await;
         self.active_thread_id = None;
-        let Some((receiver, mut snapshot)) = self.activate_thread_for_replay(thread_id).await
+        let Some((mut receiver, mut snapshot)) = self.activate_thread_for_replay(thread_id).await
         else {
             self.chat_widget
                 .add_error_message(format!("Agent thread {thread_id} is already active."));
@@ -412,6 +412,7 @@ impl App {
             thread_id,
             is_replay_only,
             &mut snapshot,
+            &mut receiver,
         )
         .await;
 

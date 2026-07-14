@@ -1,7 +1,4 @@
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -23,7 +20,7 @@ use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
-use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::client_async;
@@ -32,6 +29,7 @@ use tokio_tungstenite::tungstenite::Message;
 pub(crate) const CONTROL_SOCKET_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const CLIENT_NAME: &str = "codex_app_server_daemon";
 const INITIALIZE_REQUEST_ID: RequestId = RequestId::Integer(1);
+const PONG_CHANNEL_CAPACITY: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProbeInfo {
@@ -87,78 +85,70 @@ where
     W: AsyncWrite + Unpin,
 {
     let websocket = connect(socket_path).await?;
-    let (websocket_writer, mut websocket_reader) = websocket.split();
-    let websocket_writer = Arc::new(Mutex::new(websocket_writer));
-    let input_open = Arc::new(AtomicBool::new(true));
+    let (mut websocket_writer, mut websocket_reader) = websocket.split();
+    let (pong_tx, mut pong_rx) = mpsc::channel(PONG_CHANNEL_CAPACITY);
 
-    let input_to_websocket = {
-        let websocket_writer = Arc::clone(&websocket_writer);
-        let input_open = Arc::clone(&input_open);
-        async move {
-            let mut input_lines = BufReader::new(input).lines();
-            while let Some(input_line) = input_lines
-                .next_line()
-                .await
-                .context("failed to read app-server proxy input")?
-            {
-                websocket_writer
-                    .lock()
-                    .await
-                    .send(Message::Text(input_line.into()))
-                    .await
-                    .context("failed to send app-server proxy request")?;
+    let input_to_websocket = async move {
+        let mut input_lines = BufReader::new(input).lines();
+        loop {
+            tokio::select! {
+                input_line = input_lines.next_line() => {
+                    let Some(input_line) = input_line
+                        .context("failed to read app-server proxy input")?
+                    else {
+                        websocket_writer
+                            .close()
+                            .await
+                            .context("failed to close app-server proxy websocket")?;
+                        return Ok::<(), anyhow::Error>(());
+                    };
+                    websocket_writer
+                        .send(Message::Text(input_line.into()))
+                        .await
+                        .context("failed to send app-server proxy request")?;
+                }
+                Some(payload) = pong_rx.recv() => {
+                    websocket_writer
+                        .send(Message::Pong(payload))
+                        .await
+                        .context("failed to answer app-server proxy ping")?;
+                }
             }
-
-            let mut websocket_writer = websocket_writer.lock().await;
-            input_open.store(false, Ordering::Release);
-            websocket_writer
-                .close()
-                .await
-                .context("failed to close app-server proxy websocket")?;
-            Ok::<(), anyhow::Error>(())
         }
     };
 
-    let websocket_to_output = {
-        let websocket_writer = Arc::clone(&websocket_writer);
-        let input_open = Arc::clone(&input_open);
-        async move {
-            while let Some(websocket_frame) = websocket_reader.next().await {
-                match websocket_frame.context("failed to read app-server proxy response")? {
-                    Message::Text(payload) => {
-                        output
-                            .write_all(payload.as_bytes())
-                            .await
-                            .context("failed to write app-server proxy response")?;
-                        output
-                            .write_all(b"\n")
-                            .await
-                            .context("failed to terminate app-server proxy response")?;
-                        output
-                            .flush()
-                            .await
-                            .context("failed to flush app-server proxy response")?;
-                    }
-                    Message::Ping(payload) => {
-                        let mut websocket_writer = websocket_writer.lock().await;
-                        if input_open.load(Ordering::Acquire) {
-                            websocket_writer
-                                .send(Message::Pong(payload))
-                                .await
-                                .context("failed to answer app-server proxy ping")?;
-                        }
-                    }
-                    Message::Close(_) => break,
-                    Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
+    let websocket_to_output = async move {
+        while let Some(websocket_frame) = websocket_reader.next().await {
+            match websocket_frame.context("failed to read app-server proxy response")? {
+                Message::Text(payload) => {
+                    output
+                        .write_all(payload.as_bytes())
+                        .await
+                        .context("failed to write app-server proxy response")?;
+                    output
+                        .write_all(b"\n")
+                        .await
+                        .context("failed to terminate app-server proxy response")?;
+                    output
+                        .flush()
+                        .await
+                        .context("failed to flush app-server proxy response")?;
                 }
+                Message::Ping(payload) => {
+                    if pong_tx.send(payload).await.is_err() {
+                        break;
+                    }
+                }
+                Message::Close(_) => break,
+                Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
             }
-
-            output
-                .flush()
-                .await
-                .context("failed to flush app-server proxy output")?;
-            Ok::<(), anyhow::Error>(())
         }
+
+        output
+            .flush()
+            .await
+            .context("failed to flush app-server proxy output")?;
+        Ok::<(), anyhow::Error>(())
     };
 
     tokio::pin!(input_to_websocket);
@@ -354,6 +344,18 @@ mod tests {
                 .send(Message::Text("response".into()))
                 .await
                 .expect("send response");
+            websocket
+                .send(Message::Ping("health-check".as_bytes().to_vec().into()))
+                .await
+                .expect("send ping");
+            assert_eq!(
+                timeout(Duration::from_secs(1), websocket.next())
+                    .await
+                    .expect("pong timeout")
+                    .expect("pong frame")
+                    .expect("pong"),
+                Message::Pong("health-check".as_bytes().to_vec().into())
+            );
             websocket
                 .send(Message::Text("turn-completed".into()))
                 .await

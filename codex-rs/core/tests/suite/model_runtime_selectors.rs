@@ -37,7 +37,15 @@ use tokio::time::sleep;
 const CHILD_MODEL: &str = "test-multi-agent-child";
 const ROOT_MODEL: &str = "test-multi-agent-root";
 const ROOT_PROMPT: &str = "spawn a child";
-const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+const MULTI_AGENT_V2_TOOL_NAMES: [&str; 7] = [
+    "spawn_agent",
+    "send_message",
+    "followup_task",
+    "wait_agent",
+    "interrupt_agent",
+    "list_agents",
+    "close_agent",
+];
 const UNSUPPORTED_CODE_MODE_WARNING: &str = "does not advertise Code Mode support";
 
 struct RemoteModelResponse {
@@ -338,7 +346,17 @@ async fn remote_multi_agent_selector_overrides_feature_flags() -> Result<()> {
             .expect("test config should allow feature update");
     })
     .await?;
-    assert!(tool_names(&v2_body).contains(&MULTI_AGENT_V2_NAMESPACE.to_string()));
+    let v2_tools = tool_names(&v2_body);
+    assert!(
+        MULTI_AGENT_V2_TOOL_NAMES
+            .iter()
+            .all(|tool_name| v2_tools.iter().any(|name| name.as_str() == *tool_name)),
+        "V2 should expose all current plain multi-agent tools: {v2_tools:?}"
+    );
+    assert!(
+        v2_tools.iter().all(|name| name != "collaboration"),
+        "V2 custom tools must stay out of the reserved collaboration namespace: {v2_tools:?}"
+    );
 
     let mut disabled_model = remote_model("test-multi-agent-disabled");
     disabled_model.multi_agent_version = Some(MultiAgentVersion::Disabled);
@@ -350,15 +368,11 @@ async fn remote_multi_agent_selector_overrides_feature_flags() -> Result<()> {
     })
     .await?;
     let disabled_tools = tool_names(&disabled_body);
-    assert!(disabled_tools.iter().all(|name| !matches!(
-        name.as_str(),
-        "multi_agent_v1"
-            | MULTI_AGENT_V2_NAMESPACE
-            | "spawn_agent"
-            | "send_message"
-            | "wait_agent"
-            | "list_agents"
-    )));
+    assert!(disabled_tools.iter().all(|name| {
+        name != "multi_agent_v1"
+            && name != "collaboration"
+            && !MULTI_AGENT_V2_TOOL_NAMES.contains(&name.as_str())
+    }));
 
     Ok(())
 }
@@ -430,19 +444,24 @@ async fn remote_multi_agent_selector_uses_model_selected_before_first_turn() -> 
     })
     .await;
 
+    let selected_tools = tool_names(
+        &response_mock
+            .last_request()
+            .expect("expected response request")
+            .body_json(),
+    );
     assert_eq!(
         (
             models_mock.requests().len(),
             test.codex.multi_agent_version(),
-            tool_names(
-                &response_mock
-                    .last_request()
-                    .expect("expected response request")
-                    .body_json(),
-            )
-            .contains(&MULTI_AGENT_V2_NAMESPACE.to_string()),
+            MULTI_AGENT_V2_TOOL_NAMES.iter().all(|tool_name| {
+                selected_tools
+                    .iter()
+                    .any(|name| name.as_str() == *tool_name)
+            }),
+            selected_tools.iter().any(|name| name == "collaboration"),
         ),
-        (1, Some(MultiAgentVersion::V2), true)
+        (1, Some(MultiAgentVersion::V2), true, false)
     );
 
     Ok(())

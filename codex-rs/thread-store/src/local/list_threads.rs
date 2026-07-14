@@ -423,7 +423,7 @@ mod tests {
                 cwd_filters: None,
                 archived: false,
                 search_term: None,
-                parent_thread_id: Some(parent_id),
+                relation_filter: Some(ThreadRelationFilter::DescendantsOf(parent_id)),
                 use_state_db_only: false,
             })
             .await
@@ -439,7 +439,7 @@ mod tests {
                 cwd_filters: None,
                 archived: false,
                 search_term: None,
-                parent_thread_id: Some(parent_id),
+                relation_filter: Some(ThreadRelationFilter::DescendantsOf(parent_id)),
                 use_state_db_only: false,
             })
             .await
@@ -453,12 +453,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ids, vec![grandchild_id, child_id]);
         assert_eq!(second_page.next_cursor, None);
-        assert!(
+        assert_eq!(
             first_page
                 .items
                 .iter()
                 .chain(&second_page.items)
-                .all(|thread| thread.parent_thread_id == Some(parent_id))
+                .map(|thread| (thread.thread_id, thread.parent_thread_id))
+                .collect::<Vec<_>>(),
+            vec![(grandchild_id, Some(child_id)), (child_id, Some(parent_id)),]
         );
         let all_ids = store
             .list_threads(ListThreadsParams {
@@ -471,7 +473,7 @@ mod tests {
                 cwd_filters: None,
                 archived: false,
                 search_term: None,
-                parent_thread_id: Some(parent_id),
+                relation_filter: Some(ThreadRelationFilter::DescendantsOf(parent_id)),
                 use_state_db_only: false,
             })
             .await

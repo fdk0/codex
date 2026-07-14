@@ -10,6 +10,7 @@ use codex_app_server_client::AppServerEvent;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::RemoteAppServerClient;
 use codex_app_server_client::RemoteAppServerConnectArgs;
+use codex_app_server_client::RemoteAppServerEndpoint;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
@@ -39,11 +40,14 @@ pub(crate) struct DashboardClient {
 impl DashboardClient {
     pub(crate) async fn connect(websocket_url: String) -> Result<Self> {
         let remote = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
-            websocket_url,
-            auth_token: None,
+            endpoint: RemoteAppServerEndpoint::WebSocket {
+                websocket_url,
+                auth_token: None,
+            },
             client_name: "codex-agent-dashboard".to_string(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             experimental_api: false,
+            mcp_server_openai_form_elicitation: false,
             opt_out_notification_methods: Vec::new(),
             channel_capacity: 512,
         })

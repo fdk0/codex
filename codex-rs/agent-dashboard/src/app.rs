@@ -435,20 +435,30 @@ mod tests {
     use codex_app_server_protocol::ThreadStatus;
     use std::path::PathBuf;
 
-    fn thread(id: &str, parent_thread_id: Option<&str>, status: ThreadStatus) -> Thread {
+    fn thread(
+        id: &str,
+        session_id: &str,
+        parent_thread_id: Option<&str>,
+        status: ThreadStatus,
+    ) -> Thread {
         Thread {
             id: id.to_string(),
+            extra: None,
+            session_id: session_id.to_string(),
             forked_from_id: None,
             preview: format!("{id} preview"),
             ephemeral: false,
+            history_mode: Default::default(),
             model_provider: "mock".to_string(),
             created_at: 0,
             updated_at: 1,
+            recency_at: Some(1),
             status,
             path: None,
             cwd: PathBuf::from("/tmp").try_into().unwrap(),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Exec,
+            thread_source: None,
             parent_thread_id: parent_thread_id.map(str::to_string),
             agent_nickname: Some(format!("{id}-nick")),
             agent_role: Some("explorer".to_string()),
@@ -462,6 +472,7 @@ mod tests {
     fn apply_live_delta_updates_parent_preview() {
         let mut app = DashboardApp::new("parent".to_string());
         app.apply_refresh(vec![thread(
+            "parent",
             "parent",
             None,
             ThreadStatus::Active {
@@ -488,6 +499,7 @@ mod tests {
         let mut app = DashboardApp::new("parent".to_string());
         app.apply_refresh(vec![thread(
             "parent",
+            "parent",
             None,
             ThreadStatus::Active {
                 active_flags: vec![ThreadActiveFlag::WaitingOnUserInput],
@@ -496,6 +508,7 @@ mod tests {
         app.apply_live_delta("parent", "live update".to_string(), PreviewSource::Plan);
 
         app.apply_refresh(vec![thread(
+            "parent",
             "parent",
             None,
             ThreadStatus::Active {

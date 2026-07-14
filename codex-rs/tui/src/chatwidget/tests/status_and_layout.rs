@@ -3890,7 +3890,7 @@ async fn long_hook_context_is_truncated_with_transcript_hint_snapshot() {
             vec![
                 codex_app_server_protocol::HookOutputEntry {
                     kind: codex_app_server_protocol::HookOutputEntryKind::Context,
-                    text: "This hook context is intentionally long enough to wrap across several terminal rows while keeping the complete value available in the transcript overlay. The main conversation should stay compact even when a hook injects a large block of instructions for the model."
+                    text: "This hook context is intentionally long enough to wrap across several terminal rows while keeping the complete value available in the transcript overlay. The main conversation should stay compact even when a hook injects a large block of instructions for the model. Extra context keeps this fixture beyond the display-row cap so the truncation hint remains covered as wrapping behavior evolves."
                         .to_string(),
                 },
                 codex_app_server_protocol::HookOutputEntry {

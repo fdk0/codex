@@ -90,10 +90,15 @@ impl App {
         thread_id: ThreadId,
     ) -> Option<(mpsc::Receiver<ThreadBufferedEvent>, ThreadEventSnapshot)> {
         let channel = self.thread_event_channels.get_mut(&thread_id)?;
-        let receiver = channel.receiver.take()?;
+        let previous_receiver = channel.receiver.take()?;
         let mut store = channel.store.lock().await;
         store.active = true;
         let snapshot = store.snapshot();
+        let capacity = store.capacity;
+        drop(store);
+        drop(previous_receiver);
+        let (sender, receiver) = mpsc::channel(capacity);
+        channel.sender = sender;
         Some((receiver, snapshot))
     }
 
@@ -1215,6 +1220,7 @@ impl App {
         thread_id: ThreadId,
         is_replay_only: bool,
         snapshot: &mut ThreadEventSnapshot,
+        receiver: &mut mpsc::Receiver<ThreadBufferedEvent>,
     ) {
         if !self.should_refresh_snapshot_session(thread_id, is_replay_only, snapshot) {
             return;
@@ -1226,7 +1232,9 @@ impl App {
         {
             Ok(started) => {
                 self.apply_refreshed_snapshot_thread(thread_id, started, snapshot)
-                    .await
+                    .await;
+                self.reconcile_refreshed_snapshot_receiver(thread_id, snapshot, receiver)
+                    .await;
             }
             Err(err) => {
                 tracing::warn!(
@@ -1261,13 +1269,39 @@ impl App {
         if let Some(channel) = self.thread_event_channels.get(&thread_id) {
             let mut store = channel.store.lock().await;
             store.set_session(session.clone(), turns.clone());
-            store.rebase_buffer_after_session_refresh();
+            store.rebase_buffer_after_session_refresh(&turns);
         }
         snapshot.session = Some(session);
         snapshot.turns = turns;
-        snapshot
-            .events
-            .retain(ThreadEventStore::event_survives_session_refresh);
+        snapshot.events.retain(|event| {
+            ThreadEventStore::event_survives_session_refresh(event, &snapshot.turns)
+        });
+    }
+
+    /// Reestablishes the store-to-live-receiver handoff after a session refresh.
+    ///
+    /// Every routed event is recorded in the store before it is copied into the live receiver.
+    /// Refreshing the snapshot from that authoritative store and rotating the channel therefore
+    /// preserves events that arrived after the first snapshot while preventing their old delivery
+    /// copies from being rendered again after the refreshed turns are replayed.
+    pub(super) async fn reconcile_refreshed_snapshot_receiver(
+        &mut self,
+        thread_id: ThreadId,
+        snapshot: &mut ThreadEventSnapshot,
+        receiver: &mut mpsc::Receiver<ThreadBufferedEvent>,
+    ) {
+        let Some(channel) = self.thread_event_channels.get_mut(&thread_id) else {
+            return;
+        };
+        let mut store = channel.store.lock().await;
+        let refreshed_turns = store.turns.clone();
+        store.rebase_buffer_after_session_refresh(&refreshed_turns);
+        *snapshot = store.snapshot();
+        let capacity = store.capacity;
+        drop(store);
+        let (sender, refreshed_receiver) = mpsc::channel(capacity);
+        channel.sender = sender;
+        *receiver = refreshed_receiver;
     }
 
     /// Opens the `/agent` picker after refreshing cached labels for known threads.

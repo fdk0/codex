@@ -110,7 +110,7 @@ impl Handler {
             )
             .await;
 
-        let (timed_out, statuses_by_id) = if receiver_thread_ids.is_empty() {
+        let (outcome, statuses_by_id) = if receiver_thread_ids.is_empty() {
             let turn_state = session
                 .input_queue
                 .turn_state_for_sub_id(&session.active_turn, &turn.sub_id)
@@ -120,8 +120,8 @@ impl Handler {
                 .subscribe_activity(turn_state.as_deref())
                 .await;
             let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-            let timed_out = !wait_for_activity(&mut activity_rx, pending_activity, deadline).await;
-            (timed_out, HashMap::new())
+            let outcome = wait_for_activity(&mut activity_rx, pending_activity, deadline).await;
+            (outcome, HashMap::new())
         } else {
             let mut wake_enabled_children = session
                 .services
@@ -230,11 +230,15 @@ impl Handler {
                 results
             };
 
-            let timed_out = statuses.is_empty();
+            let outcome = if statuses.is_empty() {
+                WaitOutcome::TimedOut
+            } else {
+                WaitOutcome::MailboxActivity
+            };
             let statuses_by_id = statuses.into_iter().collect::<HashMap<_, _>>();
-            (timed_out, statuses_by_id)
+            (outcome, statuses_by_id)
         };
-        let result = WaitAgentResult::from_timed_out(timed_out);
+        let result = WaitAgentResult::from_outcome(outcome);
 
         session
             .emit_turn_item_completed(
@@ -291,15 +295,15 @@ pub(crate) struct WaitAgentResult {
 }
 
 impl WaitAgentResult {
-    fn from_timed_out(timed_out: bool) -> Self {
-        let message = if timed_out {
-            "Wait timed out."
-        } else {
-            "Wait completed."
+    fn from_outcome(outcome: WaitOutcome) -> Self {
+        let message = match outcome {
+            WaitOutcome::MailboxActivity => "Wait completed.",
+            WaitOutcome::Steered => "Wait interrupted by new input.",
+            WaitOutcome::TimedOut => "Wait timed out.",
         };
         Self {
             message: message.to_string(),
-            timed_out,
+            timed_out: outcome == WaitOutcome::TimedOut,
         }
     }
 }
@@ -370,17 +374,30 @@ fn wait_receiver_agents(
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WaitOutcome {
+    MailboxActivity,
+    Steered,
+    TimedOut,
+}
+
 async fn wait_for_activity(
     activity_rx: &mut tokio::sync::watch::Receiver<InputQueueActivity>,
     pending_activity: Option<InputQueueActivity>,
     deadline: Instant,
-) -> bool {
-    if pending_activity.is_some() {
-        return true;
+) -> WaitOutcome {
+    if let Some(activity) = pending_activity {
+        return match activity {
+            InputQueueActivity::Mailbox => WaitOutcome::MailboxActivity,
+            InputQueueActivity::Steer => WaitOutcome::Steered,
+        };
     }
 
     match timeout_at(deadline, activity_rx.changed()).await {
-        Ok(Ok(())) => true,
-        Ok(Err(_)) | Err(_) => false,
+        Ok(Ok(())) => match *activity_rx.borrow_and_update() {
+            InputQueueActivity::Mailbox => WaitOutcome::MailboxActivity,
+            InputQueueActivity::Steer => WaitOutcome::Steered,
+        },
+        Ok(Err(_)) | Err(_) => WaitOutcome::TimedOut,
     }
 }

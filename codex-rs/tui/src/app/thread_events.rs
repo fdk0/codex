@@ -49,16 +49,114 @@ pub(super) struct ThreadEventStore {
     pub(super) active: bool,
 }
 
+#[derive(Clone, Copy)]
+enum ItemNotificationStage {
+    Started,
+    Completed,
+}
+
+fn items_match(existing: &ThreadItem, notification: &ThreadItem) -> bool {
+    std::mem::discriminant(existing) == std::mem::discriminant(notification)
+        && existing.id() == notification.id()
+}
+
+fn item_is_terminal(item: &ThreadItem) -> bool {
+    match item {
+        ThreadItem::CommandExecution { status, .. } => !matches!(
+            status,
+            codex_app_server_protocol::CommandExecutionStatus::InProgress
+        ),
+        ThreadItem::FileChange { status, .. } => !matches!(
+            status,
+            codex_app_server_protocol::PatchApplyStatus::InProgress
+        ),
+        ThreadItem::McpToolCall { status, .. } => !matches!(
+            status,
+            codex_app_server_protocol::McpToolCallStatus::InProgress
+        ),
+        ThreadItem::DynamicToolCall { status, .. } => !matches!(
+            status,
+            codex_app_server_protocol::DynamicToolCallStatus::InProgress
+        ),
+        ThreadItem::CollabAgentToolCall { status, .. } => !matches!(
+            status,
+            codex_app_server_protocol::CollabAgentToolCallStatus::InProgress
+        ),
+        ThreadItem::WebSearch(item) => item.action.is_some(),
+        ThreadItem::ImageGeneration(item) => {
+            item.status != "in_progress"
+                && (!item.status.is_empty()
+                    || !item.result.is_empty()
+                    || item.revised_prompt.is_some()
+                    || item.saved_path.is_some())
+        }
+        ThreadItem::UserMessage { .. }
+        | ThreadItem::HookPrompt { .. }
+        | ThreadItem::AgentMessage { .. }
+        | ThreadItem::Plan { .. }
+        | ThreadItem::Reasoning { .. }
+        | ThreadItem::SubAgentActivity { .. }
+        | ThreadItem::ImageView { .. }
+        | ThreadItem::Sleep { .. }
+        | ThreadItem::EnteredReviewMode { .. }
+        | ThreadItem::ExitedReviewMode { .. }
+        | ThreadItem::ContextCompaction { .. } => true,
+    }
+}
+
+fn turns_cover_item_notification(
+    turns: &[Turn],
+    turn_id: &str,
+    notification_item: &ThreadItem,
+    stage: ItemNotificationStage,
+) -> bool {
+    turns
+        .iter()
+        .filter(|turn| turn.id == turn_id)
+        .flat_map(|turn| turn.items.iter())
+        .filter(|item| items_match(item, notification_item))
+        .any(|item| match stage {
+            ItemNotificationStage::Started => true,
+            ItemNotificationStage::Completed => item_is_terminal(item),
+        })
+}
+
+fn notification_survives_session_refresh(
+    notification: &ServerNotification,
+    refreshed_turns: &[Turn],
+) -> bool {
+    match notification {
+        ServerNotification::ItemStarted(notification) => !turns_cover_item_notification(
+            refreshed_turns,
+            &notification.turn_id,
+            &notification.item,
+            ItemNotificationStage::Started,
+        ),
+        ServerNotification::ItemCompleted(notification) => !turns_cover_item_notification(
+            refreshed_turns,
+            &notification.turn_id,
+            &notification.item,
+            ItemNotificationStage::Completed,
+        ),
+        ServerNotification::HookStarted(_)
+        | ServerNotification::HookCompleted(_)
+        | ServerNotification::McpServerStatusUpdated(_) => true,
+        _ => false,
+    }
+}
+
 impl ThreadEventStore {
-    pub(super) fn event_survives_session_refresh(event: &ThreadBufferedEvent) -> bool {
-        matches!(
-            event,
-            ThreadBufferedEvent::Request(_)
-                | ThreadBufferedEvent::Notification(ServerNotification::HookStarted(_))
-                | ThreadBufferedEvent::Notification(ServerNotification::HookCompleted(_))
-                | ThreadBufferedEvent::Notification(ServerNotification::McpServerStatusUpdated(_))
-                | ThreadBufferedEvent::FeedbackSubmission(_)
-        )
+    pub(super) fn event_survives_session_refresh(
+        event: &ThreadBufferedEvent,
+        refreshed_turns: &[Turn],
+    ) -> bool {
+        match event {
+            ThreadBufferedEvent::Request(_) | ThreadBufferedEvent::FeedbackSubmission(_) => true,
+            ThreadBufferedEvent::Notification(notification) => {
+                notification_survives_session_refresh(notification, refreshed_turns)
+            }
+            ThreadBufferedEvent::HistoryEntryResponse(_) => false,
+        }
     }
 
     pub(super) fn new(capacity: usize) -> Self {
@@ -91,8 +189,9 @@ impl ThreadEventStore {
         self.set_turns(turns);
     }
 
-    pub(super) fn rebase_buffer_after_session_refresh(&mut self) {
-        self.buffer.retain(Self::event_survives_session_refresh);
+    pub(super) fn rebase_buffer_after_session_refresh(&mut self, refreshed_turns: &[Turn]) {
+        self.buffer
+            .retain(|event| Self::event_survives_session_refresh(event, refreshed_turns));
     }
 
     pub(super) fn set_turns(&mut self, turns: Vec<Turn>) {
@@ -348,6 +447,8 @@ mod tests {
     use codex_app_server_protocol::HookRunSummary as AppServerHookRunSummary;
     use codex_app_server_protocol::HookScope as AppServerHookScope;
     use codex_app_server_protocol::HookStartedNotification;
+    use codex_app_server_protocol::ItemCompletedNotification;
+    use codex_app_server_protocol::ItemStartedNotification;
     use codex_app_server_protocol::RequestId as AppServerRequestId;
     use codex_app_server_protocol::TurnCompletedNotification;
     use codex_app_server_protocol::TurnStartedNotification;
@@ -474,6 +575,75 @@ mod tests {
         })
     }
 
+    fn command_item(
+        item_id: &str,
+        status: codex_app_server_protocol::CommandExecutionStatus,
+    ) -> ThreadItem {
+        ThreadItem::CommandExecution {
+            id: item_id.to_string(),
+            command: "echo hello".to_string(),
+            cwd: test_path_buf("/tmp/project").abs().into(),
+            process_id: None,
+            source: codex_app_server_protocol::CommandExecutionSource::Agent,
+            status,
+            command_actions: Vec::new(),
+            aggregated_output: None,
+            exit_code: None,
+            duration_ms: None,
+        }
+    }
+
+    fn item_started_notification(
+        thread_id: ThreadId,
+        turn_id: &str,
+        item: ThreadItem,
+    ) -> ServerNotification {
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            started_at_ms: 0,
+            item,
+        })
+    }
+
+    fn item_completed_notification(
+        thread_id: ThreadId,
+        turn_id: &str,
+        item: ThreadItem,
+    ) -> ServerNotification {
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            completed_at_ms: 1,
+            item,
+        })
+    }
+
+    fn buffered_item_keys(store: &ThreadEventStore) -> Vec<String> {
+        store
+            .snapshot()
+            .events
+            .into_iter()
+            .map(|event| match event {
+                ThreadBufferedEvent::Notification(ServerNotification::ItemStarted(
+                    notification,
+                )) => format!(
+                    "started:{}/{}",
+                    notification.turn_id,
+                    notification.item.id()
+                ),
+                ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
+                    notification,
+                )) => format!(
+                    "completed:{}/{}",
+                    notification.turn_id,
+                    notification.item.id()
+                ),
+                other => panic!("expected buffered item notification, saw: {other:?}"),
+            })
+            .collect()
+    }
+
     fn exec_approval_request(
         thread_id: ThreadId,
         turn_id: &str,
@@ -572,7 +742,7 @@ mod tests {
             },
         ));
 
-        store.rebase_buffer_after_session_refresh();
+        store.rebase_buffer_after_session_refresh(&[]);
 
         let snapshot = store.snapshot();
         assert!(snapshot.events.is_empty());
@@ -586,7 +756,7 @@ mod tests {
         store.push_notification(hook_started_notification(thread_id, "turn-hook"));
         store.push_notification(hook_completed_notification(thread_id, "turn-hook"));
 
-        store.rebase_buffer_after_session_refresh();
+        store.rebase_buffer_after_session_refresh(&[]);
 
         let snapshot = store.snapshot();
         let hook_notifications = snapshot
@@ -625,7 +795,7 @@ mod tests {
         let mut store = ThreadEventStore::new(/*capacity*/ 8);
         store.push_notification(notification.clone());
 
-        store.rebase_buffer_after_session_refresh();
+        store.rebase_buffer_after_session_refresh(&[]);
 
         let snapshot = store.snapshot();
         let actual = match snapshot.events.as_slice() {
@@ -636,5 +806,98 @@ mod tests {
             serde_json::to_value(actual).expect("MCP notification should serialize"),
             serde_json::to_value(notification).expect("MCP notification should serialize"),
         );
+    }
+
+    #[test]
+    fn thread_event_store_rebase_keeps_item_notifications_not_covered_by_refreshed_turns() {
+        let thread_id = ThreadId::new();
+        let turn_id = "turn-live";
+        let mut store = ThreadEventStore::new(/*capacity*/ 8);
+        store.push_notification(item_started_notification(
+            thread_id,
+            turn_id,
+            command_item(
+                "cmd-started",
+                codex_app_server_protocol::CommandExecutionStatus::InProgress,
+            ),
+        ));
+        store.push_notification(item_completed_notification(
+            thread_id,
+            turn_id,
+            command_item(
+                "cmd-completed",
+                codex_app_server_protocol::CommandExecutionStatus::Completed,
+            ),
+        ));
+        let refreshed_turns = vec![
+            test_turn(
+                "turn-other",
+                TurnStatus::Completed,
+                vec![command_item(
+                    "cmd-started",
+                    codex_app_server_protocol::CommandExecutionStatus::Completed,
+                )],
+            ),
+            test_turn(
+                turn_id,
+                TurnStatus::InProgress,
+                vec![
+                    ThreadItem::AgentMessage {
+                        id: "cmd-started".to_string(),
+                        text: "same id, different item type".to_string(),
+                        phase: None,
+                        memory_citation: None,
+                    },
+                    command_item(
+                        "cmd-completed",
+                        codex_app_server_protocol::CommandExecutionStatus::InProgress,
+                    ),
+                ],
+            ),
+        ];
+
+        store.rebase_buffer_after_session_refresh(&refreshed_turns);
+
+        assert_eq!(
+            buffered_item_keys(&store),
+            vec![
+                "started:turn-live/cmd-started".to_string(),
+                "completed:turn-live/cmd-completed".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn thread_event_store_rebase_drops_item_notifications_covered_by_refreshed_turn() {
+        let thread_id = ThreadId::new();
+        let turn_id = "turn-live";
+        let started_item = command_item(
+            "cmd-started",
+            codex_app_server_protocol::CommandExecutionStatus::InProgress,
+        );
+        let completed_item = command_item(
+            "cmd-completed",
+            codex_app_server_protocol::CommandExecutionStatus::Completed,
+        );
+        let mut store = ThreadEventStore::new(/*capacity*/ 8);
+        store.push_notification(item_started_notification(
+            thread_id,
+            turn_id,
+            started_item.clone(),
+        ));
+        store.push_notification(item_completed_notification(
+            thread_id,
+            turn_id,
+            completed_item.clone(),
+        ));
+        let refreshed_turns = vec![test_turn(
+            turn_id,
+            TurnStatus::InProgress,
+            vec![started_item, completed_item],
+        )];
+
+        store.rebase_buffer_after_session_refresh(&refreshed_turns);
+
+        assert_eq!(buffered_item_keys(&store), Vec::<String>::new());
     }
 }

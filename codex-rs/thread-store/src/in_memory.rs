@@ -111,22 +111,23 @@ mod tests {
             ThreadId::from_string("00000000-0000-0000-0000-000000000003").expect("valid thread id");
         let unrelated_thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000002").expect("valid thread id");
-        let grandchild_thread_id =
-            ThreadId::from_string("00000000-0000-0000-0000-000000000003").expect("valid thread id");
 
-        for (thread_id, parent_thread_id) in [
+        for (thread_id, direct_parent_thread_id) in [
             (child_thread_id, Some(parent_thread_id)),
             (grandchild_thread_id, Some(child_thread_id)),
             (unrelated_thread_id, None),
-            (grandchild_thread_id, Some(child_thread_id)),
         ] {
             store
                 .create_thread(CreateThreadParams {
-                    session_id: thread_id.into(),
+                    session_id: if direct_parent_thread_id.is_some() {
+                        parent_thread_id.into()
+                    } else {
+                        thread_id.into()
+                    },
                     thread_id,
                     extra_config: None,
                     forked_from_id: None,
-                    parent_thread_id,
+                    parent_thread_id: direct_parent_thread_id,
                     source: SessionSource::Exec,
                     thread_source: None,
                     originator: "test_originator".to_string(),
@@ -170,7 +171,7 @@ mod tests {
                 .into_iter()
                 .map(|item| item.thread_id)
                 .collect::<Vec<_>>(),
-            vec![child_thread_id, grandchild_thread_id]
+            vec![child_thread_id]
         );
 
         let page = ThreadStore::list_threads(

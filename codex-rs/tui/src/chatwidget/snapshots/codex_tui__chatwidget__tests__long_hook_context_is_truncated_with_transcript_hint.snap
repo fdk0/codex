@@ -4,7 +4,9 @@ expression: history
 ---
 • SessionStart hook (stopped)
   hook context: This hook context is intentionally long enough to wrap across
-    several terminal rows while keeping the complete value available in the
-    … +2 lines (ctrl + t to view transcript)
+                several terminal rows while keeping the complete value available
+                in the transcript overlay. The main conversation should stay
+                compact even when a hook injects a large block of instructions
+                … +3 lines (ctrl + t to view transcript)
   stop: The hook stopped this turn for an important reason.
-    This second line must remain visible in full.
+        This second line must remain visible in full.

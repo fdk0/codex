@@ -46,6 +46,7 @@ use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::FileChangeRequestApprovalParams;
 use codex_app_server_protocol::FileUpdateChange;
+use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::McpServerElicitationRequest;
@@ -5523,6 +5524,216 @@ async fn refreshed_snapshot_session_persists_resumed_turns() {
     let store_snapshot = store.snapshot();
     assert_eq!(store_snapshot.session, Some(resumed_session));
     assert_eq!(store_snapshot.turns, snapshot.turns);
+}
+
+#[tokio::test]
+async fn replay_refreshed_snapshot_keeps_live_items_missing_from_refreshed_turns() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    while app_event_rx.try_recv().is_ok() {}
+    let thread_id = ThreadId::new();
+    let spawned_thread_id = ThreadId::new();
+    let turn_id = "turn-live";
+    app.thread_event_channels.insert(
+        thread_id,
+        ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY),
+    );
+    {
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("thread channel should exist");
+        let mut store = channel.store.lock().await;
+        let mut stale_session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
+        stale_session.model.clear();
+        stale_session.rollout_path = None;
+        store.set_session(stale_session, Vec::new());
+        store.push_notification(ServerNotification::ItemCompleted(
+            ItemCompletedNotification {
+                thread_id: thread_id.to_string(),
+                turn_id: turn_id.to_string(),
+                completed_at_ms: 1,
+                item: ThreadItem::CommandExecution {
+                    id: "cmd-1".to_string(),
+                    command: "echo hello".to_string(),
+                    cwd: test_path_buf("/tmp/project").abs().into(),
+                    process_id: None,
+                    source: codex_app_server_protocol::CommandExecutionSource::Agent,
+                    status: codex_app_server_protocol::CommandExecutionStatus::Completed,
+                    command_actions: Vec::new(),
+                    aggregated_output: Some("hello".to_string()),
+                    exit_code: Some(0),
+                    duration_ms: Some(1),
+                },
+            },
+        ));
+        store.push_notification(ServerNotification::ItemCompleted(
+            ItemCompletedNotification {
+                thread_id: thread_id.to_string(),
+                turn_id: turn_id.to_string(),
+                completed_at_ms: 1,
+                item: ThreadItem::CollabAgentToolCall {
+                    id: "spawn-1".to_string(),
+                    tool: codex_app_server_protocol::CollabAgentTool::SpawnAgent,
+                    status: codex_app_server_protocol::CollabAgentToolCallStatus::Completed,
+                    sender_thread_id: thread_id.to_string(),
+                    receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                    receiver_agents: Vec::new(),
+                    prompt: Some("Explore the repo".to_string()),
+                    model: Some("gpt-5".to_string()),
+                    reasoning_effort: Some(ReasoningEffortConfig::High),
+                    agents_states: HashMap::from([(
+                        spawned_thread_id.to_string(),
+                        codex_app_server_protocol::CollabAgentState {
+                            status: codex_app_server_protocol::CollabAgentStatus::PendingInit,
+                            message: None,
+                        },
+                    )]),
+                },
+            },
+        ));
+    }
+    let mut snapshot = {
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("thread channel should exist");
+        let store = channel.store.lock().await;
+        store.snapshot()
+    };
+
+    app.apply_refreshed_snapshot_thread(
+        thread_id,
+        AppServerStartedThread {
+            session: test_thread_session(thread_id, test_path_buf("/tmp/project")),
+            turns: vec![test_turn(turn_id, TurnStatus::InProgress, Vec::new())],
+        },
+        &mut snapshot,
+    )
+    .await;
+    app.replay_thread_snapshot(snapshot, /*resume_restored_queue*/ false);
+
+    let mut rendered_cells = Vec::new();
+    while let Ok(event) = app_event_rx.try_recv() {
+        if let AppEvent::InsertHistoryCell(cell) = event {
+            rendered_cells.push(lines_to_single_string(&cell.display_lines(/*width*/ 120)));
+        }
+    }
+    let rendered = rendered_cells.join("\n");
+    assert!(
+        rendered.contains("echo hello"),
+        "expected command item in replayed transcript: {rendered}"
+    );
+    assert!(
+        rendered.contains("Spawned"),
+        "expected spawn item in replayed transcript: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn refreshed_snapshot_rebases_live_receiver_against_resumed_items() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    while app_event_rx.try_recv().is_ok() {}
+    let thread_id = ThreadId::new();
+    let turn_id = "turn-race";
+    let command = ThreadItem::CommandExecution {
+        id: "cmd-race".to_string(),
+        command: "echo race".to_string(),
+        cwd: test_path_buf("/tmp/project").abs().into(),
+        process_id: None,
+        source: codex_app_server_protocol::CommandExecutionSource::Agent,
+        status: codex_app_server_protocol::CommandExecutionStatus::Completed,
+        command_actions: Vec::new(),
+        aggregated_output: Some("race".to_string()),
+        exit_code: Some(0),
+        duration_ms: Some(1),
+    };
+    app.thread_event_channels.insert(
+        thread_id,
+        ThreadEventChannel::new_with_session(
+            THREAD_EVENT_CHANNEL_CAPACITY,
+            test_thread_session(thread_id, test_path_buf("/tmp/project")),
+            Vec::new(),
+        ),
+    );
+    let (mut receiver, mut snapshot) = app
+        .activate_thread_for_replay(thread_id)
+        .await
+        .expect("thread channel should activate");
+
+    app.enqueue_thread_notification(
+        thread_id,
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            completed_at_ms: 1,
+            item: command.clone(),
+        }),
+    )
+    .await
+    .expect("completed item should enqueue during refresh");
+    app.enqueue_thread_notification(
+        thread_id,
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            completed_at_ms: 2,
+            item: ThreadItem::CommandExecution {
+                id: "cmd-live".to_string(),
+                command: "echo live".to_string(),
+                cwd: test_path_buf("/tmp/project").abs().into(),
+                process_id: None,
+                source: codex_app_server_protocol::CommandExecutionSource::Agent,
+                status: codex_app_server_protocol::CommandExecutionStatus::Completed,
+                command_actions: Vec::new(),
+                aggregated_output: Some("live".to_string()),
+                exit_code: Some(0),
+                duration_ms: Some(1),
+            },
+        }),
+    )
+    .await
+    .expect("uncovered item should enqueue during refresh");
+
+    app.apply_refreshed_snapshot_thread(
+        thread_id,
+        AppServerStartedThread {
+            session: test_thread_session(thread_id, test_path_buf("/tmp/project")),
+            turns: vec![test_turn(turn_id, TurnStatus::Completed, vec![command])],
+        },
+        &mut snapshot,
+    )
+    .await;
+    app.reconcile_refreshed_snapshot_receiver(thread_id, &mut snapshot, &mut receiver)
+        .await;
+    app.replay_thread_snapshot(snapshot, /*resume_restored_queue*/ false);
+    while let Ok(event) = receiver.try_recv() {
+        app.handle_thread_event_now(event);
+    }
+
+    let rendered_cells = std::iter::from_fn(|| app_event_rx.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => {
+                Some(lines_to_single_string(&cell.display_lines(/*width*/ 120)))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rendered_cells
+            .iter()
+            .filter(|rendered| rendered.contains("echo race"))
+            .count(),
+        1,
+        "refreshed command should render exactly once: {rendered_cells:?}"
+    );
+    assert_eq!(
+        rendered_cells
+            .iter()
+            .filter(|rendered| rendered.contains("echo live"))
+            .count(),
+        1,
+        "uncovered command should survive the refreshed handoff exactly once: {rendered_cells:?}"
+    );
 }
 
 #[tokio::test]

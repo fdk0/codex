@@ -292,13 +292,11 @@ async fn steer_interrupts_wait_agent_and_is_sent_in_follow_up_request() {
     const WAIT_CALL_ID: &str = "wait-call";
     const INITIAL_PROMPT: &str = "wait for an agent";
     const STEER_PROMPT: &str = "stop waiting and continue";
-    const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 
     let first_chunks = vec![
         chunk(ev_response_created("resp-1")),
-        chunk(ev_function_call_with_namespace(
+        chunk(ev_function_call(
             WAIT_CALL_ID,
-            MULTI_AGENT_V2_NAMESPACE,
             "wait_agent",
             r#"{"timeout_ms":10000}"#,
         )),
