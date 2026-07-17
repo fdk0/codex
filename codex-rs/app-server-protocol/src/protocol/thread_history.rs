@@ -1,4 +1,3 @@
-use crate::protocol::event_mapping::sub_agent_activity_spawn_membership_item;
 use crate::protocol::item_builders::build_command_execution_begin_item;
 use crate::protocol::item_builders::build_command_execution_end_item;
 use crate::protocol::item_builders::build_file_change_approval_request_item;
@@ -983,17 +982,12 @@ impl ThreadHistoryBuilder {
         &mut self,
         payload: &codex_protocol::protocol::SubAgentActivityEvent,
     ) {
-        let spawn_membership_item =
-            sub_agent_activity_spawn_membership_item(payload, String::new());
         self.upsert_item_in_current_turn(ThreadItem::SubAgentActivity {
             id: payload.event_id.clone(),
             kind: payload.kind.into(),
             agent_thread_id: payload.agent_thread_id.to_string(),
             agent_path: String::from(payload.agent_path.clone()),
         });
-        if let Some(item) = spawn_membership_item {
-            self.upsert_item_in_current_turn(item);
-        }
     }
 
     fn handle_collab_waiting_begin(
@@ -3856,7 +3850,7 @@ mod tests {
     }
 
     #[test]
-    fn reconstructs_sub_agent_started_as_activity_and_spawn_membership() {
+    fn reconstructs_sub_agent_started_as_native_activity() {
         let spawned_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000002")
             .expect("valid receiver thread id");
         let events = vec![
@@ -3884,7 +3878,7 @@ mod tests {
             .collect::<Vec<_>>();
         let turns = build_turns_from_rollout_items(&items);
         assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].items.len(), 3);
+        assert_eq!(turns[0].items.len(), 2);
         assert_eq!(
             turns[0].items[1],
             ThreadItem::SubAgentActivity {
@@ -3892,33 +3886,6 @@ mod tests {
                 kind: crate::protocol::v2::SubAgentActivityKind::Started,
                 agent_thread_id: spawned_thread_id.to_string(),
                 agent_path: "/root/dispatcher/review_1".into(),
-            }
-        );
-        assert_eq!(
-            turns[0].items[2],
-            ThreadItem::CollabAgentToolCall {
-                id: "activity-1:spawn-agent-membership".into(),
-                tool: CollabAgentTool::SpawnAgent,
-                status: CollabAgentToolCallStatus::Completed,
-                sender_thread_id: String::new(),
-                receiver_thread_ids: vec![spawned_thread_id.to_string()],
-                receiver_agents: vec![CollabAgentRef {
-                    thread_id: spawned_thread_id.to_string(),
-                    agent_nickname: None,
-                    agent_role: Some("review".into()),
-                }],
-                prompt: None,
-                model: None,
-                reasoning_effort: None,
-                agents_states: [(
-                    spawned_thread_id.to_string(),
-                    CollabAgentState {
-                        status: crate::protocol::v2::CollabAgentStatus::Running,
-                        message: None,
-                    },
-                )]
-                .into_iter()
-                .collect(),
             }
         );
     }

@@ -994,16 +994,6 @@ pub(crate) async fn apply_bespoke_event_handling(
             if turn_item_contains_subagent_notification(&event.item) {
                 return;
             }
-            let spawn_membership_item = match &event.item {
-                CoreTurnItem::SubAgentActivity(activity) => {
-                    sub_agent_activity_item_spawn_membership_item(
-                        activity,
-                        conversation_id.to_string(),
-                    )
-                }
-                _ => None,
-            };
-            let completed_at_ms = event.completed_at_ms;
             apply_canonical_item_completed_side_effects(
                 &thread_manager,
                 &thread_watch_manager,
@@ -1017,18 +1007,6 @@ pub(crate) async fn apply_bespoke_event_handling(
                 &event_turn_id,
             );
             outgoing.send_server_notification(notification).await;
-            if let Some(item) = spawn_membership_item {
-                outgoing
-                    .send_server_notification(ServerNotification::ItemCompleted(
-                        ItemCompletedNotification {
-                            thread_id: conversation_id.to_string(),
-                            turn_id: event_turn_id,
-                            item,
-                            completed_at_ms,
-                        },
-                    ))
-                    .await;
-            }
         }
         msg @ (EventMsg::PatchApplyUpdated(_) | EventMsg::TerminalInteraction(_)) => {
             let notification = item_event_to_server_notification(
@@ -1569,54 +1547,6 @@ pub(crate) async fn maybe_emit_hook_prompt_item_completed(
     outgoing
         .send_server_notification(ServerNotification::ItemCompleted(notification))
         .await;
-}
-
-fn sub_agent_activity_item_spawn_membership_item(
-    activity: &codex_protocol::items::SubAgentActivityItem,
-    sender_thread_id: impl Into<String>,
-) -> Option<ThreadItem> {
-    if activity.kind != SubAgentActivityKind::Started {
-        return None;
-    }
-
-    let receiver_id = activity.agent_thread_id.to_string();
-    let agent_path = activity.agent_path.as_ref();
-    Some(ThreadItem::CollabAgentToolCall {
-        id: format!("{}:spawn-agent-membership", activity.id),
-        tool: codex_app_server_protocol::CollabAgentTool::SpawnAgent,
-        status: codex_app_server_protocol::CollabAgentToolCallStatus::Completed,
-        sender_thread_id: sender_thread_id.into(),
-        receiver_thread_ids: vec![receiver_id.clone()],
-        receiver_agents: vec![codex_app_server_protocol::CollabAgentRef {
-            thread_id: receiver_id.clone(),
-            agent_nickname: None,
-            agent_role: agent_role_from_path(agent_path).map(str::to_string),
-        }],
-        prompt: None,
-        model: None,
-        reasoning_effort: None,
-        agents_states: [(
-            receiver_id,
-            codex_app_server_protocol::CollabAgentState {
-                status: codex_app_server_protocol::CollabAgentStatus::Running,
-                message: None,
-            },
-        )]
-        .into_iter()
-        .collect(),
-    })
-}
-
-fn agent_role_from_path(agent_path: &str) -> Option<&str> {
-    let name = agent_path.rsplit('/').next()?;
-    if name.is_empty() || name == "root" {
-        return None;
-    }
-
-    match name.rsplit_once('_') {
-        Some((role, suffix)) if !role.is_empty() && suffix.parse::<u32>().is_ok() => Some(role),
-        _ => Some(name),
-    }
 }
 
 async fn find_and_remove_turn_summary(
@@ -3606,8 +3536,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn canonical_started_subagent_activity_emits_spawn_membership_notification() -> Result<()>
-    {
+    async fn canonical_started_subagent_activity_emits_only_native_activity_notification()
+    -> Result<()> {
         let codex_home = TempDir::new()?;
         let config = load_default_config_for_test(&codex_home).await;
         let thread_manager = Arc::new(
@@ -3670,53 +3600,20 @@ mod tests {
             bail!("unexpected message: {activity_message:?}");
         };
         assert_eq!(
-            activity.item,
-            ThreadItem::SubAgentActivity {
-                id: "activity-1".to_string(),
-                kind: codex_app_server_protocol::SubAgentActivityKind::Started,
-                agent_thread_id: child_thread_id_string.clone(),
-                agent_path: "/root/dispatcher/review_1".to_string(),
-            }
-        );
-
-        let membership_message = recv_broadcast_message(&mut rx).await?;
-        let OutgoingMessage::AppServerNotification(ServerNotification::ItemCompleted(membership)) =
-            membership_message
-        else {
-            bail!("unexpected message: {membership_message:?}");
-        };
-        assert_eq!(
-            membership,
+            activity,
             ItemCompletedNotification {
-                item: ThreadItem::CollabAgentToolCall {
-                    id: "activity-1:spawn-agent-membership".to_string(),
-                    tool: codex_app_server_protocol::CollabAgentTool::SpawnAgent,
-                    status: codex_app_server_protocol::CollabAgentToolCallStatus::Completed,
-                    sender_thread_id: conversation_id.to_string(),
-                    receiver_thread_ids: vec![child_thread_id_string.clone()],
-                    receiver_agents: vec![codex_app_server_protocol::CollabAgentRef {
-                        thread_id: child_thread_id_string.clone(),
-                        agent_nickname: None,
-                        agent_role: Some("review".to_string()),
-                    }],
-                    prompt: None,
-                    model: None,
-                    reasoning_effort: None,
-                    agents_states: [(
-                        child_thread_id_string,
-                        codex_app_server_protocol::CollabAgentState {
-                            status: codex_app_server_protocol::CollabAgentStatus::Running,
-                            message: None,
-                        },
-                    )]
-                    .into_iter()
-                    .collect(),
+                item: ThreadItem::SubAgentActivity {
+                    id: "activity-1".to_string(),
+                    kind: codex_app_server_protocol::SubAgentActivityKind::Started,
+                    agent_thread_id: child_thread_id_string,
+                    agent_path: "/root/dispatcher/review_1".to_string(),
                 },
                 thread_id: conversation_id.to_string(),
                 turn_id: "turn-1".to_string(),
                 completed_at_ms: 42,
             }
         );
+        assert!(rx.try_recv().is_err(), "no extra messages expected");
         Ok(())
     }
 

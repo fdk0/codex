@@ -1,5 +1,6 @@
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 use app_test_support::TestAppServer;
 use app_test_support::create_apply_patch_sse_response;
 use app_test_support::create_exec_command_sse_response;
@@ -3721,10 +3722,16 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
                 .await?;
             let completed: ItemCompletedNotification =
                 serde_json::from_value(completed_notif.params.expect("item/completed params"))?;
-            if let ThreadItem::CollabAgentToolCall { id, .. } = &completed.item
-                && id == SPAWN_CALL_ID
+            if let ThreadItem::CollabAgentToolCall {
+                id,
+                tool: CollabAgentTool::SpawnAgent,
+                ..
+            } = &completed.item
             {
-                return Ok::<ThreadItem, anyhow::Error>(completed.item);
+                if id == SPAWN_CALL_ID {
+                    return Ok::<ThreadItem, anyhow::Error>(completed.item);
+                }
+                bail!("unexpected duplicate spawn agent item: {id}");
             }
         }
     })

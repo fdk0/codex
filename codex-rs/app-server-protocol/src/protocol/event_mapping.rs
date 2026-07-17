@@ -5,7 +5,6 @@ use crate::protocol::item_builders::convert_patch_changes;
 use crate::protocol::v2::AgentMessageDeltaNotification;
 use crate::protocol::v2::CollabAgentRef;
 use crate::protocol::v2::CollabAgentState;
-use crate::protocol::v2::CollabAgentStatus;
 use crate::protocol::v2::CollabAgentTool;
 use crate::protocol::v2::CollabAgentToolCallStatus;
 use crate::protocol::v2::CommandExecutionOutputDeltaNotification;
@@ -22,8 +21,6 @@ use crate::protocol::v2::TerminalInteractionNotification;
 use crate::protocol::v2::ThreadItem;
 use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem as CoreDynamicToolCallOutputContentItem;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::SubAgentActivityEvent;
-use codex_protocol::protocol::SubAgentActivityKind;
 use std::collections::HashMap;
 
 /// Build the v2 app-server notification that directly corresponds to a single core event.
@@ -511,56 +508,6 @@ pub fn item_event_to_server_notification(
     }
 }
 
-/// Build the compatibility spawn membership item that desktop clients use to
-/// populate the sub-agent navigation for MultiAgentV2 starts.
-pub fn sub_agent_activity_spawn_membership_item(
-    activity: &SubAgentActivityEvent,
-    sender_thread_id: impl Into<String>,
-) -> Option<ThreadItem> {
-    if activity.kind != SubAgentActivityKind::Started {
-        return None;
-    }
-
-    let receiver_id = activity.agent_thread_id.to_string();
-    let agent_path = activity.agent_path.as_ref();
-    Some(ThreadItem::CollabAgentToolCall {
-        id: format!("{}:spawn-agent-membership", activity.event_id),
-        tool: CollabAgentTool::SpawnAgent,
-        status: CollabAgentToolCallStatus::Completed,
-        sender_thread_id: sender_thread_id.into(),
-        receiver_thread_ids: vec![receiver_id.clone()],
-        receiver_agents: vec![CollabAgentRef {
-            thread_id: receiver_id.clone(),
-            agent_nickname: None,
-            agent_role: agent_role_from_path(agent_path).map(str::to_string),
-        }],
-        prompt: None,
-        model: None,
-        reasoning_effort: None,
-        agents_states: [(
-            receiver_id,
-            CollabAgentState {
-                status: CollabAgentStatus::Running,
-                message: None,
-            },
-        )]
-        .into_iter()
-        .collect(),
-    })
-}
-
-fn agent_role_from_path(agent_path: &str) -> Option<&str> {
-    let name = agent_path.rsplit('/').next()?;
-    if name.is_empty() || name == "root" {
-        return None;
-    }
-
-    match name.rsplit_once('_') {
-        Some((role, suffix)) if !role.is_empty() && suffix.parse::<u32>().is_ok() => Some(role),
-        _ => Some(name),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,7 +516,6 @@ mod tests {
     use codex_protocol::protocol::CollabResumeEndEvent;
     use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
     use codex_protocol::protocol::ExecOutputStream;
-    use codex_protocol::protocol::SubAgentActivityEvent;
     use pretty_assertions::assert_eq;
 
     fn assert_item_started_server_notification(
@@ -689,70 +635,6 @@ mod tests {
                 },
             },
         );
-    }
-
-    #[test]
-    fn sub_agent_activity_started_builds_spawn_membership_item() {
-        let receiver = ThreadId::new();
-        let item = sub_agent_activity_spawn_membership_item(
-            &SubAgentActivityEvent {
-                event_id: "activity-1".to_string(),
-                occurred_at_ms: 456,
-                agent_thread_id: receiver,
-                agent_path: codex_protocol::AgentPath::try_from(
-                    "/root/dispatcher/review_1/worker_2",
-                )
-                .expect("valid agent path"),
-                kind: SubAgentActivityKind::Started,
-            },
-            "sender-thread",
-        )
-        .expect("started activity should produce membership item");
-
-        assert_eq!(
-            item,
-            ThreadItem::CollabAgentToolCall {
-                id: "activity-1:spawn-agent-membership".to_string(),
-                tool: CollabAgentTool::SpawnAgent,
-                status: CollabAgentToolCallStatus::Completed,
-                sender_thread_id: "sender-thread".to_string(),
-                receiver_thread_ids: vec![receiver.to_string()],
-                receiver_agents: vec![CollabAgentRef {
-                    thread_id: receiver.to_string(),
-                    agent_nickname: None,
-                    agent_role: Some("worker".to_string()),
-                }],
-                prompt: None,
-                model: None,
-                reasoning_effort: None,
-                agents_states: [(
-                    receiver.to_string(),
-                    CollabAgentState {
-                        status: CollabAgentStatus::Running,
-                        message: None,
-                    },
-                )]
-                .into_iter()
-                .collect(),
-            }
-        );
-    }
-
-    #[test]
-    fn sub_agent_activity_non_started_does_not_build_spawn_membership_item() {
-        let item = sub_agent_activity_spawn_membership_item(
-            &SubAgentActivityEvent {
-                event_id: "activity-1".to_string(),
-                occurred_at_ms: 456,
-                agent_thread_id: ThreadId::new(),
-                agent_path: codex_protocol::AgentPath::try_from("/root/dispatcher")
-                    .expect("valid agent path"),
-                kind: SubAgentActivityKind::Interacted,
-            },
-            "sender-thread",
-        );
-
-        assert_eq!(item, None);
     }
 
     #[test]
