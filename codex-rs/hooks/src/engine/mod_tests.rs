@@ -1215,6 +1215,7 @@ fn profile_user_layers_load_shared_hooks_json_once() {
         subagent: None,
         cwd: cwd(),
         transcript_path: None,
+        active_profile: None,
         model: "gpt-test".to_string(),
         permission_mode: "default".to_string(),
         tool_name: "Bash".to_string(),

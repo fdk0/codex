@@ -219,6 +219,7 @@ command_windows = "powershell -File C:\\enterprise\\hooks\\pre.ps1"
         HookEventsToml {
             pre_tool_use: vec![MatcherGroup {
                 matcher: Some("^Bash$".to_string()),
+                conditions: Default::default(),
                 hooks: vec![HookHandlerConfig::Command {
                     command: "bash /enterprise/hooks/pre.sh".to_string(),
                     command_windows: Some(
@@ -254,6 +255,7 @@ commandWindows = "powershell -File C:\\enterprise\\hooks\\pre.ps1"
         HookEventsToml {
             pre_tool_use: vec![MatcherGroup {
                 matcher: Some("^Bash$".to_string()),
+                conditions: Default::default(),
                 hooks: vec![HookHandlerConfig::Command {
                     command: "bash /enterprise/hooks/pre.sh".to_string(),
                     command_windows: Some(
