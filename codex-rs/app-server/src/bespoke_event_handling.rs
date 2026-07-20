@@ -1527,7 +1527,7 @@ pub(crate) async fn maybe_emit_hook_prompt_item_completed(
         return;
     }
 
-    let Some(hook_prompt) = parse_hook_prompt_message(id.as_ref(), content) else {
+    let Some(hook_prompt) = parse_hook_prompt_message(id.as_deref(), content) else {
         return;
     };
 
