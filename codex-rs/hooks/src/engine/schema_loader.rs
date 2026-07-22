@@ -18,6 +18,7 @@ pub(crate) struct GeneratedHookSchemas {
     pub session_start_command_output: Value,
     pub after_compaction_command_input: Value,
     pub after_compaction_command_output: Value,
+    pub session_end_command_input: Value,
     pub subagent_start_command_input: Value,
     pub subagent_start_command_output: Value,
     pub subagent_stop_command_input: Value,
@@ -87,6 +88,10 @@ pub(crate) fn generated_hook_schemas() -> &'static GeneratedHookSchemas {
             "after-compaction.command.output",
             include_str!("../../schema/generated/after-compaction.command.output.schema.json"),
         ),
+        session_end_command_input: parse_json_schema(
+            "session-end.command.input",
+            include_str!("../../schema/generated/session-end.command.input.schema.json"),
+        ),
         subagent_start_command_input: parse_json_schema(
             "subagent-start.command.input",
             include_str!("../../schema/generated/subagent-start.command.input.schema.json"),
@@ -150,6 +155,7 @@ mod tests {
         assert_eq!(schemas.session_start_command_output["type"], "object");
         assert_eq!(schemas.after_compaction_command_input["type"], "object");
         assert_eq!(schemas.after_compaction_command_output["type"], "object");
+        assert_eq!(schemas.session_end_command_input["type"], "object");
         assert_eq!(schemas.subagent_start_command_input["type"], "object");
         assert_eq!(schemas.subagent_start_command_output["type"], "object");
         assert_eq!(schemas.subagent_stop_command_input["type"], "object");

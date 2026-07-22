@@ -458,6 +458,7 @@ mod tests {
             cwd: PathBuf::from("/tmp").try_into().unwrap(),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Exec,
+            can_accept_direct_input: None,
             thread_source: None,
             parent_thread_id: parent_thread_id.map(str::to_string),
             agent_nickname: Some(format!("{id}-nick")),

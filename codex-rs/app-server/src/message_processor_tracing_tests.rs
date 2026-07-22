@@ -479,7 +479,7 @@ async fn read_thread_started_notification(
                     continue;
                 };
                 if let codex_app_server_protocol::ServerNotification::ThreadStarted(notification) =
-                    notification
+                    notification.notification
                 {
                     return notification;
                 }
@@ -491,7 +491,7 @@ async fn read_thread_started_notification(
                     continue;
                 };
                 if let codex_app_server_protocol::ServerNotification::ThreadStarted(notification) =
-                    notification
+                    notification.notification
                 {
                     return notification;
                 }

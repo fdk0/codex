@@ -74,21 +74,6 @@ async fn apply_role_returns_error_for_unknown_role() {
 }
 
 #[tokio::test]
-#[ignore = "No role requiring it for now"]
-async fn apply_explorer_role_sets_model_and_adds_session_flags_layer() {
-    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
-    let before_layers = session_flags_layer_count(&config);
-
-    apply_role_to_config(&mut config, Some("explorer"))
-        .await
-        .expect("explorer role should apply");
-
-    assert_eq!(config.model.as_deref(), Some("gpt-5.4-mini"));
-    assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::Medium));
-    assert_eq!(session_flags_layer_count(&config), before_layers + 1);
-}
-
-#[tokio::test]
 async fn apply_empty_explorer_role_preserves_current_model_and_reasoning_effort() {
     let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     let before_layers = session_flags_layer_count(&config);
@@ -185,8 +170,8 @@ async fn apply_role_preserves_unspecified_keys() {
     config.main_execve_wrapper_exe = Some(PathBuf::from("/tmp/codex-execve-wrapper"));
     let role_path = write_role_config(
         &home,
-        "effort-only.toml",
-        "developer_instructions = \"Stay focused\"\nmodel_reasoning_effort = \"high\"",
+        "instructions-only.toml",
+        "developer_instructions = \"Stay focused\"",
     )
     .await;
     config.agent_roles.insert(
@@ -198,12 +183,17 @@ async fn apply_role_preserves_unspecified_keys() {
         },
     );
 
+    config.model = Some("spawn-model".to_string());
+    config.model_reasoning_effort = Some(ReasoningEffort::Low);
+
     apply_role_to_config(&mut config, Some("custom"))
         .await
         .expect("custom role should apply");
 
-    assert_eq!(config.model.as_deref(), Some("base-model"));
-    assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::High));
+    assert_eq!(
+        (config.model.as_deref(), config.model_reasoning_effort),
+        (Some("spawn-model"), Some(ReasoningEffort::Low)),
+    );
     assert_eq!(
         config.codex_linux_sandbox_exe,
         Some(PathBuf::from("/tmp/codex-linux-sandbox"))
@@ -328,7 +318,9 @@ model_reasoning_effort = "high"
         .expect("custom role should apply");
 
     assert_eq!(config.active_profile_name(), Some("role-profile"));
-    let role_profile_config = role_profile_config.abs();
+    let role_profile_config = dunce::canonicalize(role_profile_config)
+        .expect("canonicalize role profile config")
+        .abs();
     assert_eq!(
         config.config_layer_stack.get_user_config_file(),
         Some(&role_profile_config)

@@ -155,6 +155,7 @@ mod tests {
             cwd: PathBuf::from("/tmp/polytick").try_into().unwrap(),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Exec,
+            can_accept_direct_input: None,
             thread_source: None,
             parent_thread_id: None,
             agent_nickname: None,

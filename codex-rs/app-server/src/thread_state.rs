@@ -40,6 +40,11 @@ pub(crate) struct PendingThreadResumeRequest {
     pub(crate) include_turns: bool,
     pub(crate) initial_turns_page:
         Option<codex_app_server_protocol::ThreadResumeInitialTurnsPageParams>,
+    pub(crate) paginated_turns: Option<Vec<Turn>>,
+    pub(crate) paginated_initial_turns_page: Option<codex_app_server_protocol::TurnsPage>,
+    pub(crate) paginated_initial_turns_page_with_active_slot:
+        Option<codex_app_server_protocol::TurnsPage>,
+    pub(crate) resume_cursor_store: Option<Arc<dyn codex_thread_store::ThreadStore>>,
     pub(crate) redact_resume_payloads: bool,
 }
 
@@ -326,7 +331,9 @@ mod tests {
     fn turn_completed(turn_id: &str) -> EventMsg {
         EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: turn_id.to_string(),
+            started_at: None,
             last_agent_message: None,
+            error: None,
             completed_at: None,
             duration_ms: None,
             time_to_first_token_ms: None,

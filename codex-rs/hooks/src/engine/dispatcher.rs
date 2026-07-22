@@ -58,6 +58,7 @@ pub(crate) fn select_handlers_for_matcher_inputs(
             | HookEventName::PermissionRequest
             | HookEventName::PostToolUse
             | HookEventName::SessionStart
+            | HookEventName::SessionEnd
             | HookEventName::SubagentStart
             | HookEventName::SubagentStop
             | HookEventName::PreCompact
@@ -180,7 +181,9 @@ pub(crate) fn completed_summary(
 
 pub(crate) fn scope_for_event(event_name: HookEventName) -> HookScope {
     match event_name {
-        HookEventName::SessionStart | HookEventName::SubagentStart => HookScope::Thread,
+        HookEventName::SessionStart | HookEventName::SessionEnd | HookEventName::SubagentStart => {
+            HookScope::Thread
+        }
         HookEventName::PreToolUse
         | HookEventName::PermissionRequest
         | HookEventName::PostToolUse
@@ -202,6 +205,7 @@ pub(crate) fn hook_event_name_label(event_name: HookEventName) -> &'static str {
         HookEventName::PostCompact => "PostCompact",
         HookEventName::SessionStart => "SessionStart",
         HookEventName::AfterCompaction => "AfterCompaction",
+        HookEventName::SessionEnd => "SessionEnd",
         HookEventName::UserPromptSubmit => "UserPromptSubmit",
         HookEventName::SubagentStart => "SubagentStart",
         HookEventName::SubagentStop => "SubagentStop",
@@ -276,6 +280,7 @@ mod tests {
             command: command.to_string(),
             timeout_sec: 5,
             status_message: None,
+            additional_context_limit: Default::default(),
             source_path: test_path_buf("/tmp/hooks.json").abs(),
             source: HookSource::User,
             display_order,
@@ -296,6 +301,7 @@ mod tests {
             command: command.to_string(),
             timeout_sec: 5,
             status_message: None,
+            additional_context_limit: Default::default(),
             source_path: test_path_buf("/tmp/hooks.json").abs(),
             source: HookSource::User,
             display_order,

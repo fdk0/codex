@@ -397,6 +397,7 @@ impl Session {
             codex.turn.reasoning_effort = %reasoning_effort,
             codex.turn.token_usage.input_tokens = field::Empty,
             codex.turn.token_usage.cached_input_tokens = field::Empty,
+            codex.turn.token_usage.cache_write_input_tokens = field::Empty,
             codex.turn.token_usage.non_cached_input_tokens = field::Empty,
             codex.turn.token_usage.output_tokens = field::Empty,
             codex.turn.token_usage.reasoning_output_tokens = field::Empty,
@@ -477,9 +478,13 @@ impl Session {
     ///
     /// This helper generates a fresh sub-id for the synthetic turn before delegating to the
     /// explicit-sub-id variant.
-    pub(crate) async fn maybe_start_turn_for_pending_work(self: &Arc<Self>) {
-        self.maybe_start_turn_for_pending_work_with_sub_id(uuid::Uuid::new_v4().to_string())
-            .await;
+    pub(crate) fn maybe_start_turn_for_pending_work(self: &Arc<Self>) -> BoxFuture<'static, ()> {
+        let session = Arc::clone(self);
+        Box::pin(async move {
+            session
+                .maybe_start_turn_for_pending_work_with_sub_id(uuid::Uuid::new_v4().to_string())
+                .await;
+        })
     }
 
     /// Starts a regular turn with the provided sub-id when pending work should wake an idle
@@ -491,13 +496,13 @@ impl Session {
         self: &Arc<Self>,
         sub_id: String,
     ) {
-        if !self.input_queue.has_trigger_turn_mailbox_items().await {
+        if self.is_shutdown() || !self.input_queue.has_trigger_turn_mailbox_items().await {
             return;
         }
 
         {
             let mut active_turn = self.active_turn.lock().await;
-            if active_turn.is_some() {
+            if self.is_shutdown() || active_turn.is_some() {
                 return;
             }
             *active_turn = Some(ActiveTurn::default());
@@ -700,6 +705,9 @@ impl Session {
                 cached_input_tokens: (total_token_usage.cached_input_tokens
                     - token_usage_at_turn_start.cached_input_tokens)
                     .max(0),
+                cache_write_input_tokens: (total_token_usage.cache_write_input_tokens
+                    - token_usage_at_turn_start.cache_write_input_tokens)
+                    .max(0),
                 output_tokens: (total_token_usage.output_tokens
                     - token_usage_at_turn_start.output_tokens)
                     .max(0),
@@ -718,6 +726,10 @@ impl Session {
             current_span.record(
                 "codex.turn.token_usage.cached_input_tokens",
                 turn_token_usage.cached_input(),
+            );
+            current_span.record(
+                "codex.turn.token_usage.cache_write_input_tokens",
+                turn_token_usage.cache_write_input_tokens,
             );
             current_span.record(
                 "codex.turn.token_usage.non_cached_input_tokens",
@@ -759,6 +771,11 @@ impl Session {
             );
             self.services.session_telemetry.histogram(
                 TURN_TOKEN_USAGE_METRIC,
+                turn_token_usage.cache_write_input_tokens,
+                &[("token_type", "cache_write_input"), tmp_mem],
+            );
+            self.services.session_telemetry.histogram(
+                TURN_TOKEN_USAGE_METRIC,
                 turn_token_usage.output_tokens,
                 &[("token_type", "output"), tmp_mem],
             );
@@ -774,6 +791,7 @@ impl Session {
             turn_context.config.memories.use_memories,
             turn_had_memory_citation,
         );
+        let started_at = turn_context.turn_timing_state.started_at_unix_secs().await;
         let (completed_at, duration_ms) = turn_context
             .turn_timing_state
             .completed_at_and_duration_ms()
@@ -790,6 +808,7 @@ impl Session {
             EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: Some(turn_context.sub_id.clone()),
                 reason,
+                started_at,
                 completed_at,
                 duration_ms,
             })
@@ -798,11 +817,14 @@ impl Session {
                 .turn_timing_state
                 .time_to_first_token_ms()
                 .await;
+            let error = turn_context.terminal_error.lock().await.clone();
             self.emit_turn_stop_lifecycle(turn_context.extension_data.as_ref())
                 .await;
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: turn_context.sub_id.clone(),
                 last_agent_message,
+                error,
+                started_at,
                 completed_at,
                 duration_ms,
                 time_to_first_token_ms,
@@ -915,6 +937,11 @@ impl Session {
             }
         }
 
+        let started_at = task
+            .turn_context
+            .turn_timing_state
+            .started_at_unix_secs()
+            .await;
         let (completed_at, duration_ms) = task
             .turn_context
             .turn_timing_state
@@ -929,6 +956,7 @@ impl Session {
         let event = EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: Some(task.turn_context.sub_id.clone()),
             reason,
+            started_at,
             completed_at,
             duration_ms,
         });

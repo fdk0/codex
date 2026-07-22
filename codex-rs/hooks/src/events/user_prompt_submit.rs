@@ -15,6 +15,8 @@ use crate::engine::ConfiguredHandler;
 use crate::engine::command_runner::CommandRunResult;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
+use crate::output_spill::AdditionalContext;
+use crate::output_spill::HookOutputSpiller;
 use crate::schema::NullableString;
 use crate::schema::SubagentCommandInputFields;
 use crate::schema::UserPromptSubmitCommandInput;
@@ -44,7 +46,7 @@ pub struct UserPromptSubmitOutcome {
 struct UserPromptSubmitHandlerData {
     should_stop: bool,
     stop_reason: Option<String>,
-    additional_contexts_for_model: Vec<String>,
+    additional_contexts_for_model: Vec<AdditionalContext>,
 }
 
 pub(crate) fn preview(
@@ -69,8 +71,10 @@ pub(crate) fn preview(
 pub(crate) async fn run(
     handlers: &[ConfiguredHandler],
     shell: &CommandShell,
+    output_spiller: &HookOutputSpiller,
     request: UserPromptSubmitRequest,
 ) -> UserPromptSubmitOutcome {
+    let session_id = request.session_id;
     let matched = dispatcher::select_handlers(
         handlers,
         dispatcher::HookSelectionContext {
@@ -133,6 +137,9 @@ pub(crate) async fn run(
             .iter()
             .map(|result| result.data.additional_contexts_for_model.as_slice()),
     );
+    let additional_contexts = output_spiller
+        .maybe_spill_additional_contexts(session_id, additional_contexts)
+        .await;
 
     UserPromptSubmitOutcome {
         hook_events: results.into_iter().map(|result| result.completed).collect(),
@@ -180,6 +187,7 @@ fn parse_completed(
                         common::append_additional_context(
                             &mut entries,
                             &mut additional_contexts_for_model,
+                            handler,
                             additional_context,
                         );
                     }
@@ -222,6 +230,7 @@ fn parse_completed(
                     common::append_additional_context(
                         &mut entries,
                         &mut additional_contexts_for_model,
+                        handler,
                         additional_context,
                     );
                 }
@@ -299,6 +308,7 @@ mod tests {
     use super::parse_completed;
     use crate::engine::ConfiguredHandler;
     use crate::engine::command_runner::CommandRunResult;
+    use crate::output_spill::AdditionalContext;
     use codex_config::HookConditions;
 
     #[test]
@@ -318,7 +328,10 @@ mod tests {
             UserPromptSubmitHandlerData {
                 should_stop: true,
                 stop_reason: Some("pause".to_string()),
-                additional_contexts_for_model: vec!["do not inject".to_string()],
+                additional_contexts_for_model: vec![AdditionalContext {
+                    text: "do not inject".to_string(),
+                    limit: Default::default(),
+                }],
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Stopped);
@@ -354,7 +367,10 @@ mod tests {
             UserPromptSubmitHandlerData {
                 should_stop: true,
                 stop_reason: Some("slow down".to_string()),
-                additional_contexts_for_model: vec!["do not inject".to_string()],
+                additional_contexts_for_model: vec![AdditionalContext {
+                    text: "do not inject".to_string(),
+                    limit: Default::default(),
+                }],
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Blocked);
@@ -438,6 +454,7 @@ mod tests {
             command: "echo hook".to_string(),
             timeout_sec: 5,
             status_message: None,
+            additional_context_limit: Default::default(),
             source_path: test_path_buf("/tmp/hooks.json").abs(),
             source: codex_protocol::protocol::HookSource::User,
             display_order: 0,

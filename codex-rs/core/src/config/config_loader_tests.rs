@@ -715,7 +715,7 @@ async fn user_project_profile_layers_profile_config_for_matching_cwd() {
         format!(
             r#"
 model = "gpt-main"
-approval_policy = "on-failure"
+approval_policy = "on-request"
 
 [projects."{project_key}"]
 trust_level = "trusted"
@@ -751,8 +751,11 @@ profile = "work"
     assert_eq!(
         user_layer.name,
         ConfigLayerSource::User {
-            file: AbsolutePathBuf::from_absolute_path(tmp.path().join("work.config.toml"))
-                .expect("selected config path"),
+            file: AbsolutePathBuf::from_absolute_path(
+                dunce::canonicalize(tmp.path().join("work.config.toml"))
+                    .expect("canonicalize selected config path"),
+            )
+            .expect("selected config path"),
             profile: Some("work".to_string()),
         }
     );
@@ -768,7 +771,7 @@ profile = "work"
             .effective_config()
             .get("approval_policy")
             .and_then(TomlValue::as_str),
-        Some("on-failure")
+        Some("on-request")
     );
 }
 
@@ -825,8 +828,11 @@ profile = "work"
     assert_eq!(
         user_layer.name,
         ConfigLayerSource::User {
-            file: AbsolutePathBuf::from_absolute_path(dotfiles.join("work.config.toml"))
-                .expect("selected config path"),
+            file: AbsolutePathBuf::from_absolute_path(
+                dunce::canonicalize(dotfiles.join("work.config.toml"))
+                    .expect("canonicalize selected config path"),
+            )
+            .expect("selected config path"),
             profile: Some("work".to_string()),
         }
     );
@@ -1567,6 +1573,9 @@ async fn system_requirements_define_managed_permission_profiles() -> anyhow::Res
         codex_home.join(CONFIG_TOML_FILE),
         r#"
 default_permissions = "managed-standard"
+
+[features]
+network_proxy = true
 "#,
     )
     .await?;
@@ -1581,6 +1590,11 @@ managed-standard = true
 
 [permissions.managed-standard]
 extends = ":workspace"
+
+[permissions.managed-standard.network]
+enabled = true
+proxy_url = "http://127.0.0.1:43128"
+enable_socks5 = false
 "#,
     )
     .await?;
@@ -1602,13 +1616,20 @@ extends = ":workspace"
             .allowed_permission_profiles,
         Some(BTreeMap::from([("managed-standard".to_string(), true)]))
     );
-    assert_eq!(
-        config
-            .permissions
-            .active_permission_profile()
-            .map(|profile| profile.id),
-        Some("managed-standard".to_string())
-    );
+    let active_permission_profile = config
+        .permissions
+        .active_permission_profile()
+        .expect("managed profile should be active");
+    assert_eq!(active_permission_profile.id, "managed-standard");
+
+    let network = config
+        .network_proxy_spec_for_active_permission_profile(
+            &active_permission_profile,
+            config.permissions.permission_profile(),
+        )?
+        .expect("managed profile should retain its network proxy configuration");
+    assert_eq!(network.proxy_host_and_port(), "127.0.0.1:43128");
+    assert!(!network.socks_enabled());
     Ok(())
 }
 

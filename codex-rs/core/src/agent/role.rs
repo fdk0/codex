@@ -2,9 +2,10 @@
 //!
 //! Roles are selected at spawn time and are loaded with the same config machinery as
 //! `config.toml`. This module resolves built-in and user-defined role files, inserts the role as a
-//! high-precedence layer, and preserves the caller's current profile/provider unless the role
-//! explicitly takes ownership of model selection. It does not decide when to spawn a sub-agent or
-//! which role to use; the multi-agent tool handler owns that orchestration.
+//! high-precedence layer, and preserves the caller's current profile, model, reasoning effort,
+//! provider, and service tier unless the role layer takes ownership of those settings. It does not
+//! decide when to spawn a sub-agent or which role to use; the multi-agent tool handler owns that
+//! orchestration.
 
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
@@ -225,6 +226,17 @@ mod reload {
         preserve_current_provider: bool,
         preserve_current_service_tier: bool,
     ) -> anyhow::Result<Config> {
+        let role_profile_v2_sets_model = role_profile_v2_layer
+            .as_ref()
+            .is_some_and(|layer| layer.config.get("model").is_some());
+        let role_profile_v2_sets_reasoning_effort = role_profile_v2_layer
+            .as_ref()
+            .is_some_and(|layer| layer.config.get("model_reasoning_effort").is_some());
+        let preserve_current_model =
+            role_layer_toml.get("model").is_none() && !role_profile_v2_sets_model;
+        let preserve_current_reasoning_effort =
+            role_layer_toml.get("model_reasoning_effort").is_none()
+                && !role_profile_v2_sets_reasoning_effort;
         let config_layer_stack =
             build_config_layer_stack(config, &role_layer_toml, role_profile_v2_layer)?;
         let mut merged_config = deserialize_effective_config(config, &config_layer_stack)?;
@@ -232,11 +244,12 @@ mod reload {
             merged_config.profile = None;
         }
 
-        let next_config = Config::load_config_with_layer_stack(
+        let mut next_config = Config::load_config_with_layer_stack(
             LOCAL_FS.as_ref(),
             merged_config,
             reload_overrides(
                 config,
+                preserve_current_model,
                 preserve_current_provider,
                 preserve_current_service_tier,
             ),
@@ -244,6 +257,11 @@ mod reload {
             config_layer_stack,
         )
         .await?;
+        if preserve_current_reasoning_effort {
+            next_config
+                .model_reasoning_effort
+                .clone_from(&config.model_reasoning_effort);
+        }
         Ok(next_config)
     }
 
@@ -308,11 +326,15 @@ mod reload {
 
     fn reload_overrides(
         config: &Config,
+        preserve_current_model: bool,
         preserve_current_provider: bool,
         preserve_current_service_tier: bool,
     ) -> ConfigOverrides {
         ConfigOverrides {
             cwd: Some(config.cwd.to_path_buf()),
+            model: preserve_current_model
+                .then(|| config.model.clone())
+                .flatten(),
             model_provider: preserve_current_provider.then(|| config.model_provider_id.clone()),
             service_tier: preserve_current_service_tier.then(|| config.service_tier.clone()),
             codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
@@ -349,10 +371,7 @@ pub(crate) mod spawn_tool_spec {
             }
         }
 
-        format!(
-            "Optional type name for the new agent. If omitted, `{DEFAULT_ROLE_NAME}` is used.\nAvailable roles:\n{}",
-            formatted_roles.join("\n"),
-        )
+        format!("Available roles:\n{}", formatted_roles.join("\n"))
     }
 
     fn format_role(name: &str, declaration: &AgentRoleConfig) -> String {

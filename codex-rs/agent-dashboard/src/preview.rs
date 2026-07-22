@@ -97,6 +97,7 @@ mod tests {
             cwd: PathBuf::from("/tmp").try_into().unwrap(),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Exec,
+            can_accept_direct_input: None,
             thread_source: None,
             parent_thread_id: Some("parent".to_string()),
             agent_nickname: Some("Scout".to_string()),

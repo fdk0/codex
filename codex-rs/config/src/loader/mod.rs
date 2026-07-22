@@ -472,10 +472,13 @@ async fn project_profile_from_user_config(
     codex_home: &Path,
 ) -> io::Result<Option<ProfileV2Name>> {
     let _guard = AbsolutePathBufGuard::new(codex_home);
-    let cfg: ConfigToml = user_config
-        .clone()
-        .try_into()
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let cfg: ConfigToml = match user_config.clone().try_into() {
+        Ok(cfg) => cfg,
+        // The normal merged-config validation path owns schema diagnostics and
+        // their source-layer classification. This early probe only selects a
+        // project profile when the base user config is otherwise valid.
+        Err(_) => return Ok(None),
+    };
     drop(_guard);
 
     let repo_root = resolve_root_git_project_for_trust(fs, cwd).await;

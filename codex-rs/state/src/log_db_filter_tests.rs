@@ -1,5 +1,4 @@
 use pretty_assertions::assert_eq;
-use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
@@ -16,11 +15,7 @@ async fn sqlite_sink_drops_noisy_low_level_logs() {
     let layer = start(runtime.clone());
 
     let guard = tracing_subscriber::registry()
-        .with(
-            layer
-                .clone()
-                .with_filter(Targets::new().with_default(tracing::Level::TRACE)),
-        )
+        .with(layer.clone().with_filter(default_filter()))
         .set_default();
 
     tracing::trace!(target: "opentelemetry_sdk", "dropped-trace");
@@ -35,6 +30,11 @@ async fn sqlite_sink_drops_noisy_low_level_logs() {
     tracing::info!(target: "opentelemetry_sdk", "retained-info");
     tracing::warn!(target: "log", "retained-warn");
     tracing::trace!(target: "codex_state", "retained-trace");
+    tracing::trace!(
+        target: "codex_api::responses_websocket_timing",
+        payload = "complete timing payload",
+        "dropped-websocket-timing"
+    );
 
     layer.flush().await;
     drop(guard);

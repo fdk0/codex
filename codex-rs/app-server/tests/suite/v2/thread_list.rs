@@ -1017,7 +1017,7 @@ async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result
         (
             older_child_id,
             "2025-02-01T10:00:00Z",
-            CoreSessionSource::SubAgent(SubAgentSource::Other("agent_job:job-1".to_string())),
+            CoreSessionSource::SubAgent(SubAgentSource::Other("custom:worker-1".to_string())),
             "other_provider",
         ),
         (
@@ -1104,26 +1104,8 @@ async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result
         /*source_kinds*/ None,
     )
     .await?;
-    let third_page = list_threads_for_relation(
-        &mut mcp,
-        ThreadListRelation::DirectChildrenOf(parent_id),
-        second_page.next_cursor.clone(),
-        /*limit*/ 1,
-        /*model_providers*/ None,
-        /*source_kinds*/ None,
-    )
-    .await?;
-
     assert_eq!(
         first_page
-            .data
-            .iter()
-            .map(|thread| thread.id.clone())
-            .collect::<Vec<_>>(),
-        vec![grandchild_id.to_string()]
-    );
-    assert_eq!(
-        second_page
             .data
             .iter()
             .map(|thread| thread.id.clone())
@@ -1131,21 +1113,20 @@ async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result
         vec![newer_child_id.to_string()]
     );
     assert_eq!(
-        third_page
+        second_page
             .data
             .iter()
             .map(|thread| thread.id.clone())
             .collect::<Vec<_>>(),
         vec![older_child_id.to_string()]
     );
-    assert_eq!(third_page.next_cursor, None);
+    assert_eq!(second_page.next_cursor, None);
     let expected_parent_id = parent_id.to_string();
     assert!(
         first_page
             .data
             .iter()
             .chain(&second_page.data)
-            .chain(&third_page.data)
             .all(|thread| thread.parent_thread_id.as_deref() == Some(expected_parent_id.as_str()))
     );
     let interactive_only = list_threads_for_relation(
@@ -1180,7 +1161,7 @@ async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result
             .iter()
             .map(|thread| thread.id.clone())
             .collect::<Vec<_>>(),
-        vec![grandchild_id.to_string(), newer_child_id.to_string()]
+        vec![newer_child_id.to_string()]
     );
     assert!(
         source_linked

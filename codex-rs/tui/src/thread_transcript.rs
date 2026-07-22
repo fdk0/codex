@@ -9,10 +9,14 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::ReasoningSummaryCell;
 use crate::history_cell::UserHistoryCell;
+use crate::history_cell::new_subagent_notification_event;
 use crate::history_cell::split_reasoning_summary_parts;
+use crate::inline_visualization::InlineVisualizationContext;
 use crate::multi_agents::sub_agent_activity_summary;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::Turn;
+use codex_app_server_protocol::UserInput;
 use codex_protocol::ThreadId;
 use codex_protocol::items::UserMessageItem;
 use ratatui::style::Stylize as _;
@@ -30,30 +34,55 @@ pub(crate) async fn load_session_transcript(
     app_server: &mut AppServerSession,
     thread_id: ThreadId,
     raw_reasoning_visibility: RawReasoningVisibility,
+    codex_home: Option<&std::path::Path>,
 ) -> std::io::Result<TranscriptCells> {
     let thread = app_server
         .thread_read(thread_id, /*include_turns*/ true)
         .await
         .map_err(std::io::Error::other)?;
     Ok(thread_to_transcript_cells(
-        &thread,
+        thread,
         raw_reasoning_visibility,
+        codex_home,
     ))
 }
 
 pub(crate) fn thread_to_transcript_cells(
-    thread: &Thread,
+    thread: Thread,
     raw_reasoning_visibility: RawReasoningVisibility,
+    codex_home: Option<&std::path::Path>,
 ) -> TranscriptCells {
-    let cwd = thread.cwd.as_path();
+    let cwd = thread.cwd;
+    let inline_visualization_context = codex_home.and_then(|codex_home| {
+        ThreadId::from_string(&thread.id)
+            .ok()
+            .and_then(|thread_id| InlineVisualizationContext::new(codex_home, thread_id))
+    });
     let mut cells: TranscriptCells = Vec::new();
-    for item in thread.turns.iter().flat_map(|turn| turn.items.iter()) {
+    for item in projected_thread_items(&thread.turns) {
         match item {
             ThreadItem::UserMessage {
                 id,
                 client_id,
                 content,
             } => {
+                if let [UserInput::Text { text, .. }] = content.as_slice()
+                    && let Some(cell) = new_subagent_notification_event(text)
+                {
+                    cells.push(Arc::new(cell));
+                    continue;
+                }
+                if content.iter().any(|input| {
+                    matches!(
+                        input,
+                        UserInput::Audio { .. } | UserInput::LocalAudio { .. }
+                    )
+                }) {
+                    tracing::warn!(
+                        user_message_id = id,
+                        "audio user inputs are not supported by the TUI and will be omitted"
+                    );
+                }
                 let item = UserMessageItem {
                     id: id.clone(),
                     client_id: client_id.clone(),
@@ -71,11 +100,16 @@ pub(crate) fn thread_to_transcript_cells(
                 }));
             }
             ThreadItem::AgentMessage { text, .. } => {
-                let parsed = parse_assistant_markdown(text, cwd);
+                if let Some(cell) = new_subagent_notification_event(text) {
+                    cells.push(Arc::new(cell));
+                    continue;
+                }
+                let parsed = parse_assistant_markdown(text, cwd.as_path());
                 if !parsed.visible_markdown.trim().is_empty() {
-                    cells.push(Arc::new(AgentMarkdownCell::new(
+                    cells.push(Arc::new(AgentMarkdownCell::new_with_inline_visualizations(
                         parsed.visible_markdown,
-                        cwd,
+                        cwd.as_path(),
+                        inline_visualization_context.clone(),
                     )));
                 }
             }
@@ -83,7 +117,7 @@ pub(crate) fn thread_to_transcript_cells(
                 if !text.trim().is_empty() {
                     cells.push(Arc::new(crate::history_cell::new_proposed_plan(
                         text.clone(),
-                        cwd,
+                        cwd.as_path(),
                     )));
                 }
             }
@@ -100,7 +134,10 @@ pub(crate) fn thread_to_transcript_cells(
                     };
                 if !text.trim().is_empty() {
                     cells.push(Arc::new(ReasoningSummaryCell::new(
-                        header, text, cwd, /*transcript_only*/ false,
+                        header,
+                        text,
+                        cwd.as_path(),
+                        /*transcript_only*/ false,
                     )));
                 }
             }
@@ -117,6 +154,28 @@ pub(crate) fn thread_to_transcript_cells(
         ])));
     }
     cells
+}
+
+pub(crate) fn projected_thread_items(turns: &[Turn]) -> impl Iterator<Item = &ThreadItem> + '_ {
+    turns.iter().enumerate().flat_map(|(turn_index, turn)| {
+        let hidden_nested_review_turn = turn_index.checked_sub(1).is_some_and(|previous_index| {
+            crate::app_backtrack::is_hidden_nested_review_turn(&turns[previous_index], turn)
+        });
+        turn.items.iter().filter(move |item| {
+            !hidden_nested_review_turn || !matches!(item, ThreadItem::UserMessage { .. })
+        })
+    })
+}
+
+pub(crate) fn subagent_notification_preview_text(message: &str) -> Option<String> {
+    let cell = new_subagent_notification_event(message)?;
+    Some(
+        cell.raw_lines()
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 fn fallback_transcript_cell(item: &ThreadItem) -> Option<PlainHistoryCell> {
@@ -230,7 +289,7 @@ fn fallback_transcript_cell(item: &ThreadItem) -> Option<PlainHistoryCell> {
         | ThreadItem::AgentMessage { .. }
         | ThreadItem::Plan { .. }
         | ThreadItem::Reasoning { .. }
-        | ThreadItem::Sleep { .. } => return None,
+        | ThreadItem::Sleep(_) => return None,
     };
     (!lines.is_empty()).then(|| PlainHistoryCell::new(lines))
 }

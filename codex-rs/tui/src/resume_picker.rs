@@ -9,6 +9,7 @@ use crate::clipboard_paste::normalize_pasted_search_query;
 use crate::color::blend;
 use crate::color::is_light;
 use crate::git_action_directives::parse_assistant_markdown;
+use crate::inline_visualization::InlineVisualizationContext;
 use crate::key_hint::KeyBindingListExt;
 use crate::key_hint::is_plain_text_key_event;
 use crate::keymap::ListKeymap;
@@ -26,6 +27,8 @@ use crate::text_formatting::truncate_text;
 use crate::thread_transcript::RawReasoningVisibility;
 use crate::thread_transcript::TranscriptCells;
 use crate::thread_transcript::load_session_transcript;
+use crate::thread_transcript::projected_thread_items;
+use crate::thread_transcript::subagent_notification_preview_text;
 use crate::tui::FrameRequester;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
@@ -377,6 +380,7 @@ async fn run_resume_picker_with_launch_context(
             app_server,
             include_non_interactive,
             raw_reasoning_visibility(config),
+            (!uses_remote_workspace).then(|| config.codex_home.to_path_buf()),
             bg_tx,
         ),
         bg_rx,
@@ -422,6 +426,7 @@ pub async fn run_fork_picker_with_app_server(
             app_server,
             /*include_non_interactive*/ false,
             raw_reasoning_visibility(config),
+            (!uses_remote_workspace).then(|| config.codex_home.to_path_buf()),
             bg_tx,
         ),
         bg_rx,
@@ -551,6 +556,7 @@ fn spawn_app_server_page_loader(
     app_server: AppServerSession,
     include_non_interactive: bool,
     raw_reasoning_visibility: RawReasoningVisibility,
+    codex_home: Option<PathBuf>,
     bg_tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) -> PickerLoader {
     let (request_tx, mut request_rx) = mpsc::unbounded_channel::<PickerLoadRequest>();
@@ -577,7 +583,9 @@ fn spawn_app_server_page_loader(
                     });
                 }
                 PickerLoadRequest::Preview { thread_id } => {
-                    let preview = load_transcript_preview(&mut app_server, thread_id).await;
+                    let preview =
+                        load_transcript_preview(&mut app_server, thread_id, codex_home.as_deref())
+                            .await;
                     let _ = bg_tx.send(BackgroundEvent::Preview { thread_id, preview });
                 }
                 PickerLoadRequest::Transcript { thread_id } => {
@@ -585,6 +593,7 @@ fn spawn_app_server_page_loader(
                         &mut app_server,
                         thread_id,
                         raw_reasoning_visibility,
+                        codex_home.as_deref(),
                     )
                     .await;
                     let _ = bg_tx.send(BackgroundEvent::Transcript {
@@ -765,6 +774,7 @@ async fn load_app_server_page(
 async fn load_transcript_preview(
     app_server: &mut AppServerSession,
     thread_id: ThreadId,
+    codex_home: Option<&Path>,
 ) -> std::io::Result<Vec<TranscriptPreviewLine>> {
     const MAX_PREVIEW_LINES: usize = 6;
 
@@ -773,14 +783,15 @@ async fn load_transcript_preview(
         .await
         .map_err(std::io::Error::other)?;
     let cwd = thread.cwd.as_path();
-    let mut lines = thread
-        .turns
-        .iter()
-        .flat_map(|turn| turn.items.iter())
+    let inline_visualization_context = codex_home.and_then(|codex_home| {
+        ThreadId::from_string(&thread.id)
+            .ok()
+            .and_then(|thread_id| InlineVisualizationContext::new(codex_home, thread_id))
+    });
+    let mut lines = projected_thread_items(&thread.turns)
         .filter_map(|item| match item {
-            ThreadItem::UserMessage { content, .. } => Some(TranscriptPreviewLine {
-                speaker: TranscriptPreviewSpeaker::User,
-                text: content
+            ThreadItem::UserMessage { content, .. } => {
+                let text = content
                     .iter()
                     .filter_map(|input| match input {
                         codex_app_server_protocol::UserInput::Text { text, .. } => {
@@ -789,12 +800,39 @@ async fn load_transcript_preview(
                         _ => None,
                     })
                     .collect::<Vec<_>>()
-                    .join(" "),
-            }),
-            ThreadItem::AgentMessage { text, .. } => Some(TranscriptPreviewLine {
-                speaker: TranscriptPreviewSpeaker::Assistant,
-                text: parse_assistant_markdown(text, cwd).visible_markdown,
-            }),
+                    .join(" ");
+                let (speaker, text) = subagent_notification_preview_text(&text)
+                    .map(|text| (TranscriptPreviewSpeaker::Assistant, text))
+                    .unwrap_or((TranscriptPreviewSpeaker::User, text));
+                Some(TranscriptPreviewLine { speaker, text })
+            }
+            ThreadItem::AgentMessage { text, .. } => {
+                if let Some(text) = subagent_notification_preview_text(text) {
+                    return Some(TranscriptPreviewLine {
+                        speaker: TranscriptPreviewSpeaker::Assistant,
+                        text,
+                    });
+                }
+                let visible_markdown = parse_assistant_markdown(text, cwd).visible_markdown;
+                let rewritten = crate::inline_visualization::rewrite_inline_visualizations(
+                    &visible_markdown,
+                    inline_visualization_context.as_ref(),
+                );
+                let mut text = rewritten.markdown.into_owned();
+                for (placeholder, link) in &rewritten.trusted_file_links {
+                    text = text.replace(
+                        &format!(
+                            "{}  \n[{}]({placeholder})",
+                            link.markdown_label, link.markdown_destination_label
+                        ),
+                        &format!("{}  \n{}", link.display_label, link.destination),
+                    );
+                }
+                Some(TranscriptPreviewLine {
+                    speaker: TranscriptPreviewSpeaker::Assistant,
+                    text,
+                })
+            }
             _ => None,
         })
         .flat_map(|line| {
@@ -5737,6 +5775,7 @@ session_picker_view = "dense"
             cwd: test_path_buf("/tmp").abs(),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
+            can_accept_direct_input: None,
             thread_source: None,
             agent_nickname: None,
             agent_role: None,
@@ -5775,6 +5814,7 @@ session_picker_view = "dense"
             cwd: test_path_buf("/tmp").abs(),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
+            can_accept_direct_input: None,
             thread_source: None,
             agent_nickname: None,
             agent_role: None,
@@ -5811,17 +5851,134 @@ session_picker_view = "dense"
             }],
         };
 
-        let rendered = thread_to_transcript_cells(&thread, RawReasoningVisibility::Visible)
-            .into_iter()
-            .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let rendered = thread_to_transcript_cells(
+            thread,
+            RawReasoningVisibility::Visible,
+            /*codex_home*/ None,
+        )
+        .into_iter()
+        .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
 
         assert!(rendered.contains("hello from user"));
         assert!(rendered.contains("hello from assistant"));
         assert!(rendered.contains("Proposed Plan"));
         assert!(rendered.contains("Do the thing"));
+    }
+
+    #[test]
+    fn thread_to_transcript_cells_projects_hidden_prompts_and_subagent_notices() {
+        use crate::thread_transcript::thread_to_transcript_cells;
+
+        let review_prompt =
+            "Review the current code changes (staged, unstaged, and untracked files).";
+        let user_message = |id: &str, text: &str| ThreadItem::UserMessage {
+            id: id.to_string(),
+            client_id: None,
+            content: vec![codex_app_server_protocol::UserInput::Text {
+                text: text.to_string(),
+                text_elements: Vec::new(),
+            }],
+        };
+        let turn = |id: &str,
+                    status: codex_app_server_protocol::TurnStatus,
+                    items: Vec<ThreadItem>| codex_app_server_protocol::Turn {
+            id: id.to_string(),
+            items_view: codex_app_server_protocol::TurnItemsView::Full,
+            items,
+            status,
+            error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
+        };
+        let thread_id = ThreadId::new();
+        let thread = Thread {
+            id: thread_id.to_string(),
+            extra: None,
+            session_id: thread_id.to_string(),
+            parent_thread_id: None,
+            forked_from_id: None,
+            preview: String::from("preview"),
+            ephemeral: false,
+            history_mode: Default::default(),
+            model_provider: String::from("openai"),
+            created_at: 1,
+            updated_at: 2,
+            recency_at: Some(2),
+            status: codex_app_server_protocol::ThreadStatus::Idle,
+            path: None,
+            cwd: test_path_buf("/tmp").abs(),
+            cli_version: String::from("0.0.0"),
+            source: codex_app_server_protocol::SessionSource::Cli,
+            can_accept_direct_input: None,
+            thread_source: None,
+            agent_nickname: None,
+            agent_role: None,
+            git_info: None,
+            name: None,
+            turns: vec![
+                turn(
+                    "review",
+                    codex_app_server_protocol::TurnStatus::Completed,
+                    vec![
+                        ThreadItem::EnteredReviewMode {
+                            id: String::from("review-start"),
+                            review: String::from("current changes"),
+                        },
+                        ThreadItem::ExitedReviewMode {
+                            id: String::from("review-end"),
+                            review: String::from("review complete"),
+                        },
+                    ],
+                ),
+                turn(
+                    "hidden-review-child",
+                    codex_app_server_protocol::TurnStatus::Interrupted,
+                    vec![
+                        user_message("hidden-1", review_prompt),
+                        user_message("hidden-2", review_prompt),
+                    ],
+                ),
+                turn(
+                    "visible",
+                    codex_app_server_protocol::TurnStatus::Completed,
+                    vec![
+                        user_message(
+                            "notice",
+                            r#"<subagent_notification>{"agent_path":"/root/worker","status":{"completed":"done"}}</subagent_notification>"#,
+                        ),
+                        ThreadItem::AgentMessage {
+                            id: String::from("assistant"),
+                            text: String::from("visible assistant"),
+                            phase: None,
+                            memory_citation: None,
+                        },
+                    ],
+                ),
+            ],
+        };
+
+        let rendered = thread_to_transcript_cells(
+            thread,
+            RawReasoningVisibility::Visible,
+            /*codex_home*/ None,
+        )
+        .into_iter()
+        .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+        assert!(!rendered.contains(review_prompt));
+        assert!(!rendered.contains("<subagent_notification>"));
+        assert_eq!(rendered.matches("Subagent completed").count(), 1);
+        insta::assert_snapshot!(
+            "thread_transcript_projects_hidden_prompts_and_subagent_notices",
+            rendered
+        );
     }
 
     #[test]
@@ -5847,6 +6004,7 @@ session_picker_view = "dense"
             cwd: test_path_buf("/tmp").abs(),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
+            can_accept_direct_input: None,
             thread_source: None,
             agent_nickname: None,
             agent_role: None,
@@ -5868,18 +6026,26 @@ session_picker_view = "dense"
             }],
         };
 
-        let hidden = thread_to_transcript_cells(&thread, RawReasoningVisibility::Hidden)
-            .into_iter()
-            .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let visible = thread_to_transcript_cells(&thread, RawReasoningVisibility::Visible)
-            .into_iter()
-            .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let hidden = thread_to_transcript_cells(
+            thread.clone(),
+            RawReasoningVisibility::Hidden,
+            /*codex_home*/ None,
+        )
+        .into_iter()
+        .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let visible = thread_to_transcript_cells(
+            thread,
+            RawReasoningVisibility::Visible,
+            /*codex_home*/ None,
+        )
+        .into_iter()
+        .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
 
         assert!(!hidden.contains("private raw chain of thought"));
         assert!(visible.contains("private raw chain of thought"));
@@ -5908,6 +6074,7 @@ session_picker_view = "dense"
             cwd: test_path_buf("/tmp").abs(),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
+            can_accept_direct_input: None,
             thread_source: None,
             agent_nickname: None,
             agent_role: None,
@@ -5929,12 +6096,16 @@ session_picker_view = "dense"
             }],
         };
 
-        let rendered = thread_to_transcript_cells(&thread, RawReasoningVisibility::Visible)
-            .into_iter()
-            .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let rendered = thread_to_transcript_cells(
+            thread,
+            RawReasoningVisibility::Visible,
+            /*codex_home*/ None,
+        )
+        .into_iter()
+        .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
 
         assert!(rendered.contains("raw reasoning content"));
         assert!(!rendered.contains("public summary"));

@@ -48,6 +48,8 @@ pub struct HookEventsToml {
     pub session_start: Vec<MatcherGroup>,
     #[serde(rename = "AfterCompaction", default)]
     pub after_compaction: Vec<MatcherGroup>,
+    #[serde(rename = "SessionEnd", default)]
+    pub session_end: Vec<MatcherGroup>,
     #[serde(rename = "UserPromptSubmit", default)]
     pub user_prompt_submit: Vec<MatcherGroup>,
     #[serde(rename = "SubagentStart", default)]
@@ -68,6 +70,7 @@ impl HookEventsToml {
             post_compact,
             session_start,
             after_compaction,
+            session_end,
             user_prompt_submit,
             subagent_start,
             subagent_stop,
@@ -80,6 +83,7 @@ impl HookEventsToml {
             && post_compact.is_empty()
             && session_start.is_empty()
             && after_compaction.is_empty()
+            && session_end.is_empty()
             && user_prompt_submit.is_empty()
             && subagent_start.is_empty()
             && subagent_stop.is_empty()
@@ -95,6 +99,7 @@ impl HookEventsToml {
             post_compact,
             session_start,
             after_compaction,
+            session_end,
             user_prompt_submit,
             subagent_start,
             subagent_stop,
@@ -108,6 +113,7 @@ impl HookEventsToml {
             post_compact,
             session_start,
             after_compaction,
+            session_end,
             user_prompt_submit,
             subagent_start,
             subagent_stop,
@@ -119,7 +125,7 @@ impl HookEventsToml {
         .sum()
     }
 
-    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 11] {
+    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 12] {
         [
             (HookEventName::PreToolUse, self.pre_tool_use),
             (HookEventName::PermissionRequest, self.permission_request),
@@ -128,6 +134,7 @@ impl HookEventsToml {
             (HookEventName::PostCompact, self.post_compact),
             (HookEventName::SessionStart, self.session_start),
             (HookEventName::AfterCompaction, self.after_compaction),
+            (HookEventName::SessionEnd, self.session_end),
             (HookEventName::UserPromptSubmit, self.user_prompt_submit),
             (HookEventName::SubagentStart, self.subagent_start),
             (HookEventName::SubagentStop, self.subagent_stop),
@@ -176,6 +183,16 @@ pub enum HookHandlerConfig {
         r#async: bool,
         #[serde(default, rename = "statusMessage")]
         status_message: Option<String>,
+        /// Approximate token threshold for spilling this hook's `additionalContext` to disk.
+        /// Unset uses 2,500 tokens; `0` disables spilling for this hook. The threshold is
+        /// evaluated against the original context; a spilled preview also includes recovery
+        /// metadata.
+        #[serde(
+            default,
+            rename = "additionalContextLimit",
+            skip_serializing_if = "Option::is_none"
+        )]
+        additional_context_limit: Option<usize>,
     },
     #[serde(rename = "prompt")]
     Prompt {},

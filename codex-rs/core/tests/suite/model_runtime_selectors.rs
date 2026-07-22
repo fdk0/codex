@@ -329,7 +329,7 @@ async fn unsupported_code_mode_warning_is_emitted_each_turn() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_multi_agent_selector_overrides_feature_flags() -> Result<()> {
+async fn remote_multi_agent_selector_overrides_feature_fallbacks() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let mut v2_model = remote_model("test-multi-agent-v2");
@@ -363,7 +363,11 @@ async fn remote_multi_agent_selector_overrides_feature_flags() -> Result<()> {
     let disabled_body = response_body_for_remote_model(disabled_model, |config| {
         config
             .features
-            .enable(Feature::MultiAgentV2)
+            .disable(Feature::Collab)
+            .expect("test config should allow feature update");
+        config
+            .features
+            .disable(Feature::MultiAgentV2)
             .expect("test config should allow feature update");
     })
     .await?;
@@ -373,6 +377,68 @@ async fn remote_multi_agent_selector_overrides_feature_flags() -> Result<()> {
             && name != "collaboration"
             && !MULTI_AGENT_V2_TOOL_NAMES.contains(&name.as_str())
     }));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_agent_config_precedence_overrides_remote_model_selector() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let mut v2_model = remote_model("test-multi-agent-v2");
+    v2_model.multi_agent_version = Some(MultiAgentVersion::V2);
+    let disabled_body = response_body_for_remote_model(v2_model, |config| {
+        config.agents_enabled = false;
+        config
+            .features
+            .enable(Feature::Collab)
+            .expect("test config should allow feature update");
+        config
+            .features
+            .disable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+    })
+    .await?;
+    let disabled_tools = tool_names(&disabled_body);
+    assert!(disabled_tools.iter().all(|name| {
+        name != "multi_agent_v1"
+            && name != "collaboration"
+            && !MULTI_AGENT_V2_TOOL_NAMES.contains(&name.as_str())
+    }));
+
+    let mut v1_model = remote_model("test-multi-agent-v1");
+    v1_model.multi_agent_version = Some(MultiAgentVersion::V1);
+    let v1_body = response_body_for_remote_model(v1_model, |config| {
+        config
+            .features
+            .enable(Feature::Collab)
+            .expect("test config should allow feature update");
+        config
+            .features
+            .disable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+    })
+    .await?;
+    assert!(tool_names(&v1_body).contains(&"multi_agent_v1".to_string()));
+
+    let mut disabled_model = remote_model("test-multi-agent-disabled");
+    disabled_model.multi_agent_version = Some(MultiAgentVersion::Disabled);
+    let v2_body = response_body_for_remote_model(disabled_model, |config| {
+        config.agents_enabled = false;
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+    })
+    .await?;
+    let v2_tools = tool_names(&v2_body);
+    assert!(
+        MULTI_AGENT_V2_TOOL_NAMES
+            .iter()
+            .all(|tool_name| v2_tools.iter().any(|name| name.as_str() == *tool_name)),
+        "explicit V2 config should expose all current plain multi-agent tools: {v2_tools:?}"
+    );
+    assert!(v2_tools.iter().all(|name| name != "collaboration"));
 
     Ok(())
 }

@@ -1019,6 +1019,7 @@ mod thread_processor_behavior_tests {
 
         let line = RolloutLine {
             timestamp: timestamp.clone(),
+            ordinal: None,
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: session_meta.clone(),
                 git: None,
@@ -1086,6 +1087,7 @@ mod thread_processor_behavior_tests {
 
         let line = RolloutLine {
             timestamp,
+            ordinal: None,
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: session_meta,
                 git: None,
@@ -1128,6 +1130,7 @@ mod thread_processor_behavior_tests {
 
         let line = RolloutLine {
             timestamp,
+            ordinal: None,
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: session_meta,
                 git: None,

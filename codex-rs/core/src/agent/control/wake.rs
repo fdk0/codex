@@ -451,13 +451,7 @@ impl AgentControl {
         let Some(child_thread) = child_thread else {
             return false;
         };
-        let config = child_thread
-            .codex
-            .session
-            .get_config()
-            .await
-            .as_ref()
-            .clone();
+        let config = child_thread.session.get_config().await.as_ref().clone();
         match self.ensure_v2_agent_loaded(config, parent_thread_id).await {
             Ok(()) => true,
             Err(err) => {
@@ -550,27 +544,18 @@ impl AgentControl {
         let Ok(child_thread) = state.get_thread(child_thread_id).await else {
             return false;
         };
-        if child_thread
-            .codex
-            .session
-            .active_turn
-            .lock()
-            .await
-            .is_some()
-        {
+        if child_thread.session.active_turn.lock().await.is_some() {
             return true;
         }
         child_thread
-            .codex
             .session
             .input_queue
             .has_trigger_turn_mailbox_items()
             .await
             || child_thread
-                .codex
                 .session
                 .input_queue
-                .has_pending_input(&child_thread.codex.session.active_turn)
+                .has_pending_input(&child_thread.session.active_turn)
                 .await
     }
 

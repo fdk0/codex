@@ -14,6 +14,8 @@ use crate::engine::ConfiguredHandler;
 use crate::engine::command_runner::CommandRunResult;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
+use crate::output_spill::AdditionalContext;
+use crate::output_spill::HookOutputSpiller;
 use crate::schema::AfterCompactionCommandInput;
 use crate::schema::NullableString;
 
@@ -54,7 +56,7 @@ pub struct AfterCompactionOutcome {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct AfterCompactionHandlerData {
-    additional_contexts_for_model: Vec<String>,
+    additional_contexts_for_model: Vec<AdditionalContext>,
 }
 
 pub(crate) fn preview(
@@ -79,8 +81,10 @@ pub(crate) fn preview(
 pub(crate) async fn run(
     handlers: &[ConfiguredHandler],
     shell: &CommandShell,
+    output_spiller: &HookOutputSpiller,
     request: AfterCompactionRequest,
 ) -> AfterCompactionOutcome {
+    let session_id = request.session_id;
     let matched = dispatcher::select_handlers(
         handlers,
         dispatcher::HookSelectionContext {
@@ -134,6 +138,9 @@ pub(crate) async fn run(
             .iter()
             .map(|result| result.data.additional_contexts_for_model.as_slice()),
     );
+    let additional_contexts = output_spiller
+        .maybe_spill_additional_contexts(session_id, additional_contexts)
+        .await;
 
     AfterCompactionOutcome {
         hook_events: results.into_iter().map(|result| result.completed).collect(),
@@ -175,6 +182,7 @@ fn parse_completed(
                         common::append_additional_context(
                             &mut entries,
                             &mut additional_contexts_for_model,
+                            handler,
                             additional_context,
                         );
                     }
@@ -192,6 +200,7 @@ fn parse_completed(
                     common::append_additional_context(
                         &mut entries,
                         &mut additional_contexts_for_model,
+                        handler,
                         additional_context,
                     );
                 }
@@ -244,6 +253,7 @@ fn serialization_failure_outcome(hook_events: Vec<HookCompletedEvent>) -> AfterC
 mod tests {
     use std::path::PathBuf;
 
+    use codex_config::HookConditions;
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookSource;
     use codex_utils_absolute_path::test_support::PathBufExt;
@@ -251,10 +261,14 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use crate::engine::ConfiguredHandler;
-    use codex_config::HookConditions;
+    use crate::engine::command_runner::CommandRunResult;
+    use crate::output_spill::AdditionalContext;
+    use crate::output_spill::AdditionalContextLimit;
 
+    use super::AfterCompactionHandlerData;
     use super::AfterCompactionRequest;
     use super::AfterCompactionSource;
+    use super::parse_completed;
     use super::preview;
 
     fn handler(matcher: Option<&str>) -> ConfiguredHandler {
@@ -265,6 +279,7 @@ mod tests {
             command: "echo ok".to_string(),
             timeout_sec: 5,
             status_message: None,
+            additional_context_limit: Default::default(),
             source_path: test_path_buf("/tmp/hooks.json").abs(),
             source: HookSource::User,
             display_order: 0,
@@ -292,5 +307,34 @@ mod tests {
         let runs = preview(&handlers, &request(AfterCompactionSource::Auto));
 
         assert_eq!(runs.len(), 1);
+    }
+
+    #[test]
+    fn parsed_context_keeps_the_handlers_spill_limit() {
+        let mut handler = handler(/*matcher*/ None);
+        handler.additional_context_limit = AdditionalContextLimit::from_config(Some(17));
+        let parsed = parse_completed(
+            &handler,
+            CommandRunResult {
+                started_at: 1,
+                completed_at: 2,
+                duration_ms: 1,
+                exit_code: Some(0),
+                stdout: "compaction context".to_string(),
+                stderr: String::new(),
+                error: None,
+            },
+            /*turn_id*/ None,
+        );
+
+        assert_eq!(
+            parsed.data,
+            AfterCompactionHandlerData {
+                additional_contexts_for_model: vec![AdditionalContext {
+                    text: "compaction context".to_string(),
+                    limit: AdditionalContextLimit::from_config(Some(17)),
+                }],
+            }
+        );
     }
 }

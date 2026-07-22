@@ -69,7 +69,7 @@ async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
 }
 
 #[tokio::test]
-async fn interrupted_v2_agent_is_lost_after_residency_eviction() {
+async fn interrupted_v2_agent_reloads_after_residency_eviction() {
     let mut config = test_config().await;
     let _ = config.features.enable(Feature::MultiAgentV2);
     config.multi_agent_v2.max_concurrent_threads_per_session = 2;
@@ -112,22 +112,18 @@ async fn interrupted_v2_agent_is_lost_after_residency_eviction() {
     second_slot.commit(second.thread_id);
     mark_thread_completed(second.thread.as_ref()).await;
 
-    let err = control
+    control
         .ensure_v2_agent_loaded(config, first.thread_id)
         .await
-        .expect_err("evicted interrupted agent should stay lost");
-    match err {
-        CodexErr::ThreadNotFound(thread_id) => assert_eq!(thread_id, first.thread_id),
-        err => panic!("expected ThreadNotFound, got {err:?}"),
-    }
+        .expect("evicted interrupted agent should reload from its persisted rollout");
 
     assert!(manager.get_thread(root.thread_id).await.is_ok());
-    assert!(manager.get_thread(second.thread_id).await.is_ok());
-    match manager.get_thread(first.thread_id).await {
-        Err(CodexErr::ThreadNotFound(thread_id)) => assert_eq!(thread_id, first.thread_id),
-        Err(err) => panic!("expected evicted thread to be missing, got {err:?}"),
-        Ok(_) => panic!("expected evicted thread to be missing"),
+    match manager.get_thread(second.thread_id).await {
+        Err(CodexErr::ThreadNotFound(thread_id)) => assert_eq!(thread_id, second.thread_id),
+        Err(err) => panic!("expected completed thread to be evicted during reload, got {err:?}"),
+        Ok(_) => panic!("expected completed thread to be evicted during reload"),
     }
+    assert!(manager.get_thread(first.thread_id).await.is_ok());
 }
 
 #[tokio::test]
@@ -237,6 +233,7 @@ async fn spawn_v2_subagent(
             config,
             control.clone(),
             SessionSource::SubAgent(SubAgentSource::Other(label.to_string())),
+            /*history_mode*/ None,
             Some(parent_thread_id),
             /*forked_from_thread_id*/ None,
             Some(ThreadSource::Subagent),
@@ -257,15 +254,16 @@ fn text_input(text: &str) -> Vec<UserInput> {
 }
 
 async fn mark_thread_completed(thread: &CodexThread) {
-    let turn = thread.codex.session.new_default_turn().await;
+    let turn = thread.session.new_default_turn().await;
     thread
-        .codex
         .session
         .send_event(
             turn.as_ref(),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: turn.sub_id.clone(),
+                started_at: None,
                 last_agent_message: Some("done".to_string()),
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -276,14 +274,14 @@ async fn mark_thread_completed(thread: &CodexThread) {
 }
 
 async fn mark_thread_interrupted(thread: &CodexThread) {
-    let turn = thread.codex.session.new_default_turn().await;
+    let turn = thread.session.new_default_turn().await;
     thread
-        .codex
         .session
         .send_event(
             turn.as_ref(),
             EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: Some(turn.sub_id.clone()),
+                started_at: None,
                 reason: TurnAbortReason::Interrupted,
                 completed_at: None,
                 duration_ms: None,
@@ -295,5 +293,5 @@ async fn mark_thread_interrupted(thread: &CodexThread) {
 
 async fn clear_active_turn(thread: &CodexThread) {
     // The fixture has no task runner to clear the turn after the terminal event.
-    *thread.codex.session.active_turn.lock().await = None;
+    *thread.session.active_turn.lock().await = None;
 }

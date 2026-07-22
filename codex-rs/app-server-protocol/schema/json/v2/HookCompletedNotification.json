@@ -14,6 +14,7 @@
         "postCompact",
         "sessionStart",
         "afterCompaction",
+        "sessionEnd",
         "userPromptSubmit",
         "subagentStart",
         "subagentStop",

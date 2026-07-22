@@ -398,6 +398,43 @@ pub(crate) async fn run_turn_stop_hooks(
     outcome
 }
 
+#[instrument(level = "trace", skip_all)]
+pub(crate) async fn run_session_end_hooks(sess: &Arc<Session>, session_source: &SessionSource) {
+    // SessionEnd is root-only; ThreadSpawn uses SubagentStart/SubagentStop and other subagents
+    // are internal implementation details.
+    if matches!(session_source, SessionSource::SubAgent(_)) {
+        return;
+    }
+
+    let hooks = sess.hooks();
+    if !hooks.has_session_end_hooks() {
+        return;
+    }
+
+    let turn_context = sess.new_default_turn().await;
+
+    let request = codex_hooks::SessionEndRequest {
+        session_id: sess.session_id().into(),
+        turn_id: turn_context.sub_id.clone(),
+        cwd: hook_cwd(&turn_context),
+        transcript_path: sess.hook_transcript_path().await,
+        active_profile: hook_active_profile(&turn_context),
+        model: turn_context.model_info.slug.clone(),
+        permission_mode: hook_permission_mode(&turn_context),
+    };
+    let preview_runs = hooks.preview_session_end(&request);
+    if preview_runs.is_empty() {
+        return;
+    }
+    if let Err(err) = sess.flush_rollout().await {
+        tracing::warn!("failed to flush transcript before SessionEnd hook: {err}");
+    }
+    emit_hook_started_events(sess, &turn_context, preview_runs).await;
+
+    let outcome = hooks.run_session_end(request).await;
+    emit_hook_completed_events(sess, &turn_context, outcome.hook_events).await;
+}
+
 pub(crate) async fn run_pre_compact_hooks(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
@@ -768,6 +805,7 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str); 
         HookEventName::PostCompact => "PostCompact",
         HookEventName::SessionStart => "SessionStart",
         HookEventName::AfterCompaction => "AfterCompaction",
+        HookEventName::SessionEnd => "SessionEnd",
         HookEventName::UserPromptSubmit => "UserPromptSubmit",
         HookEventName::SubagentStart => "SubagentStart",
         HookEventName::SubagentStop => "SubagentStop",
@@ -885,7 +923,9 @@ mod tests {
                             .iter()
                             .map(|item| match item {
                                 ContentItem::InputText { text } => text.as_str(),
-                                ContentItem::InputImage { .. } | ContentItem::OutputText { .. } => {
+                                ContentItem::InputImage { .. }
+                                | ContentItem::InputAudio { .. }
+                                | ContentItem::OutputText { .. } => {
                                     panic!("expected input text content, got {item:?}")
                                 }
                             })
@@ -905,19 +945,26 @@ mod tests {
     #[tokio::test]
     async fn hook_cwd_uses_primary_turn_environment() {
         let (_session, mut turn_context) = make_session_and_context().await;
-        let turn_environment = &turn_context.environments.turn_environments[0];
+        let turn_environment = turn_context
+            .environments
+            .primary()
+            .expect("turn context should have a primary environment")
+            .clone();
         let expected_cwd = turn_environment
             .cwd()
             .to_abs_path()
             .expect("primary environment cwd should be local absolute path")
             .join("selected-env");
         let expected_cwd_uri = PathUri::from_abs_path(&expected_cwd);
-        turn_context.environments.turn_environments[0] =
-            crate::session::turn_context::TurnEnvironment::new(
-                turn_environment.environment_id.clone(),
-                turn_environment.environment.clone(),
-                expected_cwd_uri,
-                turn_environment.shell.clone(),
+        turn_context.environments.environments[0] =
+            crate::environment_selection::TurnEnvironmentState::Ready(
+                crate::session::turn_context::TurnEnvironment::new(
+                    turn_environment.environment_id.clone(),
+                    turn_environment.environment.clone(),
+                    expected_cwd_uri,
+                    turn_environment.workspace_roots().to_vec(),
+                    turn_environment.shell.clone(),
+                ),
             );
 
         assert_eq!(hook_cwd(&turn_context), expected_cwd);
@@ -926,7 +973,7 @@ mod tests {
     #[tokio::test]
     async fn hook_cwd_falls_back_when_turn_environments_are_empty() {
         let (_session, mut turn_context) = make_session_and_context().await;
-        turn_context.environments.turn_environments.clear();
+        turn_context.environments.environments.clear();
         #[allow(deprecated)]
         let expected_cwd = turn_context.cwd.clone();
 

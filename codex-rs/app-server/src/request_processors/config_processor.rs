@@ -411,6 +411,7 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         post_compact,
         session_start,
         after_compaction,
+        session_end,
         user_prompt_submit,
         subagent_start,
         subagent_stop,
@@ -427,6 +428,7 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         post_compact: map_hook_matcher_groups_to_api(post_compact),
         session_start: map_hook_matcher_groups_to_api(session_start),
         after_compaction: map_hook_matcher_groups_to_api(after_compaction),
+        session_end: map_hook_matcher_groups_to_api(session_end),
         user_prompt_submit: map_hook_matcher_groups_to_api(user_prompt_submit),
         subagent_start: map_hook_matcher_groups_to_api(subagent_start),
         subagent_stop: map_hook_matcher_groups_to_api(subagent_stop),
@@ -474,12 +476,14 @@ fn map_hook_handler_to_api(handler: CoreHookHandlerConfig) -> ConfiguredHookHand
             timeout_sec,
             r#async,
             status_message,
+            additional_context_limit,
         } => ConfiguredHookHandler::Command {
             command,
             command_windows,
             timeout_sec,
             r#async,
             status_message,
+            additional_context_limit,
         },
         CoreHookHandlerConfig::Prompt {} => ConfiguredHookHandler::Prompt {},
         CoreHookHandlerConfig::Agent {} => ConfiguredHookHandler::Agent {},
@@ -571,7 +575,7 @@ fn map_network_unix_socket_permission_to_api(
     }
 }
 
-fn map_error(err: ConfigManagerError) -> JSONRPCErrorError {
+pub(super) fn map_error(err: ConfigManagerError) -> JSONRPCErrorError {
     if let Some(code) = err.write_error_code() {
         return config_write_error(code, err.to_string());
     }

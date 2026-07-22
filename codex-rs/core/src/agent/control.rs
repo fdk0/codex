@@ -30,6 +30,7 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -38,9 +39,11 @@ use codex_protocol::protocol::ResumedHistory;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
+use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::ReadThreadParams;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -58,7 +61,6 @@ use self::residency::V2Residency;
 
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
 pub(crate) const FORKED_SPAWN_AGENT_OUTPUT_MESSAGE: &str = "You are the newly spawned agent. The prior conversation history was forked from your parent agent. Treat the next user message as your new task, and use the forked history only as background context.";
-
 mod execution;
 mod legacy;
 mod residency;
@@ -553,6 +555,33 @@ impl AgentControl {
         Ok(agents)
     }
 
+    fn prepare_agent_metadata(
+        &self,
+        reservation: &mut crate::agent::registry::SpawnReservation,
+        config: &Config,
+        parent_thread_id: Option<ThreadId>,
+        agent_path: Option<AgentPath>,
+        agent_role: Option<String>,
+        preferred_agent_nickname: Option<String>,
+    ) -> CodexResult<AgentMetadata> {
+        if let Some(agent_path) = agent_path.as_ref() {
+            reservation.reserve_agent_path(agent_path)?;
+        }
+        let candidate_names = spawn::agent_nickname_candidates(config, agent_role.as_deref());
+        let candidate_name_refs: Vec<&str> = candidate_names.iter().map(String::as_str).collect();
+        let agent_nickname = Some(reservation.reserve_agent_nickname_with_preference(
+            &candidate_name_refs,
+            preferred_agent_nickname.as_deref(),
+        )?);
+        Ok(AgentMetadata {
+            agent_id: None,
+            parent_thread_id,
+            agent_path,
+            agent_nickname,
+            agent_role,
+            last_task_message: None,
+        })
+    }
     #[allow(clippy::too_many_arguments)]
     fn prepare_thread_spawn(
         &self,
@@ -567,30 +596,21 @@ impl AgentControl {
         if depth == 1 {
             self.state.register_root_thread(parent_thread_id);
         }
-        if let Some(agent_path) = agent_path.as_ref() {
-            reservation.reserve_agent_path(agent_path)?;
-        }
-        let candidate_names = spawn::agent_nickname_candidates(config, agent_role.as_deref());
-        let candidate_name_refs: Vec<&str> = candidate_names.iter().map(String::as_str).collect();
-        let agent_nickname = Some(reservation.reserve_agent_nickname_with_preference(
-            &candidate_name_refs,
-            preferred_agent_nickname.as_deref(),
-        )?);
+        let agent_metadata = self.prepare_agent_metadata(
+            reservation,
+            config,
+            Some(parent_thread_id),
+            agent_path,
+            agent_role,
+            preferred_agent_nickname,
+        )?;
         let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             depth,
-            agent_path: agent_path.clone(),
-            agent_nickname: agent_nickname.clone(),
-            agent_role: agent_role.clone(),
+            agent_path: agent_metadata.agent_path.clone(),
+            agent_nickname: agent_metadata.agent_nickname.clone(),
+            agent_role: agent_metadata.agent_role.clone(),
         });
-        let agent_metadata = AgentMetadata {
-            agent_id: None,
-            parent_thread_id: Some(parent_thread_id),
-            agent_path,
-            agent_nickname,
-            agent_role,
-            last_task_message: None,
-        };
         Ok((session_source, agent_metadata))
     }
 
@@ -615,7 +635,6 @@ impl AgentControl {
         let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
         Some(
             parent_thread
-                .codex
                 .session
                 .services
                 .turn_environments
@@ -638,14 +657,12 @@ impl AgentControl {
         };
 
         let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
-        let parent_config = parent_thread.codex.session.get_config().await;
+        let parent_config = parent_thread.session.get_config().await;
         if !crate::exec_policy::child_uses_parent_exec_policy(&parent_config, child_config) {
             return None;
         }
 
-        Some(Arc::clone(
-            &parent_thread.codex.session.services.exec_policy,
-        ))
+        Some(Arc::clone(&parent_thread.session.services.exec_policy))
     }
 
     async fn open_thread_spawn_children(
@@ -926,7 +943,7 @@ fn agent_matches_prefix(agent_path: Option<&AgentPath>, prefix: &AgentPath) -> b
 }
 
 async fn last_task_message_for_thread(thread: &crate::CodexThread) -> Option<String> {
-    let history = thread.codex.session.clone_history().await;
+    let history = thread.session.clone_history().await;
     history
         .raw_items()
         .iter()
@@ -965,6 +982,10 @@ fn render_user_inputs(items: &[UserInput]) -> String {
             UserInput::Text { text, .. } => text.clone(),
             UserInput::Image { .. } => "[image]".to_string(),
             UserInput::LocalImage { path, .. } => format!("[local_image:{}]", path.display()),
+            UserInput::Audio { .. } => "[audio]".to_string(),
+            UserInput::LocalAudio { path } => {
+                format!("[local_audio:{}]", path.display())
+            }
             UserInput::Skill { name, path, .. } => format!("[skill:${name}]({})", path.display()),
             UserInput::Mention { name, path, .. } => format!("[mention:${name}]({path})"),
             _ => "[input]".to_string(),
@@ -987,7 +1008,6 @@ fn last_task_message_from_communication(communication: &InterAgentCommunication)
 fn non_empty_task_message(message: String) -> Option<String> {
     (!message.is_empty()).then_some(message)
 }
-
 fn thread_spawn_depth(session_source: &SessionSource) -> Option<i32> {
     match session_source {
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { depth, .. }) => Some(*depth),

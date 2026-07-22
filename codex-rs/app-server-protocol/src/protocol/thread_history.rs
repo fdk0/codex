@@ -275,6 +275,14 @@ impl ThreadHistoryBuilder {
             .or_else(|| self.turns.last().cloned())
     }
 
+    /// Returns the id of the active turn without materializing its items.
+    pub fn active_turn_id(&self) -> Option<&str> {
+        self.current_turn
+            .as_ref()
+            .map(|turn| turn.id.as_str())
+            .or_else(|| self.turns.last().map(|turn| turn.id.as_str()))
+    }
+
     pub fn turn_snapshot(&self, turn_id: &str) -> Option<Turn> {
         self.current_turn
             .as_ref()
@@ -600,8 +608,7 @@ impl ThreadHistoryBuilder {
         );
         let should_upsert = match item {
             codex_protocol::items::TurnItem::Plan(plan) => !plan.text.is_empty(),
-            codex_protocol::items::TurnItem::Sleep(_)
-            | codex_protocol::items::TurnItem::HookPrompt(_)
+            codex_protocol::items::TurnItem::HookPrompt(_)
             | codex_protocol::items::TurnItem::CommandExecution(_)
             | codex_protocol::items::TurnItem::DynamicToolCall(_)
             | codex_protocol::items::TurnItem::CollabAgentToolCall(_)
@@ -635,6 +642,7 @@ impl ThreadHistoryBuilder {
             id: payload.call_id.clone(),
             query: String::new(),
             action: None,
+            results: None,
         });
         self.upsert_item_in_current_turn(item);
     }
@@ -644,6 +652,7 @@ impl ThreadHistoryBuilder {
             id: payload.call_id.clone(),
             query: payload.query.clone(),
             action: Some(web_search_action_from_core(payload.action.clone())),
+            results: payload.results.clone(),
         });
         self.upsert_item_in_current_turn(item);
     }
@@ -773,7 +782,6 @@ impl ThreadHistoryBuilder {
                     link_id: payload.link_id.clone(),
                     resource_uri: payload.mcp_app_resource_uri.clone(),
                     app_name: payload.app_name.clone(),
-                    template_id: payload.template_id.clone(),
                     action_name: payload.action_name.clone(),
                 }),
             mcp_app_resource_uri: payload.mcp_app_resource_uri.clone(),
@@ -826,7 +834,6 @@ impl ThreadHistoryBuilder {
                     link_id: payload.link_id.clone(),
                     resource_uri: payload.mcp_app_resource_uri.clone(),
                     app_name: payload.app_name.clone(),
-                    template_id: payload.template_id.clone(),
                     action_name: payload.action_name.clone(),
                 }),
             mcp_app_resource_uri: payload.mcp_app_resource_uri.clone(),
@@ -1536,6 +1543,16 @@ impl ThreadHistoryBuilder {
                 detail: payload.local_image_details.get(idx).copied().flatten(),
             });
         }
+        if let Some(audio) = &payload.audio {
+            content.extend(audio.iter().cloned().map(|url| UserInput::Audio { url }));
+        }
+        content.extend(
+            payload
+                .local_audio
+                .iter()
+                .cloned()
+                .map(|path| UserInput::LocalAudio { path }),
+        );
         content
     }
 }
@@ -1553,6 +1570,9 @@ fn convert_dynamic_tool_content_items(
             codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputImage {
                 image_url,
             } => DynamicToolCallOutputContentItem::InputImage { image_url },
+            codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputAudio {
+                audio_url,
+            } => DynamicToolCallOutputContentItem::InputAudio { audio_url },
         })
         .collect()
 }
@@ -1640,6 +1660,7 @@ mod tests {
     use super::*;
     use crate::protocol::v2::CommandExecutionSource;
     use codex_extension_items::ExtensionItem as CoreExtensionItem;
+    use codex_extension_items::sleep::SleepItem as CoreSleepItem;
     use codex_protocol::ThreadId;
     use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem as CoreDynamicToolCallOutputContentItem;
     use codex_protocol::items::CommandExecutionItem as CoreCommandExecutionItem;
@@ -1647,7 +1668,6 @@ mod tests {
     use codex_protocol::items::EnteredReviewModeItem as CoreEnteredReviewModeItem;
     use codex_protocol::items::ExitedReviewModeItem as CoreExitedReviewModeItem;
     use codex_protocol::items::HookPromptFragment as CoreHookPromptFragment;
-    use codex_protocol::items::SleepItem as CoreSleepItem;
     use codex_protocol::items::TurnItem as CoreTurnItem;
     use codex_protocol::items::UserMessageItem as CoreUserMessageItem;
     use codex_protocol::items::build_hook_prompt_message;
@@ -1824,7 +1844,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-1".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -1882,7 +1904,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-1".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -1912,16 +1936,19 @@ mod tests {
     }
 
     #[test]
-    fn rebuilds_user_message_image_details_from_legacy_events() {
-        let local_path = PathBuf::from("/tmp/local.png");
+    fn rebuilds_user_message_attachments_from_legacy_events() {
+        let local_image_path = PathBuf::from("/tmp/local.png");
+        let local_audio_path = PathBuf::from("/tmp/local.wav");
         let events = vec![RolloutItem::EventMsg(EventMsg::UserMessage(
             UserMessageEvent {
                 client_id: None,
                 message: "inspect these".into(),
                 images: Some(vec!["https://example.com/image.png".into()]),
                 image_details: vec![Some(ImageDetail::Original)],
-                local_images: vec![local_path.clone()],
+                local_images: vec![local_image_path.clone()],
                 local_image_details: vec![Some(ImageDetail::Original)],
+                audio: Some(vec!["https://example.com/audio.mp3".into()]),
+                local_audio: vec![local_audio_path.clone()],
                 text_elements: Vec::new(),
             },
         ))];
@@ -1944,8 +1971,14 @@ mod tests {
                         detail: Some(ImageDetail::Original),
                     },
                     UserInput::LocalImage {
-                        path: local_path,
+                        path: local_image_path,
                         detail: Some(ImageDetail::Original),
+                    },
+                    UserInput::Audio {
+                        url: "https://example.com/audio.mp3".into(),
+                    },
+                    UserInput::LocalAudio {
+                        path: local_audio_path,
                     },
                 ],
             }
@@ -1984,7 +2017,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: turn_id.to_string(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -2015,10 +2050,10 @@ mod tests {
     fn rebuilds_sleep_item_from_persisted_completion() {
         let turn_id = "turn-1";
         let thread_id = ThreadId::new();
-        let sleep_item = CoreTurnItem::Sleep(CoreSleepItem {
+        let sleep_item = CoreTurnItem::Extension(CoreExtensionItem::Sleep(CoreSleepItem {
             id: "sleep-1".to_string(),
             duration_ms: 1_000,
-        });
+        }));
         let events = vec![
             EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: turn_id.to_string(),
@@ -2035,7 +2070,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: turn_id.to_string(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -2051,10 +2088,10 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(
             turns[0].items,
-            vec![ThreadItem::Sleep {
+            vec![ThreadItem::Sleep(CoreSleepItem {
                 id: "sleep-1".to_string(),
                 duration_ms: 1_000,
-            }]
+            })]
         );
     }
 
@@ -2087,7 +2124,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: turn_id.to_string(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -2150,7 +2189,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: turn_id.to_string(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -2218,7 +2259,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: turn_id.to_string(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -2296,7 +2339,9 @@ mod tests {
             })),
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-image".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -2408,6 +2453,7 @@ mod tests {
             }),
             EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: Some("turn-1".into()),
+                started_at: None,
                 reason: TurnAbortReason::Replaced,
                 completed_at: None,
                 duration_ms: None,
@@ -2497,6 +2543,7 @@ mod tests {
         builder.handle_event(&EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: Some("turn-1".into()),
             reason: TurnAbortReason::Interrupted,
+            started_at: None,
             completed_at: None,
             duration_ms: None,
         }));
@@ -2668,7 +2715,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -2730,6 +2779,11 @@ mod tests {
                     query: Some("codex".into()),
                     queries: None,
                 },
+                results: Some(vec![serde_json::json!({
+                    "type": "text_result",
+                    "ref_id": "turn0search0",
+                    "url": "https://example.com/codex",
+                })]),
             }),
             EventMsg::ExecCommandEnd(ExecCommandEndEvent {
                 call_id: "exec-1".into(),
@@ -2762,7 +2816,6 @@ mod tests {
                 mcp_app_resource_uri: None,
                 link_id: None,
                 app_name: None,
-                template_id: None,
                 action_name: None,
                 plugin_id: None,
                 duration: Duration::from_millis(8),
@@ -2786,6 +2839,11 @@ mod tests {
                     query: Some("codex".into()),
                     queries: None,
                 }),
+                results: Some(vec![serde_json::json!({
+                    "type": "text_result",
+                    "ref_id": "turn0search0",
+                    "url": "https://example.com/codex",
+                })]),
             })
         );
         assert_eq!(
@@ -2846,7 +2904,6 @@ mod tests {
                 mcp_app_resource_uri: Some("ui://widget/lookup.html".into()),
                 link_id: Some("link_calendar".into()),
                 app_name: Some("Calendar".into()),
-                template_id: Some("calendar_template".into()),
                 action_name: Some("lookup".into()),
                 plugin_id: Some("sample@test".into()),
                 duration: Duration::from_millis(8),
@@ -2883,7 +2940,6 @@ mod tests {
                     link_id: Some("link_calendar".into()),
                     resource_uri: Some("ui://widget/lookup.html".into()),
                     app_name: Some("Calendar".into()),
-                    template_id: Some("calendar_template".into()),
                     action_name: Some("lookup".into()),
                 }),
                 mcp_app_resource_uri: Some("ui://widget/lookup.html".into()),
@@ -2939,9 +2995,17 @@ mod tests {
                 namespace: Some("codex_app".into()),
                 tool: "lookup_ticket".into(),
                 arguments: serde_json::json!({"id":"ABC-123"}),
-                content_items: vec![CoreDynamicToolCallOutputContentItem::InputText {
-                    text: "Ticket is open".into(),
-                }],
+                content_items: vec![
+                    CoreDynamicToolCallOutputContentItem::InputText {
+                        text: "Ticket is open".into(),
+                    },
+                    CoreDynamicToolCallOutputContentItem::InputImage {
+                        image_url: "data:image/png;base64,AAA".into(),
+                    },
+                    CoreDynamicToolCallOutputContentItem::InputAudio {
+                        audio_url: "data:audio/wav;base64,YXVkaW8=".into(),
+                    },
+                ],
                 success: true,
                 error: None,
                 duration: Duration::from_millis(42),
@@ -2963,9 +3027,17 @@ mod tests {
                 tool: "lookup_ticket".into(),
                 arguments: serde_json::json!({"id":"ABC-123"}),
                 status: DynamicToolCallStatus::Completed,
-                content_items: Some(vec![DynamicToolCallOutputContentItem::InputText {
-                    text: "Ticket is open".into(),
-                }]),
+                content_items: Some(vec![
+                    DynamicToolCallOutputContentItem::InputText {
+                        text: "Ticket is open".into(),
+                    },
+                    DynamicToolCallOutputContentItem::InputImage {
+                        image_url: "data:image/png;base64,AAA".into(),
+                    },
+                    DynamicToolCallOutputContentItem::InputAudio {
+                        audio_url: "data:audio/wav;base64,YXVkaW8=".into(),
+                    },
+                ]),
                 success: Some(true),
                 duration_ms: Some(42),
             }
@@ -3236,7 +3308,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -3278,7 +3352,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-b".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -3334,7 +3410,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -3376,7 +3454,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-b".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -3564,7 +3644,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -3586,7 +3668,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -3598,7 +3682,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-b".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -3636,7 +3722,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -3658,6 +3746,7 @@ mod tests {
             }),
             EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: Some("turn-a".into()),
+                started_at: None,
                 reason: TurnAbortReason::Replaced,
                 completed_at: None,
                 duration_ms: None,
@@ -3701,7 +3790,9 @@ mod tests {
             }),
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-compact".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -4019,7 +4110,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -4084,7 +4177,9 @@ mod tests {
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -4139,7 +4234,9 @@ mod tests {
             RolloutItem::ResponseItem(hook_prompt),
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -4203,6 +4300,8 @@ mod tests {
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                error: None,
+                started_at: Some(1),
                 completed_at: Some(2),
                 duration_ms: Some(1),
                 time_to_first_token_ms: None,
@@ -4267,7 +4366,9 @@ mod tests {
             }),
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -4337,6 +4438,7 @@ mod tests {
                     query: Some("codex".into()),
                     queries: None,
                 },
+                results: None,
             }),
         ));
         assert_eq!(
@@ -4351,6 +4453,7 @@ mod tests {
                             query: Some("codex".into()),
                             queries: None,
                         }),
+                        results: None,
                     }),
                 }],
                 changed_turns: Vec::new(),
@@ -4432,7 +4535,9 @@ mod tests {
         let complete_changes = builder.handle_rollout_item_with_changes(&RolloutItem::EventMsg(
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: Some(20),
                 duration_ms: Some(123),
                 time_to_first_token_ms: None,
@@ -4470,6 +4575,7 @@ mod tests {
                     query: Some("codex".into()),
                     queries: None,
                 },
+                results: None,
             })),
         ]);
         assert_eq!(
@@ -4484,6 +4590,7 @@ mod tests {
                             query: Some("codex".into()),
                             queries: None,
                         }),
+                        results: None,
                     }),
                 }],
                 changed_turns: vec![ThreadHistoryTurnChange {
@@ -4512,7 +4619,9 @@ mod tests {
             })),
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
+                started_at: None,
                 last_agent_message: None,
+                error: None,
                 completed_at: Some(20),
                 duration_ms: Some(123),
                 time_to_first_token_ms: None,
